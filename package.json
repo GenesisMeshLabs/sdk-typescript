@@ -1,8 +1,28 @@
 {
   "name": "@genesismesh/sdk",
   "version": "0.53.0",
-  "description": "Genesis Mesh TypeScript SDK — typed client for the Network Authority HTTP API",
+  "description": "TypeScript client for the Genesis Mesh Network Authority API — sovereign trust, attestation, and capability enforcement",
   "type": "module",
+  "license": "MIT",
+  "author": "Genesis Mesh Labs",
+  "homepage": "https://github.com/GenesisMeshLabs/sdk-typescript#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GenesisMeshLabs/sdk-typescript.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GenesisMeshLabs/sdk-typescript/issues"
+  },
+  "keywords": [
+    "genesis-mesh",
+    "trust",
+    "attestation",
+    "sovereign",
+    "network-authority",
+    "ed25519",
+    "zero-trust",
+    "capability"
+  ],
   "engines": { "node": ">=20.0.0" },
   "exports": {
     ".": {
