@@ -1,4 +1,4 @@
-# Contributing to @genesismesh/sdk
+﻿# Contributing to @genesismeshlabs/sdk
 
 Thank you for your interest in contributing. This document covers how to set up
 the development environment, run tests, and submit changes.

@@ -1,4 +1,4 @@
-# Security Policy
+﻿# Security Policy
 
 ## Supported versions
 
@@ -9,7 +9,7 @@
 
 ## Scope
 
-This policy covers the `@genesismesh/sdk` TypeScript package. It does **not**
+This policy covers the `@genesismeshlabs/sdk` TypeScript package. It does **not**
 cover the Genesis Mesh Network Authority server or the Genesis Mesh protocol
 itself — those are tracked in the
 [main repository](https://github.com/GenesisMeshLabs/genesismesh/blob/main/SECURITY.md).
