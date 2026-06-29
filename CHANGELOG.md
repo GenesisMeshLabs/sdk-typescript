@@ -1,6 +1,6 @@
 ﻿# Changelog
 
-All notable changes to `@genesismeshlabs/sdk` are documented here.
+All notable changes to `genesis-mesh-sdk` are documented here.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions align with the [Genesis Mesh release sequence](https://github.com/GenesisMeshLabs/genesismesh/blob/main/CHANGELOG.md).

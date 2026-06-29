@@ -1,4 +1,4 @@
-﻿# @genesismeshlabs/sdk
+﻿# genesis-mesh-sdk
 
 TypeScript SDK for the Genesis Mesh Network Authority HTTP API.
 
@@ -7,13 +7,13 @@ TypeScript SDK for the Genesis Mesh Network Authority HTTP API.
 ## Install
 
 ```bash
-npm install @genesismeshlabs/sdk
+npm install genesis-mesh-sdk
 ```
 
 ## Quick start
 
 ```typescript
-import { GenesisMeshClient } from '@genesismeshlabs/sdk';
+import { GenesisMeshClient } from 'genesis-mesh-sdk';
 import { readFileSync } from 'node:fs';
 
 // Load operator key seed (32 bytes, base64-encoded, from operator.key file)
@@ -212,7 +212,7 @@ For NA routes not yet covered by a sub-client (e.g. `/admin/recognition-treaties
 use `buildAdminHeaders` directly:
 
 ```typescript
-import { buildAdminHeaders } from '@genesismeshlabs/sdk';
+import { buildAdminHeaders } from 'genesis-mesh-sdk';
 
 const body = {
   subject_sovereign_id: 'BETA-NA',
@@ -238,7 +238,7 @@ import {
   ValidationError,
   NotFoundError,
   NetworkError,
-} from '@genesismeshlabs/sdk';
+} from 'genesis-mesh-sdk';
 
 try {
   await client.agreement.offer({ ... });
