@@ -1,0 +1,9 @@
+# Global owner — all files require review from a maintainer
+* @GenesisMeshLabs/maintainers
+
+# Auth and crypto layer — extra scrutiny
+src/auth.ts @GenesisMeshLabs/maintainers
+
+# Public API surface
+src/index.ts @GenesisMeshLabs/maintainers
+src/types.ts @GenesisMeshLabs/maintainers
