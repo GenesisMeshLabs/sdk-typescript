@@ -13,7 +13,6 @@ module.exports = {
           isolatedModules: true,
           module: 'NodeNext',
           moduleResolution: 'NodeNext',
-          // rootDir intentionally omitted — tests live outside src/
           strict: true,
           esModuleInterop: true,
           skipLibCheck: true,

@@ -1,4 +1,4 @@
-﻿# AGENT.md — genesis-mesh-sdk (TypeScript)
+# AGENT.md — genesis-mesh-sdk (TypeScript)
 
 Guidance for AI coding agents and human contributors working inside the
 Genesis Mesh TypeScript SDK.

@@ -1,4 +1,4 @@
-﻿# genesis-mesh-sdk
+# genesis-mesh-sdk
 
 TypeScript SDK for the Genesis Mesh Network Authority HTTP API.
 
