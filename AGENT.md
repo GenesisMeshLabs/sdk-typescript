@@ -210,8 +210,12 @@ with an inherited `declarationDir`. Do not add `extends` to `tsconfig.cjs.json`.
 
 ## Release process
 
-This SDK follows the same release process as the main Python repo. Every
-version shipped must:
+This SDK follows the same release process as the main Python repo. Starting
+with v0.56.0, the core and all official SDKs use one coordinated
+version. `VERSION`, `package.json`, `package-lock.json`, and the release tag
+must match. Run `npm run check:version` before building or publishing.
+
+Every version shipped must:
 
 1. Pass `npm run build` and `npm test`.
 2. Have a CHANGELOG entry in the main repo's `CHANGELOG.md`.
