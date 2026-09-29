@@ -1,6 +1,6 @@
 {
   "name": "genesis-mesh-sdk",
-  "version": "0.58.0",
+  "version": "0.58.1",
   "description": "TypeScript client for the Genesis Mesh Network Authority API — sovereign trust, attestation, and capability enforcement",
   "type": "module",
   "license": "MIT",
