@@ -1,6 +1,6 @@
 {
   "name": "genesis-mesh-sdk",
-  "version": "0.56.0",
+  "version": "0.58.0",
   "description": "TypeScript client for the Genesis Mesh Network Authority API — sovereign trust, attestation, and capability enforcement",
   "type": "module",
   "license": "MIT",
@@ -23,7 +23,9 @@
     "zero-trust",
     "capability"
   ],
-  "engines": { "node": ">=22.0.0" },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "exports": {
     ".": {
       "import": "./dist/esm/index.js",
@@ -34,7 +36,12 @@
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
   "types": "./dist/types/index.d.ts",
-  "files": ["dist", "README.md", "LICENSE", "CHANGELOG.md"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "scripts": {
     "check:version": "node scripts/check-version.mjs",
     "build": "npm run build:esm && npm run build:cjs",
