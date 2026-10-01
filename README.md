@@ -2,7 +2,7 @@
 
 TypeScript SDK for the Genesis Mesh Network Authority HTTP API.
 
-**Node.js ≥ 20 required. Zero runtime dependencies.**
+**Node.js ≥ 22 required. Zero runtime dependencies.**
 
 ## Install
 
@@ -29,6 +29,19 @@ const client = new GenesisMeshClient({
 });
 ```
 
+## Governed lifecycle SDK
+
+The SDK supports attestation-backed evaluation, boundary-policy management,
+execution recording, evidence-store queries and offline verification.
+
+- [Governed actions and reconciliation](docs/governance.md)
+- [Evidence store, policies, signers and retries](docs/evidence-store.md)
+- [Offline verification and integration tests](docs/offline-verification.md)
+
+`governedAction` requires verification keys and explicit expected policies. It
+verifies the signed response and its request context before calling the supplied
+action. Attestation-backed ALLOWs also require the expected attestation.
+
 ## Sub-clients
 
 ### agreement
@@ -38,7 +51,7 @@ const client = new GenesisMeshClient({
 > [Raw admin calls](#raw-admin-calls) below).
 
 ```typescript
-// Create a capability offer (admin — requires signing key)
+// Create a capability offer (admin - requires signing key)
 const offer = await client.agreement.offer({
   responder_sovereign_id: 'BETA-NA',
   capabilities: ['read:data', 'write:log'],
@@ -212,7 +225,7 @@ For NA routes not yet covered by a sub-client (e.g. `/admin/recognition-treaties
 use `buildAdminHeaders` directly:
 
 ```typescript
-import { buildAdminHeaders } from 'genesis-mesh-sdk';
+import { buildAdminHeaders, canonicalJson } from 'genesis-mesh-sdk';
 
 const body = {
   subject_sovereign_id: 'BETA-NA',
@@ -225,7 +238,7 @@ const headers = buildAdminHeaders(body, keyId, signingKeyBase64);
 const res = await fetch(`${baseUrl}/admin/recognition-treaties`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...headers },
-  body: JSON.stringify(body),
+  body: canonicalJson(body),
 });
 ```
 
@@ -268,7 +281,9 @@ The SDK handles all of this automatically when `signingKeyBase64` is provided.
 ```bash
 npm run build       # ESM → dist/esm/ and CJS → dist/cjs/
 npm run typecheck   # type-check without emitting
-npm test            # run 74 Jest tests
+npm test            # unit tests and Python-vector verification
+npm run test:package # validate ESM and CommonJS entry points after building
+npm run test:e2e    # disposable local Python NA (see verification guide)
 ```
 
 ## License

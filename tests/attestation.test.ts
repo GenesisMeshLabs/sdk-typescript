@@ -11,6 +11,7 @@ const ATTESTATION: MembershipAttestation = {
   subject_public_key: null,
   claims: { department: 'engineering' },
   issued_at: '2026-06-01T00:00:00Z',
+  valid_from: '2026-06-01T00:00:00Z',
   expires_at: '2027-06-01T00:00:00Z',
   issued_by: 'na-alpha',
   status: 'active',

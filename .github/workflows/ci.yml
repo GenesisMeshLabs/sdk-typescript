@@ -31,11 +31,41 @@ jobs:
       - name: Verify release version
         run: npm run check:version
 
+      - name: Typecheck source and tests
+        run: npm run typecheck
+
       - name: Build (ESM + CJS + types)
         run: npm run build
 
+      - name: Check package entry points
+        run: npm run test:package
+
       - name: Run tests
         run: npm test
+
+  sdk-e2e:
+    name: SDK against core main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: GenesisMeshLabs/genesismesh
+          ref: main
+          path: core
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: npm ci
+      - run: python -m pip install -e ./core
+      - name: Run SDK lifecycle interoperability tests
+        run: npm run test:e2e
+        env:
+          GM_E2E_PYTHON: python
 
   release-train:
     runs-on: ubuntu-latest
