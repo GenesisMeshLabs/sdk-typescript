@@ -139,6 +139,7 @@ These are non-obvious and not in the HTTP reference. Tests must cover them.
 | Agreement accept | Requires the NA to hold an active recognition treaty for the `responder_sovereign_id`. Issue it via `POST /admin/recognition-treaties` first. |
 | `DataSourceDescriptor` | `source_type` (`"personal"` \| `"proprietary"` \| `"public"` \| `"synthetic"`) and `owner_sovereign_id` are required. |
 | Ed25519 in Node.js ≥ 22 | Raw seed format not supported. Must use PKCS8 DER: prepend `302e020100300506032b657004220420` to the 32-byte seed, then `createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' })`. |
+| Failover (v0.60) | With `baseUrls`, only idempotent requests are replayed on another instance; a non-idempotent request moves only on a connection failure (`NetworkError.connectFailed`). Never relax this: a delivered evaluate, issue, publish or revoke must not run twice. |
 | ESM + Jest on Windows | Use `node --experimental-vm-modules node_modules/jest/bin/jest.js` (not the bash shebang wrapper). Import `jest` from `@jest/globals` in tests. |
 
 ---

@@ -15,8 +15,16 @@ export interface RetryOptions {
 }
 
 export interface ClientOptions {
-  /** Base URL of the NA, e.g. "http://127.0.0.1:9443". No trailing slash needed. */
-  baseUrl: string;
+  /** Base URL of the NA (or its load balancer), e.g. "http://127.0.0.1:9443". No trailing slash needed. */
+  baseUrl?: string;
+  /**
+   * Several NA instances sharing one database (v0.60 HA), used without a load
+   * balancer. Requests go to one instance; idempotent requests move to the next
+   * on a transport failure or 502/503/504. A non-idempotent request moves only
+   * when the connection was refused or unreachable (it never reached the NA);
+   * otherwise it is not replayed and the next request starts elsewhere.
+   */
+  baseUrls?: string[];
   /** Base64-encoded raw Ed25519 seed (32 bytes, from operator.key). Required for admin routes unless `signer` is set. */
   signingKeyBase64?: string;
   /** Key ID sent in X-Admin-Key-Id - must match a key registered with the NA. Ignored when `signer` is set. */
@@ -58,8 +66,25 @@ export function buildPath(path: string, query?: Query): string {
   return qs ? `${path}?${qs}` : path;
 }
 
+const FAILOVER_STATUS = new Set([502, 503, 504]);
+
+/** Errors meaning no connection was made, so the request was never sent. */
+const CONNECT_FAILURE_CODES = new Set([
+  'ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+function isConnectFailure(err: unknown): boolean {
+  const cause = (err as { cause?: { code?: unknown; errors?: { code?: unknown }[] } } | undefined)?.cause;
+  if (!cause) return false;
+  if (typeof cause.code === 'string' && CONNECT_FAILURE_CODES.has(cause.code)) return true;
+  return Array.isArray(cause.errors) && cause.errors.length > 0
+    && cause.errors.every(e => typeof e?.code === 'string' && CONNECT_FAILURE_CODES.has(e.code));
+}
+
 export class HttpTransport {
-  readonly baseUrl: string;
+  /** Every configured NA endpoint, in preference order. */
+  readonly baseUrls: readonly string[];
+  private active = 0;
   /** Key ID sent in X-Admin-Key-Id. */
   readonly keyId: string;
   private readonly signer?: Signer;
@@ -69,7 +94,14 @@ export class HttpTransport {
   private readonly _fetch: typeof globalThis.fetch;
 
   constructor(options: ClientOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/$/, '');
+    const urls = options.baseUrls ?? (options.baseUrl !== undefined ? [options.baseUrl] : []);
+    if (urls.length === 0 || urls.some(u => typeof u !== 'string' || !/^https?:\/\//.test(u))) {
+      throw new Error('baseUrl or baseUrls must give at least one http(s) URL');
+    }
+    if (options.baseUrl !== undefined && options.baseUrls !== undefined) {
+      throw new Error('pass either baseUrl or baseUrls, not both');
+    }
+    this.baseUrls = Object.freeze(urls.map(u => u.replace(/\/$/, '')));
     this.signer = options.signer
       ?? (options.signingKeyBase64
         ? seedSigner(options.signingKeyBase64, options.keyId ?? 'operator-local')
@@ -83,6 +115,16 @@ export class HttpTransport {
     }
     this.headers = options.headers ?? {};
     this._fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
+  }
+
+  /** The endpoint requests currently go to. */
+  get baseUrl(): string {
+    return this.baseUrls[this.active] as string;
+  }
+
+  /** Move to the next endpoint (no-op with one endpoint). */
+  private failover(): void {
+    if (this.baseUrls.length > 1) this.active = (this.active + 1) % this.baseUrls.length;
   }
 
   /** Signed admin POST. Not retried unless `idempotent` is set. */
@@ -116,28 +158,71 @@ export class HttpTransport {
   }
 
   private async _send(spec: RequestSpec): Promise<BufferedResponse> {
-    const attempts = spec.idempotent ? this.retry.attempts : 0;
-    for (let attempt = 0; ; attempt++) {
+    // Idempotent requests may try every other endpoint once, plus the
+    // configured retries (with backoff). Non-idempotent requests move to
+    // another endpoint only when the connection was never established; after
+    // any other failure they are not replayed, and the next request starts at
+    // another endpoint.
+    const failovers = this.baseUrls.length - 1;
+    const retries = spec.idempotent ? this.retry.attempts : 0;
+    let failoversLeft = failovers;
+    let retriesUsed = 0;
+    for (;;) {
+      let response: BufferedResponse | undefined;
+      let error: unknown;
       try {
-        const response = await this._once(spec);
-        if (attempt < attempts && RETRYABLE_STATUS.has(response.status)) {
-          await this._backoff(attempt);
-          continue;
-        }
-        let body: string;
-        try {
-          body = await response.text();
-        } catch {
-          throw new NetworkError(`Failed to read response body (${spec.method} ${spec.path})`);
-        }
-        return { ok: response.ok, status: response.status, text: async () => body };
+        response = await this._attempt(spec);
       } catch (err) {
-        if (attempt < attempts && err instanceof NetworkError) {
-          await this._backoff(attempt);
-          continue;
-        }
-        throw err;
+        if (!(err instanceof NetworkError)) throw err;
+        error = err;
       }
+      const failoverWorthy = error !== undefined || (response !== undefined && FAILOVER_STATUS.has(response.status));
+      if (failoverWorthy) this.failover();
+      // A request that may have reached an instance is replayed elsewhere only
+      // if it is idempotent; one that never connected can always move on.
+      const mayMove = spec.idempotent || (error instanceof NetworkError && error.connectFailed);
+      if (failoverWorthy && mayMove && failoversLeft > 0) {
+        failoversLeft -= 1;
+        continue;
+      }
+      const retryable = error !== undefined || (response !== undefined && RETRYABLE_STATUS.has(response.status));
+      if (retryable && retriesUsed < retries) {
+        await this._backoff(retriesUsed);
+        retriesUsed += 1;
+        failoversLeft = failovers;
+        continue;
+      }
+      if (error !== undefined) throw error;
+      return response as BufferedResponse;
+    }
+  }
+
+  /** One request to the active endpoint, with the body fully read (a dropped body is a NetworkError). */
+  private async _attempt(spec: RequestSpec): Promise<BufferedResponse> {
+    const res = await this._once(spec);
+    let body: string;
+    try {
+      body = await res.text();
+    } catch {
+      throw new NetworkError(`Failed to read response body (${spec.method} ${spec.path})`);
+    }
+    return { ok: res.ok, status: res.status, text: async () => body };
+  }
+
+  /** Unauthenticated GET against one specific endpoint (no failover), e.g. per-instance readiness. */
+  async publicGetAt<T>(baseUrl: string, path: string): Promise<{ status: number; body: T }> {
+    const url = baseUrl.replace(/\/$/, '') + path;
+    let response: Response;
+    try {
+      response = await this._fetch(url, { method: 'GET', headers: { ...this.headers }, signal: AbortSignal.timeout(this.timeout) });
+    } catch (err) {
+      throw new NetworkError(`GET ${url} failed: ${(err as Error).message}`);
+    }
+    const text = await response.text();
+    try {
+      return { status: response.status, body: parseJson(text) as T };
+    } catch {
+      throw new NetworkError(`Failed to parse response body from ${url} (HTTP ${response.status})`);
     }
   }
 
@@ -158,7 +243,9 @@ export class HttpTransport {
     try {
       return await this._fetch(this.baseUrl + path, init);
     } catch (err) {
-      throw new NetworkError(`${spec.method} ${spec.path} failed: ${(err as Error).message}`);
+      const error = new NetworkError(`${spec.method} ${spec.path} failed: ${(err as Error).message}`);
+      error.connectFailed = isConnectFailure(err);
+      throw error;
     }
   }
 
