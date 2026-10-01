@@ -7,6 +7,26 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [0.59.1] - 2026-10-01
+
+Coordinated Genesis Mesh v0.59.1 release: TypeScript support for governed
+secret lifecycles (attestation-backed evaluation, policy lifecycle, evidence
+store, offline verification).
+
+- Add attestation-backed evaluation, attestation queries, recognition policy reads
+  and signed revocation feeds.
+- Add boundary-policy management, the execution evidence-store client, signed
+  execution recording, governed actions and inventory reconciliation.
+- Add Python-compatible canonical JSON, model digests and offline verification
+  of signed artifacts and complete evidence exports.
+- Require verified decisions and expected bindings before governed callbacks;
+  guard evaluation and execution metadata before sending it to the NA.
+- Add async signers, signed admin GETs, NDJSON paging, bounded opt-in retries and
+  typed errors carrying NA details and request IDs.
+- Correct wire types and CommonJS package loading; require Node.js 22 or newer.
+- Add Python-vector, negative-path, public-route and live local-NA tests, plus
+  typechecking of the test suite and package entry-point smoke checks.
+
 ## [0.59.0] - 2026-10-01
 
 Coordinated Genesis Mesh v0.59.0 release. No functional changes; the core adds
@@ -38,22 +58,22 @@ across the train (see the core `docs/development/versioning.md`).
 
 ---
 
-## [0.53.0] — 2026-06-29
+## [0.53.0] - 2026-06-29
 
 ### Added
 
-- `GenesisMeshClient` — unified entry point with 7 domain sub-clients
-- `AgreementClient` — capability offer, counter, accept, verify
-- `BoundaryClient` — boundary decision and verification
-- `EvidenceClient` — trust evidence build and verify
-- `AttestationClient` — membership attestation issue, revoke, recognition policy
-- `DisclosureClient` — selective Merkle capability disclosure, nullifier
-- `ConsensusClient` — validator vote, consensus proof assembly and verify
-- `DataUsageClient` — data license policy, access intent, verify
-- `src/auth.ts` — `canonicalJson`, `signBytes`, `buildAdminHeaders` (Ed25519 / PKCS8-DER)
-- `src/client.ts` — `HttpTransport` with fetch, timeout, and typed error mapping
-- `src/errors.ts` — `GenesisMeshError` and typed subclasses for all NA error codes
-- `src/types.ts` — 30+ protocol interfaces matching the NA JSON wire format
+- `GenesisMeshClient` - unified entry point with 7 domain sub-clients
+- `AgreementClient` - capability offer, counter, accept, verify
+- `BoundaryClient` - boundary decision and verification
+- `EvidenceClient` - trust evidence build and verify
+- `AttestationClient` - membership attestation issue, revoke, recognition policy
+- `DisclosureClient` - selective Merkle capability disclosure, nullifier
+- `ConsensusClient` - validator vote, consensus proof assembly and verify
+- `DataUsageClient` - data license policy, access intent, verify
+- `src/auth.ts` - `canonicalJson`, `signBytes`, `buildAdminHeaders` (Ed25519 / PKCS8-DER)
+- `src/client.ts` - `HttpTransport` with fetch, timeout, and typed error mapping
+- `src/errors.ts` - `GenesisMeshError` and typed subclasses for all NA error codes
+- `src/types.ts` - 30+ protocol interfaces matching the NA JSON wire format
 - ESM and CJS dual build (`dist/esm/`, `dist/cjs/`, `dist/types/`)
 - 74 Jest unit tests covering all sub-clients
 

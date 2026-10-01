@@ -20,7 +20,7 @@ const INTENT: DataAccessIntent = {
   intent_id: 'int-001',
   agent_sovereign_id: 'BETA',
   decision_id: 'dec-001',
-  sources: [{ source_id: 'src-a', classification_tags: ['public'] }],
+  sources: [{ source_id: 'src-a', source_type: 'public', owner_sovereign_id: 'ALPHA', classification_tags: ['public'] }],
   access_types: ['read'],
   estimated_volume_bytes: 1024,
   declared_at: '2026-06-01T00:00:00Z',
@@ -79,7 +79,7 @@ describe('DataUsageClient', () => {
       const fetch = mockFetch({ status: 201, body: INTENT });
       const client = new DataUsageClient(buildTransport(fetch));
       const result = await client.createIntent({
-        sources: [{ source_id: 'src-a', classification_tags: ['public'] }],
+        sources: [{ source_id: 'src-a', source_type: 'public', owner_sovereign_id: 'ALPHA', classification_tags: ['public'] }],
         access_types: ['read'],
       });
       expect(result.intent_id).toBe('int-001');
@@ -91,7 +91,7 @@ describe('DataUsageClient', () => {
       const fetch = mockFetch({ status: 201, body: INTENT });
       const client = new DataUsageClient(buildTransport(fetch));
       await client.createIntent({
-        sources: [{ source_id: 'src-a', classification_tags: [] }],
+        sources: [{ source_id: 'src-a', source_type: 'public', owner_sovereign_id: 'ALPHA', classification_tags: [] }],
         access_types: ['read'],
         decision_id: 'custom-dec-001',
       });

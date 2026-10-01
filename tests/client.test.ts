@@ -86,7 +86,7 @@ describe('HttpTransport', () => {
 
   describe('network errors', () => {
     it('wraps fetch exceptions as NetworkError', async () => {
-      const fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'));
+      const fetch = jest.fn<() => Promise<Response>>().mockRejectedValue(new Error('ECONNREFUSED'));
       const transport = buildTransport(fetch as unknown as jest.Mock);
       await expect(transport.publicPost('/test', {})).rejects.toBeInstanceOf(NetworkError);
     });

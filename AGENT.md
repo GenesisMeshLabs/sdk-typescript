@@ -1,4 +1,4 @@
-# AGENT.md — genesis-mesh-sdk (TypeScript)
+# AGENT.md - genesis-mesh-sdk (TypeScript)
 
 Guidance for AI coding agents and human contributors working inside the
 Genesis Mesh TypeScript SDK.
@@ -6,9 +6,9 @@ Genesis Mesh TypeScript SDK.
 This SDK is a standalone package. It does **not** import from the Python main
 repo. It wraps the NA HTTP API surface documented in:
 
-- `genesismesh/docs/sdk/typescript.md` — public reference
-- `genesismesh/docs/api/trust-http.md` — NA HTTP routes
-- `genesismesh/api/trust-http.md` — same, canonical Sphinx source
+- `genesismesh/docs/sdk/typescript.md` - public reference
+- `genesismesh/docs/api/trust-http.md` - NA HTTP routes
+- `genesismesh/api/trust-http.md` - same, canonical Sphinx source
 
 ---
 
@@ -18,7 +18,7 @@ repo. It wraps the NA HTTP API surface documented in:
 sdk-typescript/
   src/
     auth.ts        # canonicalJson, Ed25519/PKCS8-DER signing, buildAdminHeaders
-    client.ts      # HttpTransport — fetch, timeout, typed error mapping
+    client.ts      # HttpTransport - fetch, timeout, typed error mapping
     errors.ts      # GenesisMeshError + typed subclasses, fromHttpError
     types.ts       # Protocol interfaces (snake_case, matching Pydantic models)
     agreement.ts   # AgreementClient
@@ -40,7 +40,7 @@ sdk-typescript/
     disclosure.test.ts
     consensus.test.ts
     data_usage.test.ts
-  dist/            # generated (ESM, CJS, types) — never edit directly
+  dist/            # generated (ESM, CJS, types) - never edit directly
   package.json
   tsconfig.json         # ESM output
   tsconfig.cjs.json     # CJS output (standalone, does NOT extend tsconfig.json)
@@ -108,7 +108,7 @@ naming convention makes cross-language debugging tractable.
 - Do not add caching or memoization to key operations.
 - Do not add fallbacks for unsupported key formats.
 - Do not silently swallow signing errors.
-- The PKCS8 DER prefix (`302e020100300506032b657004220420`) is a fixed constant —
+- The PKCS8 DER prefix (`302e020100300506032b657004220420`) is a fixed constant -
   never derive it dynamically.
 
 ### 4. Errors fail closed
@@ -118,7 +118,7 @@ naming convention makes cross-language debugging tractable.
 **throw**, do not silently produce a misleading error.
 
 Unknown HTTP status codes fall through to `GenesisMeshError` with the
-raw status — never swallow them.
+raw status - never swallow them.
 
 ### 5. Admin route invariant
 
@@ -160,7 +160,7 @@ There is no pre-commit framework in this repo. Run these manually before
 every commit:
 
 ```sh
-npm run build   # must exit 0 — TypeScript compile errors block shipping
+npm run build   # must exit 0 - TypeScript compile errors block shipping
 npm test        # all tests must pass
 ```
 
@@ -202,7 +202,7 @@ same Ed25519 key. Never generate the seed and pub from separate calls.
 
 ## CJS build
 
-`tsconfig.cjs.json` is standalone — it does **not** extend `tsconfig.json`.
+`tsconfig.cjs.json` is standalone - it does **not** extend `tsconfig.json`.
 This avoids a TypeScript 5 conflict where `declaration: false` cannot coexist
 with an inherited `declarationDir`. Do not add `extends` to `tsconfig.cjs.json`.
 
@@ -240,7 +240,7 @@ When acting as an AI coding agent in this repository:
 3. Keep changes small. One method → one test. One sub-client → one test file.
 4. Preserve layer boundaries. No signing logic in sub-clients. No domain
    knowledge in `client.ts`.
-5. Match the NA's wire format exactly — no camelCase, no aliases, no convenience
+5. Match the NA's wire format exactly - no camelCase, no aliases, no convenience
    transformations.
 6. Do not introduce runtime dependencies.
 7. Do not add methods that the NA HTTP API does not expose.
@@ -248,8 +248,34 @@ When acting as an AI coding agent in this repository:
    field, prerequisite call), add it to the "Known constraints" table in this
    file AND cover it with a negative test.
 9. Confirm before destructive operations. Approval once does not generalize.
-10. To validate TypeScript SDK output against the protocol reference, run the
-    conformance test harness at `genesismesh/conformance/` in the main repo:
-    `python conformance/runner.py --sdk typescript` after generating vectors with
-    `python conformance/generate_vectors.py`. The vectors define the canonical
-    wire format that all SDK implementations must match.
+10. Validate TypeScript SDK output with the Python-generated fixtures in
+    `tests/fixtures/`, the SDK unit tests and `npm run test:e2e`. Regenerate the
+    fixtures with `scripts/generate_vectors.py` using the core Python environment.
+    The core conformance runner validates Python suites and does not support a
+    `--sdk typescript` option.
+
+
+## Governed lifecycle additions
+
+- `canonical.ts` derives signed model bodies and digests using `auth.ts`.
+- `validation.ts` checks complete signed wire artifacts without coercing them.
+- `execution.ts` builds evidence and checks metadata. `verify.ts` verifies
+  artifacts and evidence exports offline. Both are pure protocol modules.
+- `policy.ts` and `evidence_store.ts` wrap the corresponding NA routes.
+- `governance.ts` composes clients and the recorder and compares inventories.
+- Metadata preflight checks in sub-clients delegate to `execution.ts`.
+- Governed actions require trusted verification keys and expected policies;
+  attestation-backed ALLOWs require the expected attestation. Check the request
+  context ID and recheck expiry after reading history.
+- Recognition policies put allowed roles and accepted statuses inside each
+  recognized issuer. Public attestation verification requires an explicit policy
+  or an active policy saved on the NA.
+- Required policy enforcement still permits an empty matching policy set. Use
+  expected bindings to require a particular policy in governed actions.
+- Use `parseJson` for artifacts received from Python. Normal JSON cloning can
+  lose integral float lexemes and invalidate offline signatures.
+- The CommonJS build needs its generated `dist/cjs/package.json` marker. Do not
+  edit generated files directly; `scripts/finish_cjs.mjs` creates it.
+- Run `npm run typecheck`, `npm run build`, `npm run test:package`, `npm test`
+  and `npm run test:e2e` for protocol changes. E2E uses a disposable local NA
+  with synthetic callbacks, not external services. See `docs/offline-verification.md`.

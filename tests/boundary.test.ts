@@ -20,16 +20,10 @@ const AGREEMENT: AgreementRecord = {
 };
 
 const DECISION: BoundaryDecision = {
-  decision_id: 'dec-001',
-  agreement_id: 'agr-001',
-  requested_capability: 'read:data',
-  authorized: true,
-  reason: 'capability in agreement',
-  context: {},
-  decided_at: '2026-06-01T00:00:00Z',
-  issued_by: 'na-alpha',
-  operator_id: 'operator-local',
-  signatures: [{ key_id: 'na-alpha', sig: 'sig' }],
+  decision_id: 'dec-001', context_id: 'ctx-001', agreement_id: 'agr-001', authorized: true,
+  denial_reason: null, gate_results: [], decision_made_at: '2026-06-01T00:00:00Z',
+  decision_valid_until: '2026-06-01T00:05:00Z', operator_sovereign_id: 'ALPHA',
+  freshness_proof: null, signature: { key_id: 'na-alpha', sig: 'sig' },
 };
 
 describe('BoundaryClient', () => {

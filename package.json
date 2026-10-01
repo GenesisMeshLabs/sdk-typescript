@@ -1,7 +1,7 @@
 {
   "name": "genesis-mesh-sdk",
-  "version": "0.59.0",
-  "description": "TypeScript client for the Genesis Mesh Network Authority API — sovereign trust, attestation, and capability enforcement",
+  "version": "0.59.1",
+  "description": "TypeScript client for the Genesis Mesh Network Authority API - sovereign trust, attestation, and capability enforcement",
   "type": "module",
   "license": "MIT",
   "author": "Genesis Mesh Labs",
@@ -40,21 +40,27 @@
     "dist",
     "README.md",
     "LICENSE",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "docs"
   ],
   "scripts": {
     "check:version": "node scripts/check-version.mjs",
     "build": "npm run build:esm && npm run build:cjs",
     "build:esm": "tsc -p tsconfig.json",
-    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/finish_cjs.mjs",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.cjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json",
+    "test:e2e": "node scripts/run_e2e.mjs",
+    "test:package": "node scripts/check_package.mjs"
   },
   "devDependencies": {
-    "@types/jest": "^29.5.0",
-    "@types/node": "^20.0.0",
-    "jest": "^29.7.0",
-    "ts-jest": "^29.2.0",
-    "typescript": "^5.4.0"
+    "@types/jest": "30.0.0",
+    "@types/node": "22.20.4",
+    "jest": "30.5.2",
+    "ts-jest": "29.4.14",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "test-exclude": "8.0.0"
   }
 }

@@ -21,7 +21,7 @@ export interface MockResponse {
   body: unknown;
 }
 
-/** Returns a jest mock that simulates fetch returning the given responses in order. */
+/** Returns a jest mock that simulates fetch returning the given responses in order. A string body is sent as raw text. */
 export function mockFetch(...responses: MockResponse[]): jest.Mock {
   let i = 0;
   return jest.fn().mockImplementation(async () => {
@@ -30,13 +30,14 @@ export function mockFetch(...responses: MockResponse[]): jest.Mock {
       ok: r.status >= 200 && r.status < 300,
       status: r.status,
       json: async () => r.body,
+      text: async () => (typeof r.body === 'string' ? r.body : JSON.stringify(r.body)),
     } as Response;
   });
 }
 
 /** Build an HttpTransport wired to the provided mock fetch. */
 export function buildTransport(
-  fetchMock: jest.Mock,
+  fetchMock: unknown,
   opts: Partial<ClientOptions> = {},
 ): HttpTransport {
   return new HttpTransport({
