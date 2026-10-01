@@ -68,6 +68,13 @@ export class RateLimitError extends GenesisMeshError {
 }
 
 export class NetworkError extends GenesisMeshError {
+  /**
+   * True when the connection could not be established (refused, unresolvable,
+   * unreachable): the request never reached the NA, so another instance may
+   * take it even when it is not idempotent (v0.60).
+   */
+  connectFailed = false;
+
   constructor(message: string, code = 'network_error') {
     super(message, code, 0);
     this.name = 'NetworkError';
@@ -125,4 +132,19 @@ function errorForStatus(status: number, message: string, code: string): GenesisM
     case 503: return new ServiceUnavailableError(message, code);
     default:  return new GenesisMeshError(message, code, status);
   }
+}
+
+const HA_CONFLICT_CODES: ReadonlySet<string> = new Set([
+  'boundary_policy_activation_conflict',
+  'boundary_policy_version_conflict',
+  'crl_publish_contention',
+  'retention_in_progress',
+]);
+
+/**
+ * True for a 409 that only means another NA instance won a race the database
+ * decided (v0.60). The request changed nothing and can be retried.
+ */
+export function isRetryableConflict(err: unknown): err is ConflictError {
+  return err instanceof ConflictError && HA_CONFLICT_CODES.has(err.code);
 }

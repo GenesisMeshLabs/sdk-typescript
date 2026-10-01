@@ -760,3 +760,59 @@ export type EvidenceRejectionCode =
   | 'resource_chain_mismatch'
   | 'evidence_conflict'
   | 'evidence_secret_material';
+
+// ── Health and readiness (v0.60) ──────────────────────────────────────────────
+
+export interface ReadinessDatabase {
+  backend: 'sqlite' | 'postgres' | string;
+  writable: boolean;
+  schema_version?: number;
+  expected_schema_version: number;
+  /** Present when not ready: e.g. "schema_version_mismatch" or the error type. */
+  error?: string;
+}
+
+export interface ReadinessSigningKey {
+  key_id: string;
+  provider: 'file' | 'env' | 'azure-keyvault' | string;
+  /** SHA-256 (hex) of the NA public key; identical on every instance of one NA. */
+  fingerprint: string;
+}
+
+/** `GET /readyz`, normalised: `ready` is false when the NA answered 503 not ready. */
+export interface Readiness {
+  ready: boolean;
+  status: 'ready' | 'not_ready';
+  instance: string;
+  ha_mode: 'on' | 'off' | string;
+  database: ReadinessDatabase;
+  signing_key: ReadinessSigningKey;
+  rate_limiter: 'memory' | 'database' | string;
+  /** The SQLite path, or the PostgreSQL URL without its password (ready responses only). */
+  db_path?: string;
+}
+
+/** Readiness of one configured endpoint, probed directly (no failover). */
+export interface EndpointReadiness {
+  base_url: string;
+  reachable: boolean;
+  ready: boolean;
+  readiness?: Readiness;
+  error?: string;
+}
+
+export interface HealthStatus {
+  status: string;
+  network: string;
+  version: string;
+  boundary_policies: 'healthy' | 'unhealthy' | string;
+  boundary_policy_enforcement: string;
+  evidence_store: string;
+}
+
+/** 409 codes for a race another NA instance won (v0.60). Retrying is safe. */
+export type HaConflictCode =
+  | 'boundary_policy_activation_conflict'
+  | 'boundary_policy_version_conflict'
+  | 'crl_publish_contention'
+  | 'retention_in_progress';

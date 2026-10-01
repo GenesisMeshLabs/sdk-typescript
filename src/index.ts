@@ -8,6 +8,7 @@ import { ConsensusClient } from './consensus.js';
 import { DataUsageClient } from './data_usage.js';
 import { PolicyClient } from './policy.js';
 import { EvidenceStoreClient } from './evidence_store.js';
+import { HealthClient } from './health.js';
 
 export class GenesisMeshClient {
   readonly agreement: AgreementClient;
@@ -20,6 +21,8 @@ export class GenesisMeshClient {
   readonly disclosure: DisclosureClient;
   readonly consensus: ConsensusClient;
   readonly dataUsage: DataUsageClient;
+  /** Liveness, readiness and health (v0.60). */
+  readonly health: HealthClient;
 
   constructor(options: ClientOptions) {
     const http = new HttpTransport(options);
@@ -28,6 +31,7 @@ export class GenesisMeshClient {
     this.policy        = new PolicyClient(http);
     this.evidence      = new EvidenceClient(http);
     this.evidenceStore = new EvidenceStoreClient(http);
+    this.health        = new HealthClient(http);
     this.attestation   = new AttestationClient(http);
     this.disclosure    = new DisclosureClient(http);
     this.consensus     = new ConsensusClient(http);
@@ -41,6 +45,7 @@ export { BoundaryClient } from './boundary.js';
 export { PolicyClient } from './policy.js';
 export { EvidenceClient } from './evidence.js';
 export { EvidenceStoreClient } from './evidence_store.js';
+export { HealthClient } from './health.js';
 export { AttestationClient } from './attestation.js';
 export { DisclosureClient } from './disclosure.js';
 export { ConsensusClient } from './consensus.js';
@@ -137,6 +142,7 @@ export {
   ConflictError,
   RateLimitError,
   ServiceUnavailableError,
+  isRetryableConflict,
   NetworkError,
   BadRequestError,
 } from './errors.js';
@@ -150,6 +156,7 @@ export type * from './boundary.js';
 export type * from './policy.js';
 export type * from './evidence.js';
 export type * from './evidence_store.js';
+export type * from './health.js';
 export type * from './attestation.js';
 export type * from './disclosure.js';
 export type * from './consensus.js';

@@ -7,6 +7,24 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [0.60.0] - 2026-10-01
+
+Coordinated Genesis Mesh v0.60.0 release: client support for the Network
+Authority's optional high availability.
+
+- Add `baseUrls`: several NA instances without a load balancer. Idempotent
+  requests fail over on transport errors and 502/503/504. Non-idempotent
+  requests move only when the connection was never made, and are never
+  replayed after it may have been.
+- Add `NetworkError.connectFailed`.
+- Add `client.health`: `liveness()`, `readiness()` (typed `/readyz`, not-ready
+  returned as `ready: false` with the failing checks), `health()`, and
+  `endpoints()` to probe every configured instance.
+- Add `isRetryableConflict()` and the `HaConflictCode` type for the 409 codes
+  an NA instance returns when it loses a race the database decided.
+- Add a live HA test (`tests/e2e-ha.test.ts`): two instances on PostgreSQL
+  behind nginx, one killed mid-run. CI runs it against core `main`.
+
 ## [0.59.1] - 2026-10-01
 
 Coordinated Genesis Mesh v0.59.1 release: TypeScript support for governed

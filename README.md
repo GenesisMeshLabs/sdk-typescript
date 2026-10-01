@@ -37,6 +37,7 @@ execution recording, evidence-store queries and offline verification.
 - [Governed actions and reconciliation](docs/governance.md)
 - [Evidence store, policies, signers and retries](docs/evidence-store.md)
 - [Offline verification and integration tests](docs/offline-verification.md)
+- [High availability: failover, readiness and conflicts](docs/high-availability.md)
 
 `governedAction` requires verification keys and explicit expected policies. It
 verifies the signed response and its request context before calling the supplied
