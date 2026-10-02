@@ -734,12 +734,16 @@ export interface EvidenceSearchResult {
 
 export interface ResourceHistory {
   resource_id: string;
+  /** True when the chain is longer than one response holds (v0.63.1); read it through the export. */
+  truncated?: boolean;
   entries: EvidenceEvent[];
   verification: EvidenceStoreVerification;
 }
 
 export interface VendorHistory {
   vendor_id: string;
+  /** True when the vendor has more decisions than one response holds (v0.63.1). */
+  truncated?: boolean;
   entries: EvidenceEvent[];
   verification: EvidenceStoreVerification;
 }

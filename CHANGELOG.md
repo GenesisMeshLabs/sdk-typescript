@@ -7,6 +7,21 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [0.63.1] - 2026-10-02
+
+Coordinated Genesis Mesh v0.63.1 release.
+
+### Fixed
+
+- `resourceHead()` (used by `governedAction` before every action) reads the
+  chain head from the NA's new `/admin/evidence/resource-heads` lookup instead
+  of downloading the resource's whole history. A long-lived resource's
+  history grew with every action (22 MB for a few thousand records), and past
+  10,000 records the NA cut it to the oldest records, so the computed head was
+  stale and every later action was refused as a conflict. Against an NA older
+  than 0.63.1 it still reads the history, and now refuses a truncated one.
+- `ResourceHistory` and `VendorHistory` carry `truncated`.
+
 ## [0.63.0] - 2026-10-02
 
 Coordinated Genesis Mesh v0.63.0 release: pilot readiness. No changes in

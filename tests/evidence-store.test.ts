@@ -4,6 +4,8 @@ import { mockFetch, buildTransport } from './helpers.js';
 import { vectors } from './vectors.js';
 
 const v = vectors();
+/** An NA older than v0.63.1 has no resource-heads route. */
+const NO_HEAD_ROUTE = { status: 404, body: { error: { code: 'not_found', message: 'The requested URL was not found on the server.' } } };
 const events = parseExportLines(v.export);
 async function collect<T>(items: AsyncIterable<T>): Promise<T[]> {
   const result: T[] = []; for await (const item of items) result.push(item); return result;
@@ -31,19 +33,39 @@ describe('EvidenceStoreClient helpers', () => {
     const client = new EvidenceStoreClient(buildTransport(mockFetch({ status: 200, body: '' })));
     await expect(collect(client.exportAll(0, size))).rejects.toThrow('page size');
   });
-  it('returns the newest resource head regardless of history order', async () => {
-    const client = new EvidenceStoreClient(buildTransport(mockFetch({ status: 200, body: { entries: [...events].reverse(), verification: { verified: true } } })));
+  it('reads the resource head from its own endpoint', async () => {
+    const fetch = mockFetch({ status: 200, body: { resource_id: v.resource_id, resource_sequence: 7, record_digest: 'ab'.repeat(32) } });
+    const client = new EvidenceStoreClient(buildTransport(fetch));
+    expect(await client.resourceHead(v.resource_id)).toEqual({ resource_sequence: 7, record_digest: 'ab'.repeat(32) });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0][0]).toContain('/admin/evidence/resource-heads/');
+  });
+  it('returns null in one call when the NA has no head for the resource', async () => {
+    const fetch = mockFetch({ status: 404, body: { error: { code: 'resource_not_found', message: 'absent' } } });
+    expect(await new EvidenceStoreClient(buildTransport(fetch)).resourceHead('new')).toBeNull();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it('older NA: returns the newest resource head regardless of history order', async () => {
+    const client = new EvidenceStoreClient(buildTransport(mockFetch(
+      NO_HEAD_ROUTE, { status: 200, body: { entries: [...events].reverse(), verification: { verified: true } } })));
     expect(await client.resourceHead(v.resource_id)).toEqual({ resource_sequence: 2, record_digest: executionDigest(v.executions[1]) });
   });
-  it('falls back to a retention checkpoint when history is absent', async () => {
+  it('older NA: refuses a truncated history rather than guess the head', async () => {
     const client = new EvidenceStoreClient(buildTransport(mockFetch(
+      NO_HEAD_ROUTE, { status: 200, body: { entries: events, truncated: true, verification: { verified: true } } })));
+    await expect(client.resourceHead(v.resource_id)).rejects.toThrow('truncated');
+  });
+  it('older NA: falls back to a retention checkpoint when history is absent', async () => {
+    const client = new EvidenceStoreClient(buildTransport(mockFetch(
+      NO_HEAD_ROUTE,
       { status: 404, body: { error: { code: 'resource_not_found', message: 'absent' } } },
       { status: 200, body: { entries: [{ payload: v.checkpoint }], next_after_sequence: null } },
     )));
     expect(await client.resourceHead(v.resource_id)).toEqual(v.checkpoint.resource_heads[v.resource_id]);
   });
-  it('returns null when both history and checkpoint are absent', async () => {
+  it('older NA: returns null when both history and checkpoint are absent', async () => {
     const client = new EvidenceStoreClient(buildTransport(mockFetch(
+      NO_HEAD_ROUTE,
       { status: 404, body: { error: { code: 'resource_not_found', message: 'absent' } } },
       { status: 200, body: { entries: [], next_after_sequence: null } },
     )));
@@ -63,7 +85,7 @@ describe('EvidenceStoreClient helpers', () => {
   });
 });
 
-it('refuses to continue a resource chain whose history failed verification', async () => {
-  const client = new EvidenceStoreClient(buildTransport(mockFetch({ status: 200, body: { entries: events, verification: { verified: false } } })));
+it('older NA: refuses to continue a resource chain whose history failed verification', async () => {
+  const client = new EvidenceStoreClient(buildTransport(mockFetch(NO_HEAD_ROUTE, { status: 200, body: { entries: events, verification: { verified: false } } })));
   await expect(client.resourceHead(v.resource_id)).rejects.toThrow('did not verify');
 });
