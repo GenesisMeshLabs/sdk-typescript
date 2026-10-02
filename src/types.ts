@@ -505,38 +505,60 @@ export interface DisclosureVerification {
 
 // ── Consensus ─────────────────────────────────────────────────────────────────
 
-export interface JustificationProof {
-  proof_id: string;
-  decision_id: string;
-  [key: string]: unknown;
-}
+/**
+ * The proof validators vote on: the NA-signed justification returned with a
+ * decision by `boundary.evaluate` (`justification_proof`).
+ */
+export type JustificationProof = DecisionJustification;
 
+/** A validator's signed vote on a JustificationProof (Python `ValidatorVote`). */
 export interface ValidatorVote {
   vote_id: string;
   proof_id: string;
   decision_id: string;
   validator_sovereign_id: string;
+  /** true approves, false rejects. */
   vote: boolean;
   reason: string | null;
   voted_at: string;
-  signatures: Signature[];
+  /** SHA-256 binding the vote to the validator's view of the proof (v0.38). Required on approve votes. */
+  context_digest: string | null;
+  signature: Signature | null;
 }
 
+/** K-of-N approval over a JustificationProof, signed by the assembler (Python `ConsensusProof`). */
 export interface ConsensusProof {
   consensus_id: string;
   proof_id: string;
   decision_id: string;
-  votes: ValidatorVote[];
+  /** K in K-of-N: distinct named validators that must approve. */
   required_threshold: number;
+  /** The N named validators. */
   validator_sovereign_ids: string[];
-  assembled_at: string;
-  issued_by: string;
-  signatures: Signature[];
+  votes: ValidatorVote[];
+  reached_at: string;
+  expires_at: string;
+  /** Digest of the cascade assessment that cleared the proof; null on pre-v0.38 proofs. */
+  cascade_assessment_digest: string | null;
+  signature: Signature | null;
 }
+
+export type ConsensusVerificationReason =
+  | 'valid'
+  | 'missing_signature'
+  | 'invalid_assembler_signature'
+  | 'threshold_not_met'
+  | 'invalid_vote_signature'
+  | 'unknown_validator_key'
+  | 'vote_not_in_validator_set'
+  | 'expired'
+  | 'proof_id_mismatch'
+  | 'cascade_detected'
+  | 'missing_context_digest';
 
 export interface ConsensusVerification {
   valid: boolean;
-  reason: string;
+  reason: ConsensusVerificationReason;
   consensus_id: string | null;
 }
 
