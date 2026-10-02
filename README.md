@@ -220,6 +220,13 @@ const dv = await client.dataUsage.verify({ intent, policy: pol });
 console.log(dv.valid, dv.violations);
 ```
 
+## Offline verification
+
+The SDK verifies boundary decisions, evidence exports, and from 0.61.0
+agreements, data license policies and data access intents offline, and signs
+data access intents with `createDataAccessIntent`. See
+[docs/offline-verification.md](docs/offline-verification.md).
+
 ## Raw admin calls
 
 For NA routes not yet covered by a sub-client (e.g. `/admin/recognition-treaties`),

@@ -85,6 +85,9 @@ export {
   policyCanonical,
   policyDigest,
   policySetDigest,
+  agreementCanonical,
+  dataLicensePolicyCanonical,
+  dataAccessIntentCanonical,
   justificationCanonical,
   checkpointCanonical,
   entryDigest,
@@ -108,8 +111,18 @@ export {
   verifyEvidenceEvents,
   parseExportLines,
   parseTimestampMicros,
+  verifyAgreement,
+  verifyDataLicensePolicySignature,
+  verifyDataAccessIntent,
 } from './verify.js';
-export type { VerifyDecisionOptions, VerifyEvidenceOptions, ExecutorKeyInfo } from './verify.js';
+export type {
+  VerifyDecisionOptions, VerifyEvidenceOptions, ExecutorKeyInfo,
+  AgreementVerification, AgreementVerificationReason, DataIntentVerification, DataUsageViolationDetail, DataUsageViolationType,
+} from './verify.js';
+
+// Data access intents (v0.61)
+export { createDataAccessIntent } from './data_intent.js';
+export type { CreateDataAccessIntentParams } from './data_intent.js';
 
 // Governed lifecycles
 export {

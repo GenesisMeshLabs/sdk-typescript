@@ -6,7 +6,11 @@
 
 import { canonicalDigest, canonicalJson } from './auth.js';
 import type {
+  AgreementRecord,
   AppliedPolicy,
+  CapabilityCounter,
+  DataAccessIntent,
+  DataLicensePolicy,
   BoundaryDecision,
   BoundaryPolicy,
   DecisionJustification,
@@ -95,4 +99,26 @@ export function entryDigest(entry: EvidenceStoreEntry): string {
 /** SHA-256 of a stored payload's canonical JSON. */
 export function payloadDigest(payload: unknown): string {
   return canonicalDigest(payload);
+}
+
+/** Fields both parties sign; identical for CapabilityCounter and AgreementRecord (excludes ids and timestamps). */
+const AGREEMENT_CANONICAL_FIELDS = [
+  'agreed_terms', 'graph_digest', 'offer_id', 'offerer_evidence',
+  'offerer_sovereign_id', 'responder_evidence', 'responder_sovereign_id',
+] as const;
+
+/** The body both parties of an agreement sign. */
+export function agreementCanonical(record: AgreementRecord | CapabilityCounter): string {
+  const source = record as unknown as Record<string, unknown>;
+  const body: Record<string, unknown> = {};
+  for (const key of AGREEMENT_CANONICAL_FIELDS) body[key] = source[key] ?? null;
+  return canonicalJson(body);
+}
+
+export function dataLicensePolicyCanonical(policy: DataLicensePolicy): string {
+  return canonicalJson(without(policy, ['signature']));
+}
+
+export function dataAccessIntentCanonical(intent: DataAccessIntent): string {
+  return canonicalJson(without(intent, ['signature']));
 }

@@ -12,23 +12,24 @@ const OFFER: CapabilityOffer = {
     scope: {},
     valid_from: '2026-01-01T00:00:00Z',
     valid_until: '2026-12-31T00:00:00Z',
+    freshness_commitment: 0,
   },
-  expires_at: '2026-01-15T00:00:00Z',
   graph_digest: 'sha256:abc',
-  issued_by: 'na-alpha',
-  issued_at: '2026-01-01T00:00:00Z',
+  offerer_evidence: {},
+  expires_at: '2026-01-15T00:00:00Z',
+  created_at: '2026-01-01T00:00:00Z',
   signatures: [{ key_id: 'na-alpha', sig: 'base64sig' }],
 };
 
 const COUNTER: CapabilityCounter = {
-  counter_id: 'counter-001',
-  original_offer_id: 'offer-001',
+  offer_id: 'offer-001',
   offerer_sovereign_id: 'ALPHA',
   responder_sovereign_id: 'BETA',
-  counter_terms: OFFER.requested_terms,
+  agreed_terms: OFFER.requested_terms,
+  offerer_evidence: {},
+  responder_evidence: {},
   graph_digest: 'sha256:def',
-  issued_by: 'na-beta',
-  issued_at: '2026-01-02T00:00:00Z',
+  expires_at: '2026-01-15T00:00:00Z',
   signatures: [{ key_id: 'na-beta', sig: 'base64sig2' }],
 };
 
@@ -37,9 +38,12 @@ const AGREEMENT: AgreementRecord = {
   offerer_sovereign_id: 'ALPHA',
   responder_sovereign_id: 'BETA',
   agreed_terms: OFFER.requested_terms,
-  signed_at: '2026-01-03T00:00:00Z',
+  offer_id: 'offer-001',
+  offerer_evidence: {},
+  responder_evidence: {},
   graph_digest: 'sha256:ghi',
-  issued_by: 'na-alpha',
+  established_at: '2026-01-03T00:00:00Z',
+  expires_at: '2026-12-31T00:00:00Z',
   signatures: [{ key_id: 'na-alpha', sig: 'base64sig3' }],
 };
 
@@ -82,8 +86,8 @@ describe('AgreementClient', () => {
         valid_from: '2026-01-01T00:00:00Z',
         valid_until: '2026-12-31T00:00:00Z',
       });
-      expect(result.counter_id).toBe('counter-001');
-      expect(result.original_offer_id).toBe('offer-001');
+      expect(result.offer_id).toBe('offer-001');
+      expect(result.agreed_terms.capabilities).toEqual(['read:data']);
       expect(fetch.mock.calls[0][0]).toContain('/admin/agreements/counter');
     });
   });

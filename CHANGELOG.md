@@ -7,6 +7,30 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [0.61.0] - 2026-10-02
+
+Coordinated Genesis Mesh v0.61.0 release: the cross-language interoperability
+proof. The core's interop scenario uses this SDK to sign data access intents,
+submit them to the NA, and verify Python records.
+
+### Added
+
+- `verifyAgreement`, `verifyDataLicensePolicySignature` and
+  `verifyDataAccessIntent`: offline verification with the reason codes of the
+  Python reference.
+- `createDataAccessIntent`: build and sign a data access intent as the agent.
+- `agreementCanonical`, `dataLicensePolicyCanonical`,
+  `dataAccessIntentCanonical`.
+- The shared `interop` conformance vectors (25) in
+  `tests/fixtures/conformance/interop.json`, all passing.
+
+### Fixed
+
+- `AgreementRecord`, `AgreementTerms`, `CapabilityOffer`, `CapabilityCounter`,
+  `DataAccessIntent` and `DataSourceDescriptor` now match the wire format.
+- `parseJson` keeps integer literals beyond `Number.MAX_SAFE_INTEGER` exactly
+  (as `bigint`), and `canonicalJson` encodes them.
+
 ## [0.60.0] - 2026-10-01
 
 Coordinated Genesis Mesh v0.60.0 release: client support for the Network

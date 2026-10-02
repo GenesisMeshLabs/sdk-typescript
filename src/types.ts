@@ -18,6 +18,8 @@ export interface AgreementTerms {
   scope: Record<string, unknown>;
   valid_from: string;
   valid_until: string;
+  /** Minimum revocation-feed sequence the responder guarantees. */
+  freshness_commitment: number;
 }
 
 export interface CapabilityOffer {
@@ -25,33 +27,37 @@ export interface CapabilityOffer {
   offerer_sovereign_id: string;
   responder_sovereign_id: string;
   requested_terms: AgreementTerms;
-  expires_at: string;
   graph_digest: string;
-  issued_by: string;
-  issued_at: string;
+  offerer_evidence: Record<string, unknown>;
+  expires_at: string;
+  created_at: string;
   signatures: Signature[];
 }
 
 export interface CapabilityCounter {
-  counter_id: string;
-  original_offer_id: string;
-  offerer_sovereign_id: string;
-  responder_sovereign_id: string;
-  counter_terms: AgreementTerms;
-  graph_digest: string;
-  issued_by: string;
-  issued_at: string;
-  signatures: Signature[];
-}
-
-export interface AgreementRecord {
-  agreement_id: string;
+  offer_id: string;
   offerer_sovereign_id: string;
   responder_sovereign_id: string;
   agreed_terms: AgreementTerms;
-  signed_at: string;
+  offerer_evidence: Record<string, unknown>;
+  responder_evidence: Record<string, unknown>;
   graph_digest: string;
-  issued_by: string;
+  expires_at: string;
+  signatures: Signature[];
+}
+
+/** Dual-signed agreement. Both parties sign the same canonical body (see `agreementCanonical`). */
+export interface AgreementRecord {
+  agreement_id: string;
+  offer_id: string;
+  offerer_sovereign_id: string;
+  responder_sovereign_id: string;
+  agreed_terms: AgreementTerms;
+  offerer_evidence: Record<string, unknown>;
+  responder_evidence: Record<string, unknown>;
+  graph_digest: string;
+  established_at: string;
+  expires_at: string;
   signatures: Signature[];
 }
 
@@ -542,7 +548,6 @@ export interface DataSourceDescriptor {
   source_type: string;
   owner_sovereign_id: string;
   classification_tags: string[];
-  estimated_volume_bytes?: number | null;
 }
 
 export interface DataLicensePolicy {
@@ -558,15 +563,17 @@ export interface DataLicensePolicy {
   signature: Signature | null;
 }
 
+/** Agent-signed declaration of the data an execution will access. */
 export interface DataAccessIntent {
   intent_id: string;
   agent_sovereign_id: string;
   decision_id: string;
-  sources: DataSourceDescriptor[];
-  access_types: string[];
+  declared_sources: DataSourceDescriptor[];
+  declared_access_types: string[];
   estimated_volume_bytes: number | null;
   declared_at: string;
-  signatures: Signature[];
+  expires_at: string;
+  signature: Signature | null;
 }
 
 export interface DataViolation {

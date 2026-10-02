@@ -111,8 +111,9 @@ describe('boundary evaluation basis', () => {
     const fetch = mockFetch({ status: 200, body: vectors().allowed });
     const gm = new GenesisMeshClient({ baseUrl: 'http://local', signingKeyBase64: TEST_KEY.seedBase64, fetch: fetch as unknown as typeof globalThis.fetch });
     const agreement = { agreement_id: 'agreement', offerer_sovereign_id: 'a', responder_sovereign_id: 'b',
-      agreed_terms: { capabilities: ['read'], scope: {}, valid_from: '2026-01-01T00:00:00Z', valid_until: '2027-01-01T00:00:00Z' },
-      signed_at: '2026-01-01T00:00:00Z', graph_digest: 'digest', issued_by: 'a', signatures: [] };
+      agreed_terms: { capabilities: ['read'], scope: {}, valid_from: '2026-01-01T00:00:00Z', valid_until: '2027-01-01T00:00:00Z', freshness_commitment: 0 },
+      offer_id: 'offer', offerer_evidence: {}, responder_evidence: {}, graph_digest: 'digest',
+      established_at: '2026-01-01T00:00:00Z', expires_at: '2027-01-01T00:00:00Z', signatures: [] };
     expect(await gm.boundary.evaluate({ agreement, requested_capability: 'read' })).toHaveProperty('decision');
     const body = JSON.parse(String((fetch.mock.calls[0][1] as RequestInit).body));
     expect(body.agreement).toEqual(agreement); expect(body.attestation_id).toBeUndefined();

@@ -20,11 +20,12 @@ const INTENT: DataAccessIntent = {
   intent_id: 'int-001',
   agent_sovereign_id: 'BETA',
   decision_id: 'dec-001',
-  sources: [{ source_id: 'src-a', source_type: 'public', owner_sovereign_id: 'ALPHA', classification_tags: ['public'] }],
-  access_types: ['read'],
+  declared_sources: [{ source_id: 'src-a', source_type: 'public', owner_sovereign_id: 'ALPHA', classification_tags: ['public'] }],
+  declared_access_types: ['read'],
   estimated_volume_bytes: 1024,
   declared_at: '2026-06-01T00:00:00Z',
-  signatures: [{ key_id: 'na-beta', sig: 'sig' }],
+  expires_at: '2026-06-01T00:05:00Z',
+  signature: { key_id: 'BETA', sig: 'sig' },
 };
 
 describe('DataUsageClient', () => {
@@ -83,7 +84,7 @@ describe('DataUsageClient', () => {
         access_types: ['read'],
       });
       expect(result.intent_id).toBe('int-001');
-      expect(result.access_types).toContain('read');
+      expect(result.declared_access_types).toContain('read');
       expect(fetch.mock.calls[0][0]).toContain('/admin/data-usage/intent');
     });
 
