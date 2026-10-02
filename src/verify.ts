@@ -9,9 +9,12 @@ import { validDecision, validContext, validExecution, validJustification, validC
 
 import { compareCodePoints, parseJson, verifyCanonical } from './auth.js';
 import {
+  agreementCanonical,
   attestationCanonical,
   attestationDigest,
   checkpointCanonical,
+  dataAccessIntentCanonical,
+  dataLicensePolicyCanonical,
   decisionCanonical,
   entryDigest,
   executionCanonical,
@@ -25,6 +28,9 @@ import {
   revocationFeedCanonical,
 } from './canonical.js';
 import type {
+  AgreementRecord,
+  DataAccessIntent,
+  DataLicensePolicy,
   BoundaryDecision,
   BoundaryPolicy,
   BoundaryVerification,
@@ -363,4 +369,118 @@ export function verifyEvidenceEvents(
     }
   }
   return result;
+}
+
+// ── Agreements (v0.61) ────────────────────────────────────────────────────────
+
+export type AgreementVerificationReason =
+  | 'accepted'
+  | 'missing_offerer_signature'
+  | 'invalid_offerer_signature'
+  | 'missing_responder_signature'
+  | 'invalid_responder_signature'
+  | 'graph_digest_mismatch';
+
+export interface AgreementVerification {
+  accepted: boolean;
+  reason: AgreementVerificationReason;
+  agreement_id: string;
+}
+
+/**
+ * Verify an AgreementRecord offline: at least one signature by an offerer key
+ * and one by a responder key over the shared canonical body, and the graph
+ * digest when `expectedGraphDigest` is given. Port of `verify_agreement`.
+ */
+export function verifyAgreement(
+  record: AgreementRecord,
+  offererPublicKeys: readonly string[],
+  responderPublicKeys: readonly string[],
+  expectedGraphDigest?: string,
+): AgreementVerification {
+  const result = (accepted: boolean, reason: AgreementVerificationReason) =>
+    ({ accepted, reason, agreement_id: record.agreement_id });
+  const signatures = record.signatures ?? [];
+  if (signatures.length === 0) return result(false, 'missing_offerer_signature');
+  const canonical = agreementCanonical(record);
+  if (!anySigned(canonical, signatures, offererPublicKeys)) return result(false, 'invalid_offerer_signature');
+  if (!anySigned(canonical, signatures, responderPublicKeys)) {
+    return result(false, signatures.length < 2 ? 'missing_responder_signature' : 'invalid_responder_signature');
+  }
+  if (expectedGraphDigest !== undefined && record.graph_digest !== expectedGraphDigest) {
+    return result(false, 'graph_digest_mismatch');
+  }
+  return result(true, 'accepted');
+}
+
+// ── Data usage (v0.61) ────────────────────────────────────────────────────────
+
+/** True when the licensor signed the DataLicensePolicy. */
+export function verifyDataLicensePolicySignature(policy: DataLicensePolicy, licensorPublicKeys: readonly string[]): boolean {
+  return signedBy(dataLicensePolicyCanonical(policy), policy.signature, licensorPublicKeys);
+}
+
+export type DataUsageViolationType =
+  | 'intent_exceeds_license'
+  | 'intent_expired'
+  | 'policy_expired'
+  | 'source_not_licensed'
+  | 'prohibited_classification'
+  | 'access_type_not_permitted'
+  | 'volume_cap_exceeded';
+
+export interface DataUsageViolationDetail {
+  violation_type: DataUsageViolationType;
+  detail: string;
+}
+
+export interface DataIntentVerification {
+  valid: boolean;
+  /** The first violation's type; null when valid. */
+  violation_reason: DataUsageViolationType | null;
+  violations: DataUsageViolationDetail[];
+}
+
+/**
+ * Check an agent-signed DataAccessIntent against a DataLicensePolicy offline:
+ * the agent signature, then expiry, licensed sources, prohibited
+ * classifications, permitted access types and the volume cap, in the order of
+ * the reference `verify_data_access_intent`.
+ */
+export function verifyDataAccessIntent(
+  intent: DataAccessIntent,
+  policy: DataLicensePolicy,
+  agentPublicKeys: readonly string[],
+  at: Date | string = new Date(),
+): DataIntentVerification {
+  const fail = (violations: DataUsageViolationDetail[]): DataIntentVerification =>
+    ({ valid: false, violation_reason: violations[0]!.violation_type, violations });
+  if (!intent.signature) return fail([{ violation_type: 'intent_exceeds_license', detail: 'Missing intent signature' }]);
+  if (!signedBy(dataAccessIntentCanonical(intent), intent.signature, agentPublicKeys)) {
+    return fail([{ violation_type: 'intent_exceeds_license', detail: 'Invalid intent signature' }]);
+  }
+  const now = micros(at);
+  const violations: DataUsageViolationDetail[] = [];
+  const add = (violation_type: DataUsageViolationType, detail: string) => violations.push({ violation_type, detail });
+  if (now > micros(intent.expires_at)) add('intent_expired', `Intent expired at ${intent.expires_at}`);
+  if (now > micros(policy.valid_until) || now < micros(policy.valid_from)) add('policy_expired', 'Policy not valid at verification time');
+  const allowed = new Set(policy.allowed_source_ids);
+  const prohibited = new Set(policy.prohibited_classification_tags);
+  for (const source of intent.declared_sources) {
+    if (!allowed.has(source.source_id)) add('source_not_licensed', `Source '${source.source_id}' not in allowed_source_ids`);
+    const overlap = source.classification_tags.filter(t => prohibited.has(t)).sort(compareCodePoints);
+    if (overlap.length > 0) {
+      add('prohibited_classification', `Source '${source.source_id}' has prohibited tags: ${overlap.join(', ')}`);
+    }
+  }
+  const allowedTypes = new Set(policy.allowed_access_types.length > 0 ? policy.allowed_access_types : ['read']);
+  for (const accessType of intent.declared_access_types) {
+    if (!allowedTypes.has(accessType)) add('access_type_not_permitted', `Access type '${accessType}' not in allowed_access_types`);
+  }
+  const cap = policy.max_volume_bytes_per_session;
+  const volume = intent.estimated_volume_bytes;
+  if (cap !== null && cap !== undefined && volume !== null && volume !== undefined && volume > cap) {
+    add('volume_cap_exceeded', `Volume ${volume} > max ${cap}`);
+  }
+  return violations.length > 0 ? fail(violations) : { valid: true, violation_reason: null, violations: [] };
 }

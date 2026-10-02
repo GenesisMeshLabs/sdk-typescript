@@ -16,10 +16,14 @@ const AGREEMENT: AgreementRecord = {
     scope: {},
     valid_from: '2026-01-01T00:00:00Z',
     valid_until: '2026-12-31T00:00:00Z',
+    freshness_commitment: 0,
   },
-  signed_at: '2026-01-03T00:00:00Z',
+  offer_id: 'offer-001',
+  offerer_evidence: {},
+  responder_evidence: {},
   graph_digest: 'sha256:ghi',
-  issued_by: 'na-alpha',
+  established_at: '2026-01-03T00:00:00Z',
+  expires_at: '2026-12-31T00:00:00Z',
   signatures: [{ key_id: 'na-alpha', sig: 'sig' }],
 };
 

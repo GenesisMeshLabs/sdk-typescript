@@ -68,12 +68,17 @@ function pythonNumber(value: number, pythonFloat = false): string {
 const PYTHON_FLOATS = new WeakMap<object, Set<string>>();
 
 /**
- * JSON.parse that remembers integral-valued floats so canonicalJson reproduces
- * them. Use it for any NA JSON that will be verified or digested. Requires
- * JSON.parse source text access (Node.js 22+).
+ * JSON.parse that keeps what Python would sign: integral-valued floats are
+ * remembered so canonicalJson reproduces them (`90.0`), and integer literals
+ * beyond Number.MAX_SAFE_INTEGER become `bigint` so no digit is lost. Use it
+ * for any NA JSON that will be verified or digested. Requires JSON.parse source
+ * text access (Node.js 22+).
  */
 export function parseJson(text: string): unknown {
   return JSON.parse(text, function (this: object, key: string, value: unknown, context?: { source?: string }) {
+    if (typeof value === 'number' && !Number.isSafeInteger(value) && context?.source && /^-?\d+$/.test(context.source)) {
+      return BigInt(context.source);
+    }
     if (typeof value === 'number' && Number.isInteger(value) && context?.source && /[.eE]/.test(context.source)) {
       let keys = PYTHON_FLOATS.get(this);
       if (!keys) PYTHON_FLOATS.set(this, (keys = new Set()));
@@ -103,6 +108,7 @@ export function canonicalJson(value: unknown): string {
   if (value === null || value === undefined) return 'null';
   if (typeof value === 'string') return asciiString(value);
   if (typeof value === 'number') return pythonNumber(value);
+  if (typeof value === 'bigint') return value.toString();
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (Array.isArray(value)) return '[' + value.map((v, i) => canonicalMember(value, String(i), v)).join(',') + ']';
   if (typeof value === 'object') {
