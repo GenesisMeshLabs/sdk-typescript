@@ -187,10 +187,26 @@ export class EvidenceStoreClient {
 
   /**
    * The head of a resource chain - what the next record must link to - or null
-   * for a resource with no history. Falls back to the latest retention
-   * checkpoint when retention removed every stored record (admin).
+   * for a resource with no history (admin). One indexed lookup on the NA
+   * (`/admin/evidence/resource-heads`, v0.63.1), which also covers chains whose
+   * stored records retention removed. Against an older NA it falls back to
+   * scanning the resource history.
    */
   async resourceHead(resourceId: string): Promise<ResourceHead | null> {
+    try {
+      const head = await this.http.adminGet<ResourceHead & { resource_id: string }>(
+        `/admin/evidence/resource-heads/${resourcePath(resourceId)}`,
+      );
+      return { resource_sequence: head.resource_sequence, record_digest: head.record_digest };
+    } catch (err) {
+      if (!(err instanceof NotFoundError)) throw err;
+      if (err.code === 'resource_not_found') return null;
+      // Route missing: an NA older than v0.63.1.
+    }
+    return this.resourceHeadFromHistory(resourceId);
+  }
+
+  private async resourceHeadFromHistory(resourceId: string): Promise<ResourceHead | null> {
     let history: ResourceHistory;
     try {
       history = await this.resourceHistory(resourceId);
@@ -201,6 +217,7 @@ export class EvidenceStoreClient {
       throw err;
     }
     if (!history.verification?.verified) throw new Error('resource history did not verify');
+    if (history.truncated) throw new Error('resource history is truncated; upgrade the NA to read the resource head');
     let head: ResourceHead | null = null;
     for (const event of history.entries) {
       if (event.entry.entry_kind !== 'execution') continue;
