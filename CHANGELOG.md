@@ -7,6 +7,20 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [0.61.1] - 2026-10-02
+
+Coordinated Genesis Mesh v0.61.1 release.
+
+### Fixed
+
+- Consensus types match Python's models: `JustificationProof` is the
+  `DecisionJustification` returned by `boundary.evaluate`; `ValidatorVote`
+  has `context_digest` and a single `signature`; `ConsensusProof` has
+  `reached_at`, `expires_at` and `cascade_assessment_digest` (not
+  `assembled_at`, `issued_by`, `signatures`). `ConsensusVerification.reason`
+  is typed with the reference reason codes. A compile-time check and a test
+  against the `consensus` conformance vectors keep the fields exact.
+
 ## [0.61.0] - 2026-10-02
 
 Coordinated Genesis Mesh v0.61.0 release: the cross-language interoperability

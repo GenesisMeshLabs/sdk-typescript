@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { ConsensusClient } from '../src/consensus.js';
 import { UnauthorizedError, ValidationError } from '../src/errors.js';
 import { buildTransport, mockFetch } from './helpers.js';
@@ -6,6 +8,13 @@ import type { ConsensusProof, JustificationProof, ValidatorVote } from '../src/t
 const J_PROOF: JustificationProof = {
   proof_id: 'jp-001',
   decision_id: 'dec-001',
+  trace: {
+    trace_id: 'tr-001', decision_id: 'dec-001', agreement_id: 'agr-001', operator_sovereign_id: 'ALPHA',
+    traced_at: '2026-06-01T00:00:00Z', entries: [], short_circuited_at: null, final_authorized: true,
+  },
+  proof_issued_at: '2026-06-01T00:00:00Z',
+  issuer_sovereign_id: 'ALPHA',
+  signature: { key_id: 'na-alpha', sig: 'sig' },
 };
 
 const VOTE: ValidatorVote = {
@@ -16,7 +25,8 @@ const VOTE: ValidatorVote = {
   vote: true,
   reason: 'evidence satisfactory',
   voted_at: '2026-06-01T00:00:00Z',
-  signatures: [{ key_id: 'na-alpha', sig: 'sig' }],
+  context_digest: 'a'.repeat(64),
+  signature: { key_id: 'ALPHA', sig: 'sig' },
 };
 
 const CONSENSUS: ConsensusProof = {
@@ -26,10 +36,38 @@ const CONSENSUS: ConsensusProof = {
   votes: [VOTE],
   required_threshold: 1,
   validator_sovereign_ids: ['ALPHA'],
-  assembled_at: '2026-06-01T00:00:00Z',
-  issued_by: 'na-alpha',
-  signatures: [{ key_id: 'na-alpha', sig: 'sig' }],
+  reached_at: '2026-06-01T00:00:00Z',
+  expires_at: '2026-06-01T01:00:00Z',
+  cascade_assessment_digest: null,
+  signature: { key_id: 'na-alpha', sig: 'sig' },
 };
+
+// Every field of the Python models, and only those: a missing key fails to
+// compile, an extra or misspelt one fails to compile, and the runtime check
+// below compares the list with a real Python-signed proof.
+type Exhaustive<T, K extends readonly (keyof T)[]> = Exclude<keyof T, K[number]> extends never ? K : never;
+const VOTE_KEYS = ['vote_id', 'proof_id', 'decision_id', 'validator_sovereign_id', 'vote', 'reason', 'voted_at',
+  'context_digest', 'signature'] as const;
+const PROOF_KEYS = ['consensus_id', 'proof_id', 'decision_id', 'required_threshold', 'validator_sovereign_ids',
+  'votes', 'reached_at', 'expires_at', 'cascade_assessment_digest', 'signature'] as const;
+const voteKeys: Exhaustive<ValidatorVote, typeof VOTE_KEYS> = VOTE_KEYS;
+const proofKeys: Exhaustive<ConsensusProof, typeof PROOF_KEYS> = PROOF_KEYS;
+
+describe('consensus wire contract', () => {
+  const vectors = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/conformance/consensus.json', import.meta.url)), 'utf-8')) as {
+    vectors: { input: { proof: ConsensusProof } }[];
+  };
+  const proof = vectors.vectors[0]!.input.proof;
+
+  it('ConsensusProof has exactly the fields of a Python-signed proof', () => {
+    expect(Object.keys(proof).sort()).toEqual([...proofKeys].sort());
+  });
+
+  it('ValidatorVote has exactly the fields of a Python-signed vote', () => {
+    expect(proof.votes.length).toBeGreaterThan(0);
+    for (const vote of proof.votes) expect(Object.keys(vote).sort()).toEqual([...voteKeys].sort());
+  });
+});
 
 describe('ConsensusClient', () => {
   describe('vote', () => {
