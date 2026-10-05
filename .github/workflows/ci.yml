@@ -63,10 +63,20 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+      # A coordinated change is tested against the core branch of the same
+      # name when it exists, and against main otherwise.
+      - name: Choose the core revision
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          ref=main
+          if git ls-remote --exit-code --heads https://github.com/GenesisMeshLabs/genesismesh.git "refs/heads/$BRANCH" > /dev/null; then ref="$BRANCH"; fi
+          echo "Testing with core revision: $ref"
+          echo "CORE_REF=$ref" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
         with:
           repository: GenesisMeshLabs/genesismesh
-          ref: main
+          ref: ${{ env.CORE_REF }}
           path: core
       - uses: actions/setup-node@v4
         with:

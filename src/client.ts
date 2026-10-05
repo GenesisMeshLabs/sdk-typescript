@@ -31,6 +31,12 @@ export interface ClientOptions {
   keyId?: string;
   /** Operator signer for admin routes (e.g. backed by an HSM). Takes precedence over `signingKeyBase64`. */
   signer?: Signer;
+  /**
+   * The NA's public key, which admin signatures name as their audience. When
+   * omitted it is read once from the NA's public `/sovereign.json`
+   * (`network_authority.public_key`).
+   */
+  audience?: string;
   /** Request timeout in milliseconds. Default 10 000. */
   timeout?: number;
   /** Retries for idempotent requests on network errors, 429, 502, 503 and 504. Off by default. */
@@ -55,6 +61,15 @@ interface RequestSpec {
 type BufferedResponse = Pick<Response, 'ok' | 'status' | 'text'>;
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+
+/** The query parameters `buildPath` sends, as strings (undefined and null are not sent). */
+function sentQuery(query?: Query): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(query ?? {})) {
+    if (value !== undefined && value !== null) out[key] = String(value);
+  }
+  return out;
+}
 
 export function buildPath(path: string, query?: Query): string {
   if (!query) return path;
@@ -88,6 +103,7 @@ export class HttpTransport {
   /** Key ID sent in X-Admin-Key-Id. */
   readonly keyId: string;
   private readonly signer?: Signer;
+  private audience?: Promise<string>;
   private readonly timeout: number;
   private readonly retry: Required<RetryOptions>;
   private readonly headers: Record<string, string>;
@@ -107,6 +123,7 @@ export class HttpTransport {
         ? seedSigner(options.signingKeyBase64, options.keyId ?? 'operator-local')
         : undefined);
     this.keyId = this.signer?.keyId ?? options.keyId ?? 'operator-local';
+    if (options.audience !== undefined) this.audience = Promise.resolve(options.audience);
     this.timeout = options.timeout ?? 10_000;
     this.retry = { attempts: options.retry?.attempts ?? 0, baseDelayMs: options.retry?.baseDelayMs ?? 200 };
     if (!Number.isSafeInteger(this.retry.attempts) || this.retry.attempts < 0 || this.retry.attempts > 10
@@ -125,6 +142,11 @@ export class HttpTransport {
   /** Move to the next endpoint (no-op with one endpoint). */
   private failover(): void {
     if (this.baseUrls.length > 1) this.active = (this.active + 1) % this.baseUrls.length;
+  }
+
+  /** Whether this client has an operator signer for admin requests. */
+  get canSign(): boolean {
+    return this.signer !== undefined;
   }
 
   /** Signed admin POST. Not retried unless `idempotent` is set. */
@@ -232,7 +254,25 @@ export class HttpTransport {
       if (!this.signer) {
         throw new Error('signingKeyBase64 is required for admin routes (or pass a signer)');
       }
-      Object.assign(headers, await buildAdminHeadersWithSigner(spec.method === 'GET' ? {} : spec.body, this.signer));
+      let audience: string;
+      try {
+        audience = await this._audience();
+      } catch (err) {
+        // The request itself was never sent, so it may move to another
+        // instance like a refused connection, idempotent or not.
+        const error = new NetworkError(
+          `${spec.method} ${spec.path} not sent: ${(err as Error).message}`,
+        );
+        error.connectFailed = true;
+        throw error;
+      }
+      Object.assign(headers, await buildAdminHeadersWithSigner({
+        method: spec.method,
+        path: decodeURIComponent(spec.path),
+        query: sentQuery(spec.query),
+        audience,
+        body: spec.method === 'GET' ? {} : spec.body,
+      }, this.signer));
     }
     const init: RequestInit = { method: spec.method, headers, signal: AbortSignal.timeout(this.timeout) };
     if (spec.method === 'POST') {
@@ -247,6 +287,24 @@ export class HttpTransport {
       error.connectFailed = isConnectFailure(err);
       throw error;
     }
+  }
+
+  /** The NA's public key for admin signatures, read once from `/sovereign.json`. */
+  private _audience(): Promise<string> {
+    if (!this.audience) {
+      const pending = this.publicGetAt<{ network_authority?: { public_key?: unknown } }>(this.baseUrl, '/sovereign.json').then(({ status, body }) => {
+        const key = body?.network_authority?.public_key;
+        if (status !== 200 || typeof key !== 'string' || !key) {
+          throw new GenesisMeshError(
+            `Could not read the NA public key from /sovereign.json (HTTP ${status})`, 'unknown', status,
+          );
+        }
+        return key;
+      });
+      // A failed lookup is retried by the next admin request.
+      this.audience = pending.catch(err => { this.audience = undefined; throw err; });
+    }
+    return this.audience;
   }
 
   private _backoff(attempt: number): Promise<void> {

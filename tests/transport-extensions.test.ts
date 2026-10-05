@@ -34,7 +34,7 @@ describe('transport extensions', () => {
   });
   it('retries explicitly idempotent verification and evidence POSTs', async () => {
     const fetch = mockFetch({ status: 503, body: {} }, { status: 200, body: { status: 'duplicate' } });
-    const gm = new GenesisMeshClient({ baseUrl: 'http://local', retry: { attempts: 1, baseDelayMs: 0 }, fetch: fetch as unknown as typeof globalThis.fetch });
+    const gm = new GenesisMeshClient({ audience: 'TEST', baseUrl: 'http://local', retry: { attempts: 1, baseDelayMs: 0 }, fetch: fetch as unknown as typeof globalThis.fetch });
     expect(await gm.evidenceStore.submit(vectors().executions[0])).toEqual({ status: 'duplicate' });
     expect(fetch).toHaveBeenCalledTimes(2);
   });
@@ -64,10 +64,10 @@ describe('transport extensions', () => {
     await expect(http.adminGetText('/bad')).rejects.toMatchObject({ status: 503 });
   });
   it.each([Infinity, -1, 1.5, 11])('rejects invalid retry attempts %s', attempts => {
-    expect(() => new HttpTransport({ baseUrl: 'http://local', retry: { attempts } })).toThrow('retry');
+    expect(() => new HttpTransport({ audience: 'TEST', baseUrl: 'http://local', retry: { attempts } })).toThrow('retry');
   });
   it('rejects invalid retry delay', () => {
-    expect(() => new HttpTransport({ baseUrl: 'http://local', retry: { attempts: 1, baseDelayMs: Infinity } })).toThrow('retry');
+    expect(() => new HttpTransport({ audience: 'TEST', baseUrl: 'http://local', retry: { attempts: 1, baseDelayMs: Infinity } })).toThrow('retry');
   });
   it('keeps seed signers usable directly', async () => {
     expect((await seedSigner(TEST_KEY.seedBase64, 'key').sign(Buffer.from('message'))).length).toBe(64);
@@ -79,13 +79,13 @@ describe('preflight guards', () => {
   it('blocks context secrets before signing or sending evaluation', async () => {
     const fetch = mockFetch({ status: 200, body: {} });
     const sign = jest.fn(async () => Buffer.alloc(64));
-    const gm = new GenesisMeshClient({ baseUrl: 'http://local', signer: { keyId: 'key', sign }, fetch: fetch as unknown as typeof globalThis.fetch });
+    const gm = new GenesisMeshClient({ audience: 'TEST', baseUrl: 'http://local', signer: { keyId: 'key', sign }, fetch: fetch as unknown as typeof globalThis.fetch });
     await expect(gm.boundary.evaluate({ attestation_id: 'a', requested_capability: 'rotate', context: { attributes: { nested: { client_secret: 'no' } } } })).rejects.toBeInstanceOf(SecretMaterialError);
     expect(fetch).not.toHaveBeenCalled(); expect(sign).not.toHaveBeenCalled();
   });
   it('blocks direct evidence submission containing secret material', async () => {
     const fetch = mockFetch({ status: 200, body: {} });
-    const gm = new GenesisMeshClient({ baseUrl: 'http://local', fetch: fetch as unknown as typeof globalThis.fetch });
+    const gm = new GenesisMeshClient({ audience: 'TEST', baseUrl: 'http://local', fetch: fetch as unknown as typeof globalThis.fetch });
     await expect(gm.evidenceStore.submit({ ...vectors().executions[0], execution_parameters: { secret: 'no' } })).rejects.toBeInstanceOf(SecretMaterialError);
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -109,7 +109,7 @@ describe('response-body network failures', () => {
 describe('boundary evaluation basis', () => {
   it('sends an agreement basis without an attestation ID', async () => {
     const fetch = mockFetch({ status: 200, body: vectors().allowed });
-    const gm = new GenesisMeshClient({ baseUrl: 'http://local', signingKeyBase64: TEST_KEY.seedBase64, fetch: fetch as unknown as typeof globalThis.fetch });
+    const gm = new GenesisMeshClient({ audience: 'TEST', baseUrl: 'http://local', signingKeyBase64: TEST_KEY.seedBase64, fetch: fetch as unknown as typeof globalThis.fetch });
     const agreement = { agreement_id: 'agreement', offerer_sovereign_id: 'a', responder_sovereign_id: 'b',
       agreed_terms: { capabilities: ['read'], scope: {}, valid_from: '2026-01-01T00:00:00Z', valid_until: '2027-01-01T00:00:00Z', freshness_commitment: 0 },
       offer_id: 'offer', offerer_evidence: {}, responder_evidence: {}, graph_digest: 'digest',
@@ -120,7 +120,7 @@ describe('boundary evaluation basis', () => {
   });
   it('rejects missing or ambiguous bases before HTTP', async () => {
     const fetch = mockFetch({ status: 200, body: {} });
-    const gm = new GenesisMeshClient({ baseUrl: 'http://local', fetch: fetch as unknown as typeof globalThis.fetch });
+    const gm = new GenesisMeshClient({ audience: 'TEST', baseUrl: 'http://local', fetch: fetch as unknown as typeof globalThis.fetch });
     for (const params of [{ requested_capability: 'read' }, { requested_capability: 'read', attestation_id: 'a', agreement: {} }]) {
       await expect(gm.boundary.evaluate(params as unknown as import('../src/boundary.js').EvaluateParams)).rejects.toThrow('exactly one');
     }

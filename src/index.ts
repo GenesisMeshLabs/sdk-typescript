@@ -70,8 +70,10 @@ export {
   pythonTimestamp,
   buildAdminHeaders,
   buildAdminHeadersWithSigner,
+  adminSigningPayload,
+  ADMIN_SIGNATURE_VERSION,
 } from './auth.js';
-export type { AdminHeaders, Signer } from './auth.js';
+export type { AdminHeaders, AdminRequest, AdminSigningOptions, Signer } from './auth.js';
 
 // Canonical bodies and digests of protocol models
 export {

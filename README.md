@@ -242,7 +242,13 @@ const body = {
   validity_hours: 24,
 };
 
-const headers = buildAdminHeaders(body, keyId, signingKeyBase64);
+// The signature binds the method, path, query, the NA's public key
+// (`network_authority.public_key` in its /sovereign.json) and the body.
+const headers = buildAdminHeaders(
+  { method: 'POST', path: '/admin/recognition-treaties', audience: '<NA public key from /sovereign.json>', body },
+  keyId,
+  signingKeyBase64,
+);
 const res = await fetch(`${baseUrl}/admin/recognition-treaties`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', ...headers },
@@ -278,11 +284,15 @@ Admin routes are authenticated with four HTTP headers generated from an Ed25519 
 | Header | Description |
 |---|---|
 | `X-Admin-Key-Id` | Key identifier registered with the NA |
-| `X-Admin-Signature` | Ed25519 signature over `canonicalJson({body, key_id, nonce, timestamp})` |
+| `X-Admin-Signature` | Ed25519 over the canonical admin payload: `{v: 2, method, path, query, audience, body, key_id, timestamp, nonce}` |
 | `X-Admin-Timestamp` | ISO 8601 UTC timestamp (must be within NA's nonce window) |
 | `X-Admin-Nonce` | UUID v4 replay-protection token (single use) |
 
-The SDK handles all of this automatically when `signingKeyBase64` is provided.
+The SDK handles all of this automatically when `signingKeyBase64` (or a `signer`)
+is provided. Signature version 2 (1.0.2) binds each signature to the HTTP method,
+the decoded request path, the query parameters and the target NA's public key
+(`audience`). The client reads it (`network_authority.public_key`) once from the
+NA's public `/sovereign.json`, or uses the `audience` client option.
 
 ## Build
 

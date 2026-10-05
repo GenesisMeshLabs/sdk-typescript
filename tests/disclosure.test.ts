@@ -27,21 +27,23 @@ const AGREEMENT: AgreementRecord = {
   signatures: [{ key_id: 'na-alpha', sig: 'sig' }],
 };
 
+// The NA's own response shapes (v1.0.2: the types declared fields it never sends).
 const COMMITMENT: CapabilityCommitment = {
   commitment_id: 'cmt-001',
   agreement_id: 'agr-001',
-  capabilities: ['read:data', 'write:log'],
+  issuer_sovereign_id: 'ALPHA',
   merkle_root: 'abc123',
+  capability_count: 2,
   committed_at: '2026-06-01T00:00:00Z',
-  issued_by: 'na-alpha',
-  signatures: [{ key_id: 'na-alpha', sig: 'sig' }],
+  signature: { key_id: 'na-alpha', sig: 'sig' },
 };
 
 const PROOF: CapabilityMembershipProof = {
   proof_id: 'prf-001',
   commitment_id: 'cmt-001',
-  capability: 'read:data',
-  merkle_path: ['hash1', 'hash2'],
+  revealed_capability: 'read:data',
+  leaf_hash: 'leaf1',
+  merkle_path: [{ sibling_hash: 'hash1', is_left: false }],
   prover_sovereign_id: 'BETA',
   proved_at: '2026-06-01T00:00:00Z',
 };
@@ -56,7 +58,7 @@ describe('DisclosureClient', () => {
         agreement: AGREEMENT,
       });
       expect(result.commitment_id).toBe('cmt-001');
-      expect(result.capabilities).toEqual(['read:data', 'write:log']);
+      expect(result.capability_count).toBe(2);
       expect(fetch.mock.calls[0][0]).toContain('/admin/disclosure/commit');
     });
 
@@ -74,10 +76,11 @@ describe('DisclosureClient', () => {
       const nullifier = {
         nullifier_id: 'nul-001',
         proof_id: 'prf-001',
-        commitment_id: 'cmt-001',
+        prover_sovereign_id: 'BETA',
+        nonce: 'n-001',
         issued_at: '2026-06-01T00:00:00Z',
-        issued_by: 'na-alpha',
-        signatures: [{ key_id: 'na-alpha', sig: 'sig' }],
+        expires_at: '2026-06-01T01:00:00Z',
+        signature: { key_id: 'na-alpha', sig: 'sig' },
       };
       const fetch = mockFetch({ status: 201, body: nullifier });
       const client = new DisclosureClient(buildTransport(fetch));
@@ -99,7 +102,8 @@ describe('DisclosureClient', () => {
         prover_sovereign_id: 'BETA',
       });
       expect(result.proof_id).toBe('prf-001');
-      expect(result.capability).toBe('read:data');
+      expect(result.revealed_capability).toBe('read:data');
+      expect(result.merkle_path[0].sibling_hash).toBe('hash1');
       const [, init] = fetch.mock.calls[0] as [string, RequestInit];
       expect((init.headers as Record<string, string>)['X-Admin-Key-Id']).toBeUndefined();
     });

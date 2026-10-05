@@ -11,12 +11,12 @@ import { buildTransport, mockFetch, TEST_KEY } from './helpers.js';
 describe('HttpTransport', () => {
   describe('constructor', () => {
     it('strips trailing slash from baseUrl', () => {
-      const t = new HttpTransport({ baseUrl: 'http://localhost:9443/' });
+      const t = new HttpTransport({ audience: 'TEST', baseUrl: 'http://localhost:9443/' });
       expect((t as unknown as { baseUrl: string }).baseUrl).toBe('http://localhost:9443');
     });
 
     it('defaults keyId to operator-local', () => {
-      const t = new HttpTransport({ baseUrl: 'http://localhost:9443' });
+      const t = new HttpTransport({ audience: 'TEST', baseUrl: 'http://localhost:9443' });
       expect((t as unknown as { keyId: string }).keyId).toBe('operator-local');
     });
   });
@@ -36,7 +36,7 @@ describe('HttpTransport', () => {
     });
 
     it('throws when signingKeyBase64 is missing', async () => {
-      const transport = new HttpTransport({ baseUrl: 'http://localhost:9443' });
+      const transport = new HttpTransport({ audience: 'TEST', baseUrl: 'http://localhost:9443' });
       await expect(transport.adminPost('/admin/test', {})).rejects.toThrow(
         'signingKeyBase64 is required',
       );
@@ -107,5 +107,42 @@ describe('HttpTransport', () => {
       expect(() => Buffer.from(TEST_KEY.seedBase64, 'base64')).not.toThrow();
       expect(Buffer.from(TEST_KEY.seedBase64, 'base64').length).toBe(32);
     });
+  });
+});
+
+describe('admin signature audience (signature version 2)', () => {
+  it('reads the NA public key once from /sovereign.json and signs the request it sends', async () => {
+    const fetch = mockFetch(
+      { status: 200, body: { network_authority: { public_key: 'NA-PUBLIC-KEY' } } },
+      { status: 201, body: { token_id: 't1' } },
+      { status: 201, body: { token_id: 't2' } },
+    );
+    const t = buildTransport(fetch, { audience: undefined });
+    await t.adminPost('/admin/invite', { roles: ['role:client'] });
+    await t.adminPost('/admin/invite', { roles: ['role:client'] });
+    const urls = fetch.mock.calls.map(c => String(c[0]));
+    expect(urls).toEqual([
+      'http://127.0.0.1:9443/sovereign.json',
+      'http://127.0.0.1:9443/admin/invite',
+      'http://127.0.0.1:9443/admin/invite',
+    ]);
+    const { adminSigningPayload, verifyBytes } = await import('../src/auth.js');
+    const headers = (fetch.mock.calls[1][1] as RequestInit).headers as Record<string, string>;
+    const payload = adminSigningPayload(
+      { method: 'POST', path: '/admin/invite', audience: 'NA-PUBLIC-KEY', body: { roles: ['role:client'] } },
+      'operator-local', headers['X-Admin-Timestamp'], headers['X-Admin-Nonce'],
+    );
+    expect(verifyBytes(Buffer.from(payload), headers['X-Admin-Signature'], TEST_KEY.pubBase64)).toBe(true);
+  });
+
+  it('retries the lookup after a failure instead of caching it', async () => {
+    const fetch = mockFetch(
+      { status: 503, body: { error: 'down' } },
+      { status: 200, body: { network_authority: { public_key: 'NA-PUBLIC-KEY' } } },
+      { status: 201, body: { token_id: 't1' } },
+    );
+    const t = buildTransport(fetch, { audience: undefined });
+    await expect(t.adminPost('/admin/invite', {})).rejects.toThrow(/NA public key/);
+    await expect(t.adminPost('/admin/invite', {})).resolves.toEqual({ token_id: 't1' });
   });
 });

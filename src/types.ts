@@ -352,32 +352,54 @@ export interface PolicyVerification {
 
 // ── Evidence ──────────────────────────────────────────────────────────────────
 
+/** One reason behind a trust verdict, as the NA reads and signs it. */
 export interface TrustSignal {
-  signal_id: string;
-  signal_type: string;
-  value: unknown;
+  code: string;
+  severity: 'info' | 'warn' | 'escalate' | 'block' | string;
+  detail: string;
+  /** @deprecated Never sent or read by the NA; see `code`. */
+  signal_id?: string;
+  /** @deprecated Never sent or read by the NA; see `code` and `severity`. */
+  signal_type?: string;
+  /** @deprecated Never sent or read by the NA; see `detail`. */
+  value?: unknown;
   [key: string]: unknown;
 }
 
+/**
+ * The decision `evidence.build` signs. The NA signs what it is given: set
+ * `trusted`, `hop_count` and the other fields from the decision being recorded.
+ */
 export interface TrustDecision {
   source_sovereign_id: string;
   target_sovereign_id: string;
   verdict: string;
   reason?: string;
+  requested_roles?: string[];
+  trusted?: boolean;
+  trust_path?: Record<string, unknown>[];
+  hop_count?: number;
   signals?: TrustSignal[];
+  evaluated_at?: string;
   [key: string]: unknown;
 }
 
 export interface TrustEvidence {
   evidence_id: string;
+  issuer_sovereign_id: string;
   source_sovereign_id: string;
   target_sovereign_id: string;
   verdict: string;
   reason: string;
+  trusted: boolean;
+  hop_count: number;
+  requested_roles: string[];
+  signals: TrustSignal[];
   graph_digest: string;
+  evaluated_at: string;
   issued_at: string;
   issued_by: string;
-  signals: TrustSignal[];
+  metadata: Record<string, unknown>;
   signatures: Signature[];
 }
 
@@ -419,7 +441,8 @@ export interface AttestationRecord {
 
 export interface AttestationList {
   count: number;
-  attestations: AttestationRecord[];
+  /** Present for operator-signed requests, or when the NA publishes the list. */
+  attestations?: AttestationRecord[];
 }
 
 export interface AttestationRevocation {
@@ -469,32 +492,55 @@ export interface SovereignRevocationFeed {
 
 // ── Disclosure ────────────────────────────────────────────────────────────────
 
+/** A signed Merkle commitment: it reveals how many capabilities, not which. */
 export interface CapabilityCommitment {
   commitment_id: string;
   agreement_id: string;
-  capabilities: string[];
+  issuer_sovereign_id: string;
   merkle_root: string;
+  capability_count: number;
   committed_at: string;
-  issued_by: string;
-  signatures: Signature[];
+  signature: Signature | null;
+  /** @deprecated Never sent by the NA: a commitment does not reveal its capabilities. */
+  capabilities?: string[];
+  /** @deprecated Never sent by the NA; see `issuer_sovereign_id` and `signature.key_id`. */
+  issued_by?: string;
+  /** @deprecated Never sent by the NA; a commitment carries one `signature`. */
+  signatures?: Signature[];
+}
+
+/** One step from a leaf to the Merkle root. */
+export interface MerklePathStep {
+  sibling_hash: string;
+  is_left: boolean;
 }
 
 export interface CapabilityMembershipProof {
   proof_id: string;
   commitment_id: string;
-  capability: string;
-  merkle_path: string[];
+  revealed_capability: string;
+  leaf_hash: string;
+  merkle_path: MerklePathStep[];
   prover_sovereign_id: string;
   proved_at: string;
+  /** @deprecated Never sent by the NA; see `revealed_capability`. */
+  capability?: string;
 }
 
 export interface CapabilityNullifier {
   nullifier_id: string;
   proof_id: string;
-  commitment_id: string;
+  prover_sovereign_id: string;
+  nonce: string;
   issued_at: string;
-  issued_by: string;
-  signatures: Signature[];
+  expires_at: string;
+  signature: Signature | null;
+  /** @deprecated Never sent by the NA. */
+  commitment_id?: string;
+  /** @deprecated Never sent by the NA; see `signature.key_id`. */
+  issued_by?: string;
+  /** @deprecated Never sent by the NA; a nullifier carries one `signature`. */
+  signatures?: Signature[];
 }
 
 export interface DisclosureVerification {
