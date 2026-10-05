@@ -7,6 +7,46 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [1.0.2] - 2026-10-05
+
+Coordinated Genesis Mesh v1.0.2 release: fixes from external testing.
+
+### Changed
+
+- **Admin signatures cover the whole request (signature version 2):** the
+  client signs the HTTP method, the decoded path, the query parameters and the
+  target NA's public key, read once from `/sovereign.json` or given as the new
+  `audience` option. Network Authorities from 1.0.2 accept only version 2 by
+  default.
+- `attestation.list()` signs its request when the client has a signing key:
+  Network Authorities from 1.0.2 list attestations to operators and give the
+  count to everyone else. `AttestationList.attestations` is optional.
+- **Breaking:** `buildAdminHeaders` and
+  `buildAdminHeadersWithSigner` take an `AdminRequest`
+  (`{method, path, query?, audience, body?}`) instead of a body. New exports:
+  `adminSigningPayload`, `ADMIN_SIGNATURE_VERSION`, and the `AdminRequest` and
+  `AdminSigningOptions` types. The shared conformance vectors are in
+  `tests/fixtures/conformance/admin_auth.json`.
+
+### Fixed
+
+- **Disclosure types match the Network Authority.** `CapabilityCommitment` has
+  `issuer_sovereign_id`, `capability_count` and one `signature`; it declared
+  `capabilities`, `issued_by` and `signatures`, which the NA never sends (a
+  commitment reveals how many capabilities, not which).
+  `CapabilityMembershipProof` has `revealed_capability`, `leaf_hash` and
+  `merkle_path` steps (the new `MerklePathStep`: `sibling_hash`, `is_left`),
+  not `capability` and strings. `CapabilityNullifier` has
+  `prover_sovereign_id`, `nonce`, `expires_at` and one `signature`. The names
+  the NA never sends are optional and deprecated.
+- `TrustSignal` is `{code, severity, detail}`, what the NA reads and signs:
+  signals built to the old type (`signal_id`, `signal_type`, `value`) were
+  refused with `400 invalid_decision`. `TrustDecision` lists the fields the NA
+  signs (`trusted`, `hop_count`, `trust_path`, `requested_roles`,
+  `evaluated_at`), and `TrustEvidence` has the six fields it lacked.
+- Code that builds these objects itself, such as test fixtures, needs the
+  newly required fields.
+
 ## [1.0.1] - 2026-10-04
 
 Coordinated Genesis Mesh v1.0.1 release: gateway console fixes. No changes in

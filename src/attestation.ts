@@ -70,9 +70,16 @@ export class AttestationClient {
     return this.http.publicGet<AttestationRecord>(`/attestations/${encodeURIComponent(attestationId)}`);
   }
 
-  /** Stored attestations, optionally filtered by issuer, subject or status (unauthenticated). */
+  /**
+   * Stored attestations, optionally filtered by issuer, subject or status.
+   * The NA lists them to operators and gives everyone else the count (1.0.2):
+   * a client with a signing key signs the request and gets `attestations`;
+   * without one it gets `count`, and only `status` may be used as a filter.
+   */
   list(params: ListAttestationsParams = {}): Promise<AttestationList> {
-    return this.http.publicGet<AttestationList>('/attestations', { ...params });
+    return this.http.canSign
+      ? this.http.adminGet<AttestationList>('/attestations', { ...params })
+      : this.http.publicGet<AttestationList>('/attestations', { ...params });
   }
 
   /** Verify an attestation against a recognition policy (unauthenticated). */

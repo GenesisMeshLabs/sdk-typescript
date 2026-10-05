@@ -3,16 +3,23 @@ import { UnauthorizedError } from '../src/errors.js';
 import { buildTransport, mockFetch } from './helpers.js';
 import type { TrustEvidence } from '../src/types.js';
 
+// The NA's own response shape (v1.0.2: the type lacked six of its fields).
 const EVIDENCE: TrustEvidence = {
   evidence_id: 'ev-001',
+  issuer_sovereign_id: 'ALPHA',
   source_sovereign_id: 'ALPHA',
   target_sovereign_id: 'BETA',
-  verdict: 'trusted',
+  verdict: 'allow',
   reason: 'long-standing member',
+  trusted: true,
+  hop_count: 1,
+  requested_roles: [],
+  signals: [{ code: 'active_treaty_path', severity: 'info', detail: 'active recognition path with 1 hop(s)' }],
   graph_digest: 'sha256:abc',
+  evaluated_at: '2026-06-01T00:00:00Z',
   issued_at: '2026-06-01T00:00:00Z',
   issued_by: 'na-alpha',
-  signals: [],
+  metadata: {},
   signatures: [{ key_id: 'na-alpha', sig: 'sig' }],
 };
 
@@ -25,12 +32,12 @@ describe('EvidenceClient', () => {
         decision: {
           source_sovereign_id: 'ALPHA',
           target_sovereign_id: 'BETA',
-          verdict: 'trusted',
+          verdict: 'allow',
           reason: 'long-standing member',
         },
       });
       expect(result.evidence_id).toBe('ev-001');
-      expect(result.verdict).toBe('trusted');
+      expect(result.verdict).toBe('allow');
       expect(fetch.mock.calls[0][0]).toContain('/admin/trust-evidence');
     });
 
@@ -38,7 +45,7 @@ describe('EvidenceClient', () => {
       const fetch = mockFetch({ status: 201, body: EVIDENCE });
       const client = new EvidenceClient(buildTransport(fetch));
       await client.build({
-        decision: { source_sovereign_id: 'ALPHA', target_sovereign_id: 'BETA', verdict: 'trusted' },
+        decision: { source_sovereign_id: 'ALPHA', target_sovereign_id: 'BETA', verdict: 'allow' },
         graph_digest: 'sha256:custom',
       });
       const body = JSON.parse((fetch.mock.calls[0][1] as RequestInit).body as string);
@@ -49,7 +56,7 @@ describe('EvidenceClient', () => {
       const fetch = mockFetch({ status: 401, body: { error: 'Unauthorized', code: 'admin_auth_failed' } });
       const client = new EvidenceClient(buildTransport(fetch));
       await expect(
-        client.build({ decision: { source_sovereign_id: 'A', target_sovereign_id: 'B', verdict: 'trusted' } }),
+        client.build({ decision: { source_sovereign_id: 'A', target_sovereign_id: 'B', verdict: 'allow' } }),
       ).rejects.toBeInstanceOf(UnauthorizedError);
     });
   });
@@ -63,13 +70,13 @@ describe('EvidenceClient', () => {
           reason: 'ok',
           evidence_id: 'ev-001',
           issuer_sovereign_id: 'ALPHA',
-          verdict: 'trusted',
+          verdict: 'allow',
         },
       });
       const client = new EvidenceClient(buildTransport(fetch));
       const result = await client.verify({ evidence: EVIDENCE });
       expect(result.accepted).toBe(true);
-      expect(result.verdict).toBe('trusted');
+      expect(result.verdict).toBe('allow');
       const [, init] = fetch.mock.calls[0] as [string, RequestInit];
       expect((init.headers as Record<string, string>)['X-Admin-Key-Id']).toBeUndefined();
     });

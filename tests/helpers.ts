@@ -44,6 +44,8 @@ export function buildTransport(
     baseUrl: 'http://127.0.0.1:9443',
     signingKeyBase64: TEST_KEY.seedBase64,
     keyId: 'operator-local',
+    // Admin signatures name the NA's sovereign ID; mocked NAs are 'TEST'.
+    audience: 'TEST',
     fetch: fetchMock as unknown as typeof globalThis.fetch,
     ...opts,
   });

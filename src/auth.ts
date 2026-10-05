@@ -4,9 +4,15 @@
  *
  * The NA verifies admin requests via four HTTP headers:
  *   X-Admin-Key-Id        - which operator key was used
- *   X-Admin-Signature     - Ed25519(canonicalJson({body,key_id,nonce,timestamp}))
+ *   X-Admin-Signature     - Ed25519 over the canonical admin payload (version 2):
+ *                           {v, method, path, query, audience, body, key_id, timestamp, nonce}
  *   X-Admin-Timestamp     - ISO 8601 UTC timestamp
  *   X-Admin-Nonce         - UUID v4 replay-protection token
+ *
+ * Version 2 (Genesis Mesh 1.0.2) binds the signature to the HTTP method, the
+ * decoded request path, the query parameters and the target NA's public key,
+ * so a captured request cannot be replayed against another route, target,
+ * query or Network Authority.
  *
  * Canonical JSON matches Python json.dumps(..., sort_keys=True, separators=(",",":"))
  * applied to the value the NA parses: keys recursively sorted, compact output,
@@ -226,19 +232,74 @@ export interface AdminHeaders extends Record<string, string> {
   'X-Admin-Nonce': string;
 }
 
-function adminMessage(body: unknown, keyId: string): { canonical: string; timestamp: string; nonce: string } {
-  const timestamp = new Date().toISOString();
-  const nonce = randomUUID();
-  return { canonical: canonicalJson({ body, key_id: keyId, nonce, timestamp }), timestamp, nonce };
+/** Admin signature format version (Genesis Mesh 1.0.2). */
+export const ADMIN_SIGNATURE_VERSION = 2;
+
+/** What an admin signature binds (signature version 2). */
+export interface AdminRequest {
+  /** HTTP method, e.g. `POST`. */
+  method: string;
+  /** The path the NA serves, decoded, without the query string (e.g. `/admin/invite`). */
+  path: string;
+  /** Query parameters exactly as sent: a name maps to one value or a list in sending order. */
+  query?: Readonly<Record<string, string | readonly string[]>>;
+  /** The target NA's public key (`network_authority.public_key` in its `/sovereign.json`). */
+  audience: string;
+  /** JSON body; a request without one signs `{}`. */
+  body?: unknown;
 }
 
-/** Build the four admin auth headers for a given request body. */
+/** Optional fixed values, for reproducing a signature (tests and conformance vectors). */
+export interface AdminSigningOptions {
+  timestamp?: string;
+  nonce?: string;
+}
+
+function normalizeQuery(query: AdminRequest['query']): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const [name, value] of Object.entries(query ?? {})) {
+    out[name] = Array.isArray(value) ? value.map(String) : [String(value)];
+  }
+  return out;
+}
+
+/** The exact string an operator signs for `request` (canonical JSON, signature version 2). */
+export function adminSigningPayload(request: AdminRequest, keyId: string, timestamp: string, nonce: string): string {
+  // A decoded path may itself contain '?' (from %3F); query parameters go in `query`.
+  if (!request.path.startsWith('/')) {
+    throw new Error('admin request path must start with "/"');
+  }
+  return canonicalJson({
+    v: ADMIN_SIGNATURE_VERSION,
+    method: request.method.toUpperCase(),
+    path: request.path,
+    query: normalizeQuery(request.query),
+    audience: request.audience,
+    body: request.body ?? {},
+    key_id: keyId,
+    timestamp,
+    nonce,
+  });
+}
+
+function adminMessage(
+  request: AdminRequest,
+  keyId: string,
+  options: AdminSigningOptions,
+): { canonical: string; timestamp: string; nonce: string } {
+  const timestamp = options.timestamp ?? new Date().toISOString();
+  const nonce = options.nonce ?? randomUUID();
+  return { canonical: adminSigningPayload(request, keyId, timestamp, nonce), timestamp, nonce };
+}
+
+/** Build the four admin auth headers for one request. */
 export function buildAdminHeaders(
-  body: unknown,
+  request: AdminRequest,
   keyId: string,
   signingKeyBase64: string,
+  options: AdminSigningOptions = {},
 ): AdminHeaders {
-  const { canonical, timestamp, nonce } = adminMessage(body, keyId);
+  const { canonical, timestamp, nonce } = adminMessage(request, keyId, options);
   const sig = signBytes(Buffer.from(canonical, 'utf-8'), signingKeyBase64);
   return {
     'X-Admin-Key-Id': keyId,
@@ -249,8 +310,12 @@ export function buildAdminHeaders(
 }
 
 /** Build the four admin auth headers with a Signer (key id taken from the signer). */
-export async function buildAdminHeadersWithSigner(body: unknown, signer: Signer): Promise<AdminHeaders> {
-  const { canonical, timestamp, nonce } = adminMessage(body, signer.keyId);
+export async function buildAdminHeadersWithSigner(
+  request: AdminRequest,
+  signer: Signer,
+  options: AdminSigningOptions = {},
+): Promise<AdminHeaders> {
+  const { canonical, timestamp, nonce } = adminMessage(request, signer.keyId, options);
   const { sig } = await signCanonical(canonical, signer);
   return {
     'X-Admin-Key-Id': signer.keyId,
