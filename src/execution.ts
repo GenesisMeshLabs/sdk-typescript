@@ -84,7 +84,8 @@ function resourceHeadOf(prior: PriorResource): ResourceHead {
 
 export interface RecordExecutionParams {
   /** The decision that authorized this execution. */
-  decision: Pick<BoundaryDecision, 'decision_id' | 'context_id' | 'agreement_id'>;
+  decision: Pick<BoundaryDecision, 'decision_id' | 'context_id' | 'agreement_id'> &
+    Partial<Pick<BoundaryDecision, 'decision_made_at'>>;
   executed_capability: string;
   outcome: ExecutionOutcome;
   execution_parameters?: Record<string, unknown>;
@@ -105,6 +106,23 @@ export interface ExecutionRecorderOptions {
   executorSovereignId: string;
   /** Executor signer; its keyId must be registered with the NA. */
   signer: Signer;
+}
+
+/**
+ * Now, but never before the decision (1.1.0). The NA refuses evidence stamped
+ * before `decision_made_at`, which it writes in microseconds while `Date` has
+ * milliseconds: evidence recorded in the decision's millisecond came out up
+ * to a millisecond early, and so did evidence from a host whose clock is
+ * behind the NA's. The decision time is rounded up to the next millisecond.
+ */
+function notBeforeDecision(decisionMadeAt: string | undefined): Date {
+  const now = Date.now();
+  if (decisionMadeAt === undefined) return new Date(now);
+  const decided = Date.parse(decisionMadeAt);
+  if (Number.isNaN(decided)) return new Date(now);
+  const fraction = /\.(\d+)/.exec(decisionMadeAt)?.[1] ?? '';
+  const subMillisecond = /[1-9]/.test(fraction.slice(3));
+  return new Date(Math.max(now, subMillisecond ? decided + 1 : decided));
 }
 
 /** Builds and signs ExecutionEvidence for one executor. */
@@ -140,7 +158,7 @@ export class ExecutionRecorder {
       executor_sovereign_id: this.executorSovereignId,
       executed_capability: params.executed_capability,
       execution_parameters,
-      executed_at: pythonTimestamp(params.executed_at ?? new Date()),
+      executed_at: pythonTimestamp(params.executed_at ?? notBeforeDecision(params.decision.decision_made_at)),
       outcome: params.outcome,
       outcome_detail,
       prev_evidence_digest: prior ? executionDigest(prior) : null,

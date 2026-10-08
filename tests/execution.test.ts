@@ -1,4 +1,4 @@
-import { describe, expect, it, jest } from '@jest/globals';
+import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import { ExecutionRecorder, checkMetadataOnly, executionDigest, seedSigner, verifyExecutionSignature, SecretMaterialError } from '../src/index.js';
 import { TEST_KEY } from './helpers.js';
 import { vectors } from './vectors.js';
@@ -39,6 +39,32 @@ describe('ExecutionRecorder', () => {
     const guarded = new ExecutionRecorder({ executorSovereignId: 'x', signer: { keyId: 'x', sign } });
     await expect(guarded.record({ ...params, execution_parameters: { nested: [{ 'Client-Secret': 'x' }] } })).rejects.toBeInstanceOf(SecretMaterialError);
     expect(sign).not.toHaveBeenCalled();
+  });
+});
+
+describe('ExecutionRecorder executed_at (1.1.0: never before the decision)', () => {
+  const at = (decision_made_at: string) => ({ ...params, decision: { ...v.allowed.decision, decision_made_at } });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('rounds a decision in the same millisecond up to the next one', async () => {
+    jest.useFakeTimers({ now: new Date('2026-10-08T05:17:04.391Z') });
+    const record = await recorder.record(at('2026-10-08T05:17:04.391773Z'));
+    expect(record.executed_at).toBe('2026-10-08T05:17:04.392000Z');
+    expect(verifyExecutionSignature(record, TEST_KEY.pubBase64)).toBe(true);
+  });
+  it('takes the decision time when the local clock is behind', async () => {
+    jest.useFakeTimers({ now: new Date('2026-10-08T05:17:02.000Z') });
+    expect((await recorder.record(at('2026-10-08T05:17:04.25+00:00'))).executed_at).toBe('2026-10-08T05:17:04.250000Z');
+  });
+  it('uses the clock once it is past the decision', async () => {
+    jest.useFakeTimers({ now: new Date('2026-10-08T05:17:05.123Z') });
+    expect((await recorder.record(at('2026-10-08T05:17:04.391773Z'))).executed_at).toBe('2026-10-08T05:17:05.123000Z');
+  });
+  it('signs an explicit executed_at unchanged, even before the decision', async () => {
+    const record = await recorder.record({ ...at('2026-10-08T05:17:04.391773Z'), executed_at: new Date('2026-10-08T05:17:04.000Z') });
+    expect(record.executed_at).toBe('2026-10-08T05:17:04Z');
   });
 });
 
