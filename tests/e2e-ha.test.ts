@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createInterface, type Interface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import {
-  GenesisMeshClient, ExecutionRecorder, seedSigner, governedAction, verifyEvidenceEvents, MemoryOutbox,
+  GenesisMeshClient, ExecutionRecorder, seedSigner, governedAction, verifyEvidenceEvents,
 } from '../src/index.js';
 import type { BoundaryPolicy, MembershipAttestation } from '../src/index.js';
 import { generateTestKeyPair } from './helpers.js';
@@ -60,11 +60,9 @@ suite('SDK against a two-instance HA Network Authority', () => {
   });
 
   it('keeps governing a secret through the load balancer and direct failover when an instance dies', async () => {
-    // Both clients govern the same secret, so they share one outbox.
-    const outbox = new MemoryOutbox();
-    const lb = new GenesisMeshClient({ baseUrl: info.baseUrl, signingKeyBase64: info.operatorSeed, keyId: info.operatorKeyId, outbox });
+    const lb = new GenesisMeshClient({ baseUrl: info.baseUrl, signingKeyBase64: info.operatorSeed, keyId: info.operatorKeyId });
     const direct = new GenesisMeshClient({
-      baseUrls: Object.values(info.instances), signingKeyBase64: info.operatorSeed, keyId: info.operatorKeyId, outbox,
+      baseUrls: Object.values(info.instances), signingKeyBase64: info.operatorSeed, keyId: info.operatorKeyId,
     });
 
     // Every instance is ready, in HA mode, on PostgreSQL, with the same key.

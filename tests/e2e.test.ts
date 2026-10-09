@@ -47,7 +47,7 @@ suite('SDK against a live Python Network Authority', () => {
       lines.close();
     }
     naPublicKey = config.naPublicKey;
-    gm = new GenesisMeshClient({ ...config, outbox: new MemoryOutbox() });
+    gm = new GenesisMeshClient(config);
   }, 25_000);
 
   afterAll(async () => {
@@ -162,9 +162,9 @@ suite('SDK against a live Python Network Authority', () => {
       resource_action: 'rotate' as const, verify: { operatorPublicKeys: [naPublicKey], expectedPolicies: [], expectedAttestation: attestation },
     };
     const first = await governedAction(client, recorder, params, async () => ({ value: 1, execution_parameters: { secret_version: 'v1' } }));
-    expect(first).toMatchObject({ value: 1, submission: { status: 'pending' } });
+    expect(first).toMatchObject({ value: 1, queued: { state: 'pending' } });
     const second = await governedAction(client, recorder, params, async () => ({ value: 2, execution_parameters: { secret_version: 'v2' } }));
-    expect(second).toMatchObject({ value: 2, submission: { status: 'pending' } });
+    expect(second).toMatchObject({ value: 2, queued: { state: 'pending' } });
     expect(second.evidence!.prev_resource_digest).toBe(executionDigest(first.evidence!));
 
     offline = false;

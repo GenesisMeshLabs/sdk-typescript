@@ -7,11 +7,11 @@ import {
   outboxEntry,
   PREDECESSOR_DEAD_LETTERED,
   retryDelayMs,
+  type Delivery,
   type EvidenceOutbox,
   type FlushOptions,
   type FlushResult,
   type OutboxEntry,
-  type QueuedSubmission,
 } from './outbox.js';
 import { parseExportLines } from './verify.js';
 import type {
@@ -87,13 +87,19 @@ function predecessors(evidence: ExecutionEvidence): string[] {
   return [evidence.prev_evidence_digest, evidence.prev_resource_digest].filter((d): d is string => !!d);
 }
 
+/** Most pending records an action submits before its own (older ones wait for `flushPending`). */
+const MAX_INLINE_DRAIN = 100;
+
 /** The NA evidence store (v0.59): controller submission, operator search, history, export. */
 export class EvidenceStoreClient {
   private flushing: Promise<FlushResult> | null = null;
+  /** Digests of outbox records by id: a record never changes once signed. */
+  private readonly digests = new Map<string, string>();
 
   /**
    * @param outbox Durable storage for signed records not yet admitted
-   *   (v1.2.0); `governedAction` requires one (`ClientOptions.outbox`).
+   *   (v1.2.0, `ClientOptions.outbox`). With one, `governedAction` keeps every
+   *   record until the NA admits it.
    */
   constructor(private readonly http: HttpTransport, readonly outbox?: EvidenceOutbox) {}
 
@@ -109,44 +115,66 @@ export class EvidenceStoreClient {
   }
 
   /**
-   * Keep a signed record in the outbox, then submit it unless a record it
-   * chains from is still pending (v1.2.0). A failed submission does not
-   * throw: a transient error (network, timeout, 5xx, 429) leaves the record
-   * pending for `flushPending`, and a refusal (any other 4xx) keeps it as a
-   * dead letter with the NA's code. Throws only when the outbox cannot store
-   * the record.
+   * Keep a signed record in the outbox and submit it (v1.2.0). Pending
+   * records it chains from are submitted first, oldest first (up to 100;
+   * older ones wait for `flushPending`). A failed submission does not throw:
+   * a transient error leaves the record pending for `flushPending`, and a
+   * refusal no retry can overcome keeps it as a dead letter with the NA's
+   * code, as does a predecessor's refusal. Throws only when the outbox
+   * cannot store the record. Passing a record already in the outbox submits
+   * it again.
    */
-  async enqueue(evidence: ExecutionEvidence): Promise<EvidenceSubmission | QueuedSubmission> {
+  async enqueue(evidence: ExecutionEvidence): Promise<Delivery> {
     const outbox = this.requireOutbox();
-    const entry = outboxEntry(evidence);
-    const queued = await outbox.list();
-    await outbox.add(entry);
-    const waiting = new Set(queued.map(e => executionDigest(e.evidence)));
-    if (predecessors(evidence).some(d => waiting.has(d))) return { status: 'pending', entry };
-    return this.attempt(outbox, entry);
+    const entries = await outbox.list();
+    let entry = entries.find(e => e.id === evidence.evidence_id);
+    if (entry && this.digestOf(entry) !== executionDigest(evidence)) {
+      throw new Error(`a different record with evidence_id ${evidence.evidence_id} is in the outbox`);
+    }
+    if (!entry) {
+      entry = outboxEntry(evidence);
+      await outbox.add(entry);
+      entries.push(entry);
+    }
+    if (entry.state === 'dead_letter') return { queued: entry };
+    const chain = this.chainOf(entries, entry);
+    if (chain.dead) return { queued: await this.deadLetter(outbox, entries, entry, PREDECESSOR_DEAD_LETTERED) };
+    if (!chain.pending.length) return this.attempt(outbox, entries, entry);
+    if (this.flushing || chain.pending.length > MAX_INLINE_DRAIN) return { queued: entry };
+    const only = new Set([...chain.pending.map(e => e.id), entry.id]);
+    const run = this.flush(outbox, { ignoreBackoff: true }, only);
+    this.flushing = run.then(r => r.result).finally(() => { this.flushing = null; });
+    const { outcomes } = await run;
+    return outcomes.get(entry.id) ?? { queued: entry };
   }
 
   /**
    * Submit the outbox's pending records in the order they were added
-   * (v1.2.0). A record waits while one it chains from is pending; it is
+   * (v1.2.0). A record waits while one it chains from is pending, and is
    * dead-lettered (`evidence_predecessor_dead_lettered`) when that one was
    * refused. Records in backoff are skipped unless `ignoreBackoff`; a
    * transient error ends the run, leaving the rest for the next one. Run it
    * at startup and on a timer. Concurrent calls share one run.
    */
-  flushPending(options: FlushOptions = {}): Promise<FlushResult> {
-    this.flushing ??= this.flush(this.requireOutbox(), options).finally(() => { this.flushing = null; });
+  async flushPending(options: FlushOptions = {}): Promise<FlushResult> {
+    const outbox = this.requireOutbox();
+    this.flushing ??= this.flush(outbox, options).then(r => r.result).finally(() => { this.flushing = null; });
     return this.flushing;
   }
 
   /**
-   * The newest pending record in the outbox for a resource, or null (v1.2.0).
-   * `governedAction` chains from it, not from the NA's head, while it waits.
+   * The newest pending record in the outbox for a resource that can still be
+   * admitted, or null (v1.2.0). `governedAction` chains from it, not from the
+   * NA's head, while it waits.
    */
   async pendingHead(resourceId: string): Promise<ExecutionEvidence | null> {
-    const pending = (await this.requireOutbox().list())
-      .filter(e => e.state === 'pending' && e.evidence.resource_id === resourceId);
-    return pending.length ? pending[pending.length - 1]!.evidence : null;
+    const entries = await this.requireOutbox().list();
+    const dead = this.deadDigests(entries);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i]!;
+      if (e.state === 'pending' && e.evidence.resource_id === resourceId && !dead.has(this.digestOf(e))) return e.evidence;
+    }
+    return null;
   }
 
   private requireOutbox(): EvidenceOutbox {
@@ -154,64 +182,150 @@ export class EvidenceStoreClient {
     return this.outbox;
   }
 
-  private async attempt(outbox: EvidenceOutbox, entry: OutboxEntry): Promise<EvidenceSubmission | QueuedSubmission> {
+  private digestOf(entry: OutboxEntry): string {
+    let digest = this.digests.get(entry.id);
+    if (digest === undefined) {
+      digest = executionDigest(entry.evidence);
+      this.digests.set(entry.id, digest);
+    }
+    return digest;
+  }
+
+  /** Digests of dead letters and of every record that chains from one. */
+  private deadDigests(entries: readonly OutboxEntry[]): Set<string> {
+    const dead = new Set<string>();
+    for (const e of entries) {
+      if (e.state === 'dead_letter' || predecessors(e.evidence).some(d => dead.has(d))) dead.add(this.digestOf(e));
+    }
+    return dead;
+  }
+
+  /** Whether `entry` chains from a dead letter, and the pending records it chains from, oldest first. */
+  private chainOf(entries: readonly OutboxEntry[], entry: OutboxEntry): { dead: boolean; pending: OutboxEntry[] } {
+    const byDigest = new Map(entries.map(e => [this.digestOf(e), e]));
+    const dead = this.deadDigests(entries);
+    const pending: OutboxEntry[] = [];
+    const seen = new Set<string>();
+    const visit = (e: OutboxEntry) => {
+      for (const d of predecessors(e.evidence)) {
+        const before = byDigest.get(d);
+        if (!before || seen.has(d)) continue;
+        seen.add(d);
+        visit(before);
+        if (before.state === 'pending') pending.push(before);
+      }
+    };
+    visit(entry);
+    const order = new Map(entries.map((e, i) => [e.id, i]));
+    pending.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
+    return { dead: predecessors(entry.evidence).some(d => dead.has(d)), pending };
+  }
+
+  /** Dead-letter `entry` and every pending record that chains from it. */
+  private async deadLetter(
+    outbox: EvidenceOutbox, entries: OutboxEntry[], entry: OutboxEntry, code: string, failure?: OutboxEntry['last_error'],
+  ): Promise<OutboxEntry> {
+    const refused: OutboxEntry = {
+      ...entry, state: 'dead_letter', next_attempt_at: null,
+      last_error: failure ?? { status: 0, code, message: 'a record this one chains from was refused' },
+    };
+    await this.keep(outbox, refused);
+    const index = entries.findIndex(e => e.id === entry.id);
+    entries[index] = refused;
+    const dead = new Set([this.digestOf(entry)]);
+    for (let i = index + 1; i < entries.length; i++) {
+      const later = entries[i]!;
+      if (later.state !== 'pending' || !predecessors(later.evidence).some(d => dead.has(d))) continue;
+      dead.add(this.digestOf(later));
+      entries[i] = {
+        ...later, state: 'dead_letter', next_attempt_at: null,
+        last_error: { status: 0, code: PREDECESSOR_DEAD_LETTERED, message: 'a record this one chains from was refused' },
+      };
+      await this.keep(outbox, entries[i]!);
+    }
+    return refused;
+  }
+
+  /** Store an entry's new state. Once the NA has answered, the answer stands even if this fails. */
+  private async keep(outbox: EvidenceOutbox, entry: OutboxEntry): Promise<void> {
+    try {
+      await outbox.update(entry);
+    } catch {
+      // The entry keeps its previous state; the next flush settles it.
+    }
+  }
+
+  private async attempt(outbox: EvidenceOutbox, entries: OutboxEntry[], entry: OutboxEntry): Promise<Delivery> {
     let submission: EvidenceSubmission;
     try {
       submission = await this.submit(entry.evidence);
     } catch (err) {
       const { failure, transient } = classifySubmissionError(err);
       const attempts = entry.attempts + 1;
-      const failed: OutboxEntry = transient
-        ? { ...entry, attempts, last_error: failure, next_attempt_at: new Date(Date.now() + retryDelayMs(attempts)).toISOString() }
-        : { ...entry, attempts, last_error: failure, state: 'dead_letter', next_attempt_at: null };
-      await outbox.update(failed);
-      return { status: failed.state, entry: failed };
+      if (!transient) {
+        return { queued: await this.deadLetter(outbox, entries, { ...entry, attempts }, failure.code, failure) };
+      }
+      const failed: OutboxEntry = {
+        ...entry, attempts, last_error: failure, next_attempt_at: new Date(Date.now() + retryDelayMs(attempts)).toISOString(),
+      };
+      await this.keep(outbox, failed);
+      entries[entries.findIndex(e => e.id === entry.id)] = failed;
+      return { queued: failed };
     }
-    await outbox.remove(entry.id);
-    return submission;
+    try {
+      await outbox.remove(entry.id);
+    } catch {
+      // The NA holds the record: the next flush resubmits it, gets a duplicate and removes it.
+    }
+    return { submission };
   }
 
-  private async flush(outbox: EvidenceOutbox, options: FlushOptions): Promise<FlushResult> {
+  private async flush(
+    outbox: EvidenceOutbox, options: FlushOptions, only?: ReadonlySet<string>,
+  ): Promise<{ result: FlushResult; outcomes: Map<string, Delivery> }> {
     const result: FlushResult = { admitted: [], pending: [], dead_lettered: [] };
+    const outcomes = new Map<string, Delivery>();
+    const entries = await outbox.list();
     const waiting = new Set<string>();
-    const dead = new Set<string>();
     let stopped = false;
-    for (const entry of await outbox.list()) {
-      const digest = executionDigest(entry.evidence);
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      const digest = this.digestOf(entry);
+      if (entry.state === 'dead_letter') continue;
+      if (only && !only.has(entry.id)) {
+        waiting.add(digest);
+        continue;
+      }
       const after = predecessors(entry.evidence);
-      if (entry.state === 'dead_letter') {
-        dead.add(digest);
-        continue;
-      }
-      if (after.some(d => dead.has(d))) {
-        const refused: OutboxEntry = {
-          ...entry, state: 'dead_letter', next_attempt_at: null,
-          last_error: { status: 0, code: PREDECESSOR_DEAD_LETTERED, message: 'a record this one chains from was refused' },
-        };
-        await outbox.update(refused);
-        dead.add(digest);
-        result.dead_lettered.push(refused);
-        continue;
-      }
-      const due = options.ignoreBackoff || !entry.next_attempt_at || Date.parse(entry.next_attempt_at) <= Date.now();
+      const next = entry.next_attempt_at ? Date.parse(entry.next_attempt_at) : NaN;
+      const due = options.ignoreBackoff || !(next > Date.now());
       if (stopped || !due || after.some(d => waiting.has(d))) {
         waiting.add(digest);
         result.pending.push(entry);
+        outcomes.set(entry.id, { queued: entry });
         continue;
       }
-      const outcome = await this.attempt(outbox, entry);
-      if (outcome.status === 'pending') {
-        waiting.add(digest);
-        result.pending.push(outcome.entry);
-        stopped = true;
-      } else if (outcome.status === 'dead_letter') {
-        dead.add(digest);
-        result.dead_lettered.push(outcome.entry);
-      } else {
+      const delivery = await this.attempt(outbox, entries, entry);
+      outcomes.set(entry.id, delivery);
+      if (delivery.submission) {
         result.admitted.push(entry);
+      } else if (delivery.queued!.state === 'dead_letter') {
+        // attempt() also dead-lettered the records chaining from it, later in `entries`.
+        result.dead_lettered.push(delivery.queued!);
+        for (let j = i + 1; j < entries.length; j++) {
+          if (entries[j]!.state === 'dead_letter' && entries[j]!.last_error?.code === PREDECESSOR_DEAD_LETTERED
+            && !result.dead_lettered.some(e => e.id === entries[j]!.id)) {
+            result.dead_lettered.push(entries[j]!);
+            outcomes.set(entries[j]!.id, { queued: entries[j]! });
+          }
+        }
+      } else {
+        waiting.add(digest);
+        result.pending.push(delivery.queued!);
+        stopped = true;
       }
     }
-    return result;
+    return { result, outcomes };
   }
 
   /** Search stored entries (admin). Use `next_after_sequence` as the next `after_sequence`. */

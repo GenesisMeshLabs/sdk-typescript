@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from '@jest/globals';
 import {
   FileOutbox, MemoryOutbox, classifySubmissionError, retryDelayMs,
   BadRequestError, ConflictError, GenesisMeshError, NetworkError, NotFoundError, RateLimitError, SecretMaterialError,
+  ValidationError,
 } from '../src/index.js';
 import type { EvidenceOutbox, ExecutionEvidence, OutboxEntry } from '../src/index.js';
 
@@ -83,23 +84,46 @@ describe('FileOutbox', () => {
     await outbox.remove('../escape');
     expect(await readdir(dir)).toHaveLength(1);
   });
-  it('writes a versioned format and ignores temporary files', async () => {
+  it('writes a versioned format', async () => {
     const dir = await directory();
-    const outbox = new FileOutbox(dir);
-    await outbox.add(entry('a'));
-    await writeFile(join(dir, '.000000000002-b.json.tmp'), 'partial');
+    await new FileOutbox(dir).add(entry('a'));
     const body = JSON.parse(await readFile(join(dir, '000000000001-a.json'), 'utf-8'));
     expect(body).toMatchObject({ format: 'gm.evidence.outbox.v1', entry: { id: 'a', state: 'pending' } });
-    expect((await outbox.list()).map(e => e.id)).toEqual(['a']);
+  });
+  it('recovers an add a crash interrupted and drops an unfinished update or partial write', async () => {
+    const dir = await directory();
+    await new FileOutbox(dir).add(entry('a'));
+    const file = (e: OutboxEntry) => JSON.stringify({ format: 'gm.evidence.outbox.v1', entry: e });
+    // An add synced but not renamed, an update not renamed, and a write cut short.
+    await writeFile(join(dir, '.000000000002-b.json.0a1b2c.tmp'), file(entry('b')));
+    await writeFile(join(dir, '.000000000001-a.json.3d4e5f.tmp'), file(entry('a', { attempts: 5 })));
+    await writeFile(join(dir, '.000000000003-c.json.6a7b8c.tmp'), '{"form');
+    const listed = await new FileOutbox(dir).list();
+    expect(listed.map(e => [e.id, e.attempts])).toEqual([['a', 0], ['b', 0]]);
+    expect((await readdir(dir)).sort()).toEqual(['000000000001-a.json', '000000000002-b.json']);
   });
   it('fails loudly on an unreadable entry', async () => {
     const dir = await directory();
-    const outbox = new FileOutbox(dir);
-    await outbox.add(entry('a'));
+    await new FileOutbox(dir).add(entry('a'));
     await writeFile(join(dir, '000000000002-b.json'), '{not json');
-    await expect(outbox.list()).rejects.toThrow('000000000002-b.json');
+    await expect(new FileOutbox(dir).list()).rejects.toThrow('000000000002-b.json');
     await writeFile(join(dir, '000000000002-b.json'), '{"format":"other"}');
-    await expect(outbox.list()).rejects.toThrow('gm.evidence.outbox.v1');
+    await expect(new FileOutbox(dir).list()).rejects.toThrow('gm.evidence.outbox.v1');
+  });
+  it('reads entries the Rust SDK writes', async () => {
+    const dir = await directory();
+    await new FileOutbox(dir).list();
+    // As `FileOutbox` in genesis-mesh-sdk (Rust) writes it: serde_json, two-space indent.
+    const written = {
+      format: 'gm.evidence.outbox.v1',
+      entry: {
+        id: 'e-1', evidence: { evidence_id: 'e-1' }, state: 'dead_letter', attempts: 3,
+        queued_at: '2026-10-09T12:00:00.000Z', next_attempt_at: null,
+        last_error: { status: 409, code: 'evidence_conflict', message: 'taken' },
+      },
+    };
+    await writeFile(join(dir, '000000000001-e-1.json'), JSON.stringify(written, null, 2));
+    expect(await new FileOutbox(dir).list()).toEqual([written.entry]);
   });
   (process.platform === 'win32' ? it.skip : it)('keeps the directory and entries private', async () => {
     const dir = await directory();
@@ -115,10 +139,16 @@ describe('classifySubmissionError', () => {
     [new RateLimitError(), true],
     [new GenesisMeshError('bad gateway', 'bad_gateway', 502), true],
     [new ConflictError('busy', 'retention_in_progress'), true],
+    [new NotFoundError('disabled', 'evidence_store_disabled'), true],
+    [new ValidationError('unknown key', 'evidence_unknown_executor'), true],
+    [new ValidationError('gap', 'evidence_chain_gap'), true],
+    [new GenesisMeshError('Request Timeout', 'unknown', 408), true],
     [new Error('socket hang up'), true],
     [new ConflictError('taken', 'evidence_conflict'), false],
     [new BadRequestError('malformed', 'evidence_malformed'), false],
-    [new NotFoundError('disabled', 'evidence_store_disabled'), false],
+    [new BadRequestError('not an object', 'invalid_evidence'), false],
+    [new ValidationError('outside', 'evidence_outside_decision_window'), false],
+    [new ValidationError('mismatch', 'resource_chain_mismatch'), false],
     [new SecretMaterialError('field'), false],
   ])('%s is transient: %s', (error, transient) => {
     expect(classifySubmissionError(error).transient).toBe(transient);

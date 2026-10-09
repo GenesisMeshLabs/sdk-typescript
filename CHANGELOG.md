@@ -9,39 +9,34 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ## [1.2.0] - Unreleased
 
-### Changed (breaking)
-
-- **Signed evidence is kept until the NA admits it.** `governedAction` writes
-  each signed record to an evidence outbox before submitting it and removes it
-  once admitted. A failed submission no longer throws: the result's
-  `submission` is the outbox entry, `pending` after a transient error
-  (network, timeout, `5xx`, `429`, a lost race between NA instances) or
-  `dead_letter` with the NA's code after a refusal (any other `4xx`).
-  `governedAction` now requires `ClientOptions.outbox` and throws
-  `outbox_required` without one.
-- A failed action's record that cannot be submitted is kept pending and the
-  action's error is rethrown, instead of `GovernedActionError`, which now means
-  the record could not be signed or kept, and carries it as `evidence`.
-- When the secret guard refuses metadata the action reported, the outcome is
-  still recorded with the accepted parameters, and `MetadataRefusedError`
-  (`governed_action_metadata_refused`) is thrown with the action's `value`,
-  the `evidence`, its `submission` and the `dropped` field names. No record was
-  made before.
-- A governed action on a resource with pending records chains from the newest
-  of them rather than the NA's head.
-
 ### Added
 
-- `FileOutbox` (one file per record, synced and renamed into place, private
-  permissions), `MemoryOutbox` for tests, and the `EvidenceOutbox` interface
-  for other storage.
+- **An evidence outbox keeps signed evidence until the NA admits it.** With
+  `ClientOptions.outbox`, `governedAction` writes each signed record to the
+  outbox before submitting it and removes it once admitted. A failed
+  submission then does not throw: the result's `queued` is the outbox entry,
+  `pending` after a failure a later attempt can overcome (network, timeout,
+  `5xx`, `429`, an executor key not registered yet, a chain gap, a disabled
+  store, a proxy's error page) or `dead_letter` with the code after a refusal
+  no retry can overcome. Dead letters are kept, never dropped. A resource with
+  pending records chains from the newest of them, which the next action on it
+  submits first. Without an outbox, `governedAction` behaves as in 1.1.
+- `FileOutbox` (one file per record, synced and renamed into place, crash
+  leftovers recovered, private permissions on POSIX), `MemoryOutbox` for tests,
+  and the `EvidenceOutbox` interface for other storage.
 - `evidenceStore.flushPending()`: submits pending records in order, waits
   behind pending predecessors, dead-letters records whose predecessor was
   refused, and backs off from 5 s to 15 minutes. `evidenceStore.enqueue()` and
   `evidenceStore.pendingHead()`.
-- `EvidenceNotKeptError` (`governed_action_evidence_unkept`): the action ran
-  but its evidence could not be signed or kept; carries the `value` and the
-  signed `evidence`.
+- With an outbox, a secret-guard refusal of the metadata an action reported
+  still records the outcome, with the accepted parameters and a note naming
+  the dropped ones, and throws `MetadataRefusedError`
+  (`governed_action_metadata_refused`) with the action's `value`, the
+  `evidence` and what became of it. `EvidenceNotKeptError`
+  (`governed_action_evidence_unkept`): the action ran but its evidence could
+  not be signed or kept; carries the `value` and the signed `evidence`.
+- `GovernedActionError` carries the signed failure record as `evidence` when
+  there is one.
 
 ## [1.1.1] - 2026-10-09
 

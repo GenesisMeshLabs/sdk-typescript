@@ -48,8 +48,9 @@ export interface ClientOptions {
   fetch?: typeof globalThis.fetch;
   /**
    * Durable storage for signed execution records not yet admitted (v1.2.0),
-   * e.g. `new FileOutbox('/var/lib/app/gm-outbox')`. Required by
-   * `governedAction`; see `evidenceStore.flushPending`.
+   * e.g. `new FileOutbox('/var/lib/app/gm-outbox')`. With one,
+   * `governedAction` keeps every record until the NA admits it; see
+   * `evidenceStore.flushPending`.
    */
   outbox?: EvidenceOutbox;
 }

@@ -145,11 +145,12 @@ export {
   classifySubmissionError,
   retryDelayMs,
   PREDECESSOR_DEAD_LETTERED,
+  PERMANENT_REFUSALS,
 } from './outbox.js';
 export type {
   EvidenceOutbox,
   OutboxEntry,
-  QueuedSubmission,
+  Delivery,
   SubmissionFailure,
   FlushResult,
   FlushOptions,

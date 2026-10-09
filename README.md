@@ -46,12 +46,12 @@ execution recording, evidence-store queries and offline verification.
 - [Offline verification and integration tests](docs/offline-verification.md)
 - [High availability: failover, readiness and conflicts](docs/high-availability.md)
 
-`governedAction` requires verification keys, explicit expected policies and an
-evidence outbox (`ClientOptions.outbox`, e.g. a `FileOutbox`). It verifies the
-signed response and its request context before calling the supplied action.
-Attestation-backed ALLOWs also require the expected attestation. Signed evidence
-the NA has not admitted stays in the outbox until
-`client.evidenceStore.flushPending()` submits it.
+`governedAction` requires verification keys and explicit expected policies. It
+verifies the signed response and its request context before calling the supplied
+action. Attestation-backed ALLOWs also require the expected attestation. With an
+evidence outbox (`ClientOptions.outbox`, e.g. a `FileOutbox`), signed evidence
+the NA has not admitted is kept until `client.evidenceStore.flushPending()`
+submits it.
 
 ## Sub-clients
 
