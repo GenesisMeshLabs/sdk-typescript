@@ -226,7 +226,8 @@ export type BoundaryVerificationReason =
   | 'policy_binding_missing'
   | 'unauthorized_attestation_basis'
   | 'attestation_binding_mismatch'
-  | 'attestation_binding_missing';
+  | 'attestation_binding_missing'
+  | 'unknown_field';
 
 export interface BoundaryVerification {
   accepted: boolean;

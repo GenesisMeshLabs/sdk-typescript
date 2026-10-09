@@ -7,6 +7,29 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [1.2.0] - Unreleased
+
+### Changed
+
+- **Verifiers refuse fields they do not know.** A verifier that copied every
+  received field into the signed form accepted a field it did not understand
+  whenever the signer covered it, so a field added in a later release could
+  change what a record means. The SDK now embeds the field registry of
+  signed records (generated from the Python reference, shipped in the shared
+  conformance suite `canonical`): `verifyBoundaryDecision` (including the
+  expected policies and attestation) and `verifyAgreement` return
+  `unknown_field`, the signature helpers return `false`,
+  `verifyDataAccessIntent` reports the unknown field, and
+  `verifyEvidenceEvents` reports `unknown_field` for a payload and
+  `unknown_entry_kind` for an entry of another kind. Free-form fields
+  (`claims`, `scope`, `execution_parameters`, ...) stay open.
+
+### Added
+
+- `unknownFields(model, record)`, `knownFieldsOnly`, `isKnownEntryKind` and
+  `CANONICAL_REGISTRY`; `npm run sync:registry` regenerates the embedded
+  registry from a new copy of the suite.
+
 ## [1.1.1] - 2026-10-09
 
 Coordinated Genesis Mesh v1.1.1 release: security fixes in the Network

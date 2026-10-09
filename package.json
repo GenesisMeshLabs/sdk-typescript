@@ -51,7 +51,8 @@
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.cjs",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json",
     "test:e2e": "node scripts/run_e2e.mjs",
-    "test:package": "node scripts/check_package.mjs"
+    "test:package": "node scripts/check_package.mjs",
+    "sync:registry": "node scripts/sync-canonical-registry.mjs"
   },
   "devDependencies": {
     "@types/jest": "30.0.0",

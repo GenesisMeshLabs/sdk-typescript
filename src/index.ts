@@ -122,6 +122,11 @@ export type {
   AgreementVerification, AgreementVerificationReason, DataIntentVerification, DataUsageViolationDetail, DataUsageViolationType,
 } from './verify.js';
 
+// Strict verification: the field registry of signed records (v1.2.0)
+export { unknownFields, knownFieldsOnly, isKnownEntryKind } from './strict.js';
+export type { CanonicalRegistry, ModelSpec, FieldKind } from './strict.js';
+export { CANONICAL_REGISTRY } from './canonical-registry.js';
+
 // Data access intents (v0.61)
 export { createDataAccessIntent } from './data_intent.js';
 export type { CreateDataAccessIntentParams } from './data_intent.js';
