@@ -147,7 +147,7 @@ describe('governedAction with the evidence outbox (1.2.0)', () => {
     expect(await x.gm.evidenceStore.flushPending()).toMatchObject({ admitted: [], pending: [{ id: kept!.id }] });
     const flushed = await x.gm.evidenceStore.flushPending({ ignoreBackoff: true });
     expect(flushed.admitted.map(e => e.id)).toEqual([kept!.id]);
-    expect(x.submit).toHaveBeenLastCalledWith(result.evidence);
+    expect(x.submit).toHaveBeenLastCalledWith(result.evidence!);
     expect(await x.outbox.list()).toEqual([]);
   });
   it.each([
@@ -193,7 +193,7 @@ describe('governedAction with the evidence outbox (1.2.0)', () => {
     const second = await governedAction(x.gm, x.recorder, x.params, x.action);
     expect(second.queued).toMatchObject({ state: 'dead_letter', last_error: { code: PREDECESSOR_DEAD_LETTERED } });
     expect(x.submit).toHaveBeenCalledTimes(2);
-    expect(x.submit).toHaveBeenLastCalledWith(first.evidence);
+    expect(x.submit).toHaveBeenLastCalledWith(first.evidence!);
     expect((await x.outbox.list()).map(e => e.state)).toEqual(['dead_letter', 'dead_letter']);
     // A third action no longer chains from the dead records.
     x.head.mockResolvedValue({ resource_sequence: 9, record_digest: 'na-head' });
