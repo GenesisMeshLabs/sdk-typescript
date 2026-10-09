@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import {
-  GenesisMeshClient, ExecutionRecorder, seedSigner, signCanonical, decisionCanonical,
-  governedAction, DecisionVerificationError, GovernedActionError, summarizeDecision, reconcileResources, parseExportLines,
+  GenesisMeshClient, ExecutionRecorder, seedSigner, signCanonical, decisionCanonical, executionDigest,
+  governedAction, DecisionVerificationError, GovernedActionError, MetadataRefusedError, EvidenceNotKeptError,
+  summarizeDecision, reconcileResources, parseExportLines, withoutRefusedMetadata,
+  MemoryOutbox, NetworkError, ConflictError, RateLimitError, ServiceUnavailableError, SecretMaterialError,
+  PREDECESSOR_DEAD_LETTERED,
 } from '../src/index.js';
-import type { GovernedActionParams, ResourceState } from '../src/index.js';
+import type { EvidenceOutbox, GovernedActionParams, OutboxEntry, ResourceState } from '../src/index.js';
 import { TEST_KEY, mockFetch } from './helpers.js';
 import { vectors } from './vectors.js';
 
@@ -15,12 +18,14 @@ function storedEntry() {
 const v = vectors();
 const signer = seedSigner(TEST_KEY.seedBase64, 'test');
 afterEach(() => { jest.useRealTimers(); });
-async function setup(denied = false) {
+async function setup(denied = false, outbox: EvidenceOutbox | null = new MemoryOutbox()) {
   const evaluation = structuredClone(denied ? v.denied : v.allowed);
   evaluation.decision.decision_made_at = new Date(Date.now() - 1000).toISOString();
   evaluation.decision.decision_valid_until = new Date(Date.now() + 60_000).toISOString();
   evaluation.decision.signature = await signCanonical(decisionCanonical(evaluation.decision), signer);
-  const gm = new GenesisMeshClient({ audience: 'TEST', baseUrl: 'http://unused', fetch: mockFetch({ status: 500, body: {} }) as unknown as typeof fetch });
+  const gm = new GenesisMeshClient({
+    audience: 'TEST', baseUrl: 'http://unused', fetch: mockFetch({ status: 500, body: {} }) as unknown as typeof fetch, outbox: outbox ?? undefined,
+  });
   const evaluate = jest.spyOn(gm.boundary, 'evaluate').mockResolvedValue(evaluation);
   const head = jest.spyOn(gm.evidenceStore, 'resourceHead').mockResolvedValue(null);
   const submit = jest.spyOn(gm.evidenceStore, 'submit').mockResolvedValue({ status: 'recorded', ...storedEntry() });
@@ -31,7 +36,7 @@ async function setup(denied = false) {
     verify: { operatorPublicKeys: [TEST_KEY.pubBase64], expectedPolicies: [v.policy], expectedAttestation: v.attestation },
   };
   const action = jest.fn(async () => ({ value: 'returned only', execution_parameters: { secret_version: 'v2' } }));
-  return { gm, recorder, params, action, evaluate, evaluation, head, submit };
+  return { gm, recorder, params, action, evaluate, evaluation, head, submit, outbox: outbox! };
 }
 
 describe('governedAction', () => {
@@ -87,17 +92,25 @@ describe('governedAction', () => {
     await expect(governedAction(x.gm, x.recorder, x.params, async () => { throw failure; })).rejects.toBe(failure);
     expect(x.submit.mock.calls[0][0]).toMatchObject({ outcome: 'failure', outcome_detail: 'action failed' });
   });
-  it('preserves both errors when failure evidence cannot be submitted', async () => {
+  it('keeps the failure record pending and rethrows when it cannot be submitted (1.2.0)', async () => {
     const x = await setup();
-    const failure = new Error('action'); const evidenceError = new Error('offline');
-    x.submit.mockRejectedValue(evidenceError);
-    const pending = governedAction(x.gm, x.recorder, x.params, async () => { throw failure; });
-    await expect(pending).rejects.toBeInstanceOf(GovernedActionError);
-    await expect(pending).rejects.toMatchObject({ cause: failure, evidenceError });
+    const failure = new Error('action');
+    x.submit.mockRejectedValue(new NetworkError('offline'));
+    await expect(governedAction(x.gm, x.recorder, x.params, async () => { throw failure; })).rejects.toBe(failure);
+    const [kept] = await x.outbox.list();
+    expect(kept).toMatchObject({ state: 'pending', attempts: 1, evidence: { outcome: 'failure', outcome_detail: 'action failed' } });
+  });
+  it('preserves both errors and the signed record when the outbox fails after an action failure', async () => {
+    const x = await setup();
+    const failure = new Error('action'); const evidenceError = new Error('disk full');
+    jest.spyOn(x.outbox, 'add').mockRejectedValue(evidenceError);
+    const error = await governedAction(x.gm, x.recorder, x.params, async () => { throw failure; }).catch(e => e);
+    expect(error).toBeInstanceOf(GovernedActionError);
+    expect(error).toMatchObject({ cause: failure, evidenceError, evidence: { outcome: 'failure' } });
   });
   it('does not execute twice when submission fails', async () => {
-    const x = await setup(); x.submit.mockRejectedValue(new Error('offline'));
-    await expect(governedAction(x.gm, x.recorder, x.params, x.action)).rejects.toThrow('offline');
+    const x = await setup(); x.submit.mockRejectedValue(new NetworkError('offline'));
+    await expect(governedAction(x.gm, x.recorder, x.params, x.action)).resolves.toMatchObject({ submission: { status: 'pending' } });
     expect(x.action).toHaveBeenCalledTimes(1);
   });
   it('summarizes observe and enforce failures separately', () => {
@@ -105,6 +118,149 @@ describe('governedAction', () => {
     expect(summary.observed_failures).toHaveLength(1);
     expect(summary.enforced_failures).toHaveLength(2);
     expect(summary.applied_policies).toEqual(['vendor-sp-secret@1']);
+  });
+});
+
+describe('governedAction with the evidence outbox (1.2.0)', () => {
+  it('requires an outbox before evaluating', async () => {
+    const x = await setup(false, null);
+    await expect(governedAction(x.gm, x.recorder, x.params, x.action)).rejects.toMatchObject({ code: 'outbox_required' });
+    expect(x.evaluate).not.toHaveBeenCalled();
+  });
+  it('removes the record once the NA admits it', async () => {
+    const x = await setup();
+    const result = await governedAction(x.gm, x.recorder, x.params, x.action);
+    expect(result.submission).toMatchObject({ status: 'recorded' });
+    expect(await x.outbox.list()).toEqual([]);
+  });
+  it('returns the value with the record pending when the NA is unreachable, then admits it on flush', async () => {
+    const x = await setup();
+    x.submit.mockRejectedValueOnce(new NetworkError('offline'));
+    const result = await governedAction(x.gm, x.recorder, x.params, x.action);
+    expect(result).toMatchObject({ value: 'returned only', submission: { status: 'pending', entry: { attempts: 1, last_error: { status: 0, code: 'network_error' } } } });
+    const [kept] = await x.outbox.list();
+    expect(kept!.evidence).toEqual(result.evidence);
+    expect(Date.parse(kept!.next_attempt_at!)).toBeGreaterThan(Date.now());
+    expect(await x.gm.evidenceStore.flushPending()).toMatchObject({ admitted: [], pending: [{ id: kept!.id }] });
+    const flushed = await x.gm.evidenceStore.flushPending({ ignoreBackoff: true });
+    expect(flushed.admitted.map(e => e.id)).toEqual([kept!.id]);
+    expect(x.submit).toHaveBeenLastCalledWith(result.evidence);
+    expect(await x.outbox.list()).toEqual([]);
+  });
+  it.each([
+    ['a 503', new ServiceUnavailableError()],
+    ['a 429', new RateLimitError()],
+    ['a lost race between NA instances', new ConflictError('busy', 'retention_in_progress')],
+    ['an unknown error', new TypeError('fetch failed')],
+  ])('keeps the record pending after %s', async (_, error) => {
+    const x = await setup();
+    x.submit.mockRejectedValueOnce(error);
+    expect((await governedAction(x.gm, x.recorder, x.params, x.action)).submission).toMatchObject({ status: 'pending' });
+  });
+  it('dead-letters a record the NA refuses, with its code, and keeps it', async () => {
+    const x = await setup();
+    x.submit.mockRejectedValueOnce(new ConflictError('taken', 'evidence_conflict'));
+    const result = await governedAction(x.gm, x.recorder, x.params, x.action);
+    expect(result.submission).toMatchObject({ status: 'dead_letter', entry: { last_error: { status: 409, code: 'evidence_conflict' } } });
+    expect(await x.gm.evidenceStore.flushPending({ ignoreBackoff: true })).toEqual({ admitted: [], pending: [], dead_lettered: [] });
+    expect(await x.outbox.list()).toMatchObject([{ state: 'dead_letter' }]);
+    expect(x.submit).toHaveBeenCalledTimes(1);
+  });
+  it('chains a second action from the pending head and admits both in order', async () => {
+    const x = await setup();
+    x.head.mockResolvedValue({ resource_sequence: 3, record_digest: 'prior' });
+    x.submit.mockRejectedValueOnce(new NetworkError('offline'));
+    const first = await governedAction(x.gm, x.recorder, x.params, x.action);
+    const second = await governedAction(x.gm, x.recorder, x.params, x.action);
+    expect(x.head).toHaveBeenCalledTimes(1);
+    expect(second.evidence).toMatchObject({ resource_sequence: 5, prev_resource_digest: executionDigest(first.evidence!) });
+    // Submitting the second before the first would be refused: it waits.
+    expect(second.submission).toMatchObject({ status: 'pending', entry: { attempts: 0 } });
+    expect(x.submit).toHaveBeenCalledTimes(1);
+    const flushed = await x.gm.evidenceStore.flushPending({ ignoreBackoff: true });
+    expect(flushed.admitted.map(e => e.evidence)).toEqual([first.evidence, second.evidence]);
+    expect(x.submit.mock.calls.slice(1).map(c => c[0])).toEqual([first.evidence, second.evidence]);
+  });
+  it('dead-letters a record whose predecessor was refused, without submitting it', async () => {
+    const x = await setup();
+    x.submit.mockRejectedValueOnce(new NetworkError('offline'));
+    const first = await governedAction(x.gm, x.recorder, x.params, x.action);
+    await governedAction(x.gm, x.recorder, x.params, x.action);
+    x.submit.mockRejectedValueOnce(new ConflictError('taken', 'evidence_conflict'));
+    const flushed = await x.gm.evidenceStore.flushPending({ ignoreBackoff: true });
+    expect(flushed.dead_lettered.map(e => e.last_error!.code)).toEqual(['evidence_conflict', PREDECESSOR_DEAD_LETTERED]);
+    expect(x.submit).toHaveBeenCalledTimes(2);
+    expect(x.submit).toHaveBeenLastCalledWith(first.evidence);
+    expect((await x.outbox.list()).map(e => e.state)).toEqual(['dead_letter', 'dead_letter']);
+  });
+  it('ends a flush at the first transient error and skips records in backoff', async () => {
+    const x = await setup();
+    x.submit.mockRejectedValue(new NetworkError('offline'));
+    await governedAction(x.gm, x.recorder, x.params, x.action);
+    await governedAction(x.gm, x.recorder, { ...x.params, resource_id: 'kv:v/other' }, x.action);
+    expect((await x.outbox.list()).map(e => e.attempts)).toEqual([1, 1]);
+    x.submit.mockClear();
+    const flushed = await x.gm.evidenceStore.flushPending({ ignoreBackoff: true });
+    expect(x.submit).toHaveBeenCalledTimes(1);
+    expect(flushed.pending.map(e => e.attempts)).toEqual([2, 1]);
+    x.submit.mockClear();
+    expect((await x.gm.evidenceStore.flushPending()).pending).toHaveLength(2);
+    expect(x.submit).not.toHaveBeenCalled();
+  });
+  it('shares one run between concurrent flushes', async () => {
+    const x = await setup();
+    x.submit.mockRejectedValueOnce(new NetworkError('offline'));
+    await governedAction(x.gm, x.recorder, x.params, x.action);
+    const [a, b] = [x.gm.evidenceStore.flushPending({ ignoreBackoff: true }), x.gm.evidenceStore.flushPending({ ignoreBackoff: true })];
+    expect(a).toBe(b);
+    expect((await a).admitted).toHaveLength(1);
+  });
+  it('reports a guard refusal after the action with the value and the recorded outcome', async () => {
+    const x = await setup();
+    const leaky = jest.fn(async () => ({
+      value: 'v', outcome_detail: 'rotated', execution_parameters: { client_secret: 's3cr3t', secret_version: 'v2' },
+    }));
+    const error = await governedAction(x.gm, x.recorder, x.params, leaky).catch(e => e);
+    expect(error).toBeInstanceOf(MetadataRefusedError);
+    expect(error).toMatchObject({
+      code: 'governed_action_metadata_refused', value: 'v', dropped: ['client_secret'], submission: { status: 'recorded' },
+      evidence: { outcome: 'success', execution_parameters: { secret_version: 'v2' }, outcome_detail: 'rotated [secret guard dropped: client_secret]' },
+    });
+    expect(error.cause).toBeInstanceOf(SecretMaterialError);
+    expect(x.submit).toHaveBeenCalledWith(error.evidence);
+    expect(JSON.stringify(error.evidence)).not.toContain('s3cr3t');
+    expect(leaky).toHaveBeenCalledTimes(1);
+  });
+  it('keeps the value and the signed record when the outbox fails after the action', async () => {
+    const x = await setup();
+    jest.spyOn(x.outbox, 'add').mockRejectedValue(new Error('disk full'));
+    const error = await governedAction(x.gm, x.recorder, x.params, x.action).catch(e => e);
+    expect(error).toBeInstanceOf(EvidenceNotKeptError);
+    expect(error).toMatchObject({ code: 'governed_action_evidence_unkept', value: 'returned only', evidence: { outcome: 'success' } });
+    expect(x.submit).not.toHaveBeenCalled();
+  });
+  it('lets an explicit prior resource override the pending head', async () => {
+    const x = await setup();
+    x.submit.mockRejectedValueOnce(new NetworkError('offline'));
+    await governedAction(x.gm, x.recorder, x.params, x.action);
+    const second = await governedAction(x.gm, x.recorder, { ...x.params, prior_resource: null }, x.action);
+    expect(second.evidence).toMatchObject({ resource_sequence: 1, prev_resource_digest: null });
+  });
+});
+
+describe('withoutRefusedMetadata', () => {
+  it('drops only the refused parameters and a refused detail', () => {
+    expect(withoutRefusedMetadata({ password: 'x', version: 'v1', nested: { token: 'y' } }, '-----BEGIN KEY')).toEqual({
+      execution_parameters: { version: 'v1' },
+      outcome_detail: '[secret guard dropped: nested, outcome_detail, password]',
+      dropped: ['nested', 'outcome_detail', 'password'],
+    });
+  });
+  it('drops everything when the rest is still too large', () => {
+    const big = Object.fromEntries(Array.from({ length: 4 }, (_, i) => [`k${i}`, 'x'.repeat(5000)]));
+    expect(withoutRefusedMetadata(big, null)).toEqual({
+      execution_parameters: {}, outcome_detail: '[secret guard dropped: k0, k1, k2, k3]', dropped: ['k0', 'k1', 'k2', 'k3'],
+    });
   });
 });
 

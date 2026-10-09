@@ -8,6 +8,7 @@ import {
   GenesisMeshClient, ExecutionRecorder, seedSigner, governedAction, reconcileResources,
   verifyBoundaryDecision, verifyAttestationSignature, verifyPolicySignature, verifyJustificationSignature,
   verifyRevocationFeedSignature, verifyEvidenceEvents, parseExportLines, ConflictError,
+  MemoryOutbox, MetadataRefusedError, executionDigest,
 } from '../src/index.js';
 import type { BoundaryPolicyIntent, EvidenceEvent } from '../src/index.js';
 import { generateTestKeyPair } from './helpers.js';
@@ -18,10 +19,10 @@ const suite = enabled ? describe : describe.skip;
 suite('SDK against a live Python Network Authority', () => {
   let child: ChildProcessWithoutNullStreams | undefined;
   let gm: GenesisMeshClient;
+  let config: { baseUrl: string; signingKeyBase64: string; keyId: string; naPublicKey: string };
   let naPublicKey: string;
   let diagnostics = '';
   beforeAll(async () => {
-    let config: { baseUrl: string; signingKeyBase64: string; keyId: string; naPublicKey: string };
     if (process.env.GM_E2E_BASE_URL) {
       const { GM_E2E_OPERATOR_SEED, GM_E2E_NA_PUBLIC_KEY } = process.env;
       if (!GM_E2E_OPERATOR_SEED || !GM_E2E_NA_PUBLIC_KEY) throw new Error('External E2E NA requires GM_E2E_OPERATOR_SEED and GM_E2E_NA_PUBLIC_KEY');
@@ -46,7 +47,7 @@ suite('SDK against a live Python Network Authority', () => {
       lines.close();
     }
     naPublicKey = config.naPublicKey;
-    gm = new GenesisMeshClient(config);
+    gm = new GenesisMeshClient({ ...config, outbox: new MemoryOutbox() });
   }, 25_000);
 
   afterAll(async () => {
@@ -141,6 +142,45 @@ suite('SDK against a live Python Network Authority', () => {
     expect((await gm.evidenceStore.applyRetention(365)).removed_count).toBe(0);
     expect(await gm.evidenceStore.latestCheckpoint()).toBeNull();
     expect((await gm.evidenceStore.retireExecutorKey(executorId)).active).toBe(false);
+  }, 30_000);
+
+  it('keeps evidence in the outbox while the NA is unreachable and admits it in order afterwards (1.2.0)', async () => {
+    const id = randomUUID();
+    const attestation = await gm.attestation.issue({ subject_id: id, roles: ['role:client'], claims: { capabilities: ['sdk.outbox'] } });
+    const executor = generateTestKeyPair();
+    const recorder = new ExecutionRecorder({ executorSovereignId: id, signer: seedSigner(executor.seedBase64, id) });
+    await gm.evidenceStore.registerExecutorKey({ key_id: id, public_key: executor.pubBase64, executor_sovereign_id: id });
+    // Evidence submissions fail as if the NA stopped after the action; everything else goes through.
+    let offline = true;
+    const outage: typeof fetch = async (input, init) => {
+      if (offline && String(input).endsWith('/evidence/execution')) throw new TypeError('fetch failed');
+      return fetch(input, init);
+    };
+    const client = new GenesisMeshClient({ ...config, fetch: outage, outbox: new MemoryOutbox() });
+    const params = {
+      attestation_id: attestation.attestation_id, requested_capability: 'sdk.outbox', resource_id: `sdk:${id}`,
+      resource_action: 'rotate' as const, verify: { operatorPublicKeys: [naPublicKey], expectedPolicies: [], expectedAttestation: attestation },
+    };
+    const first = await governedAction(client, recorder, params, async () => ({ value: 1, execution_parameters: { secret_version: 'v1' } }));
+    expect(first).toMatchObject({ value: 1, submission: { status: 'pending' } });
+    const second = await governedAction(client, recorder, params, async () => ({ value: 2, execution_parameters: { secret_version: 'v2' } }));
+    expect(second).toMatchObject({ value: 2, submission: { status: 'pending' } });
+    expect(second.evidence!.prev_resource_digest).toBe(executionDigest(first.evidence!));
+
+    offline = false;
+    const flushed = await client.evidenceStore.flushPending({ ignoreBackoff: true });
+    expect(flushed.admitted.map(e => e.id)).toEqual([first.evidence!.evidence_id, second.evidence!.evidence_id]);
+    expect(await client.evidenceStore.outbox!.list()).toEqual([]);
+    const history = await gm.evidenceStore.resourceHistory(params.resource_id);
+    expect(history.verification.verified).toBe(true);
+    expect(history.entries.filter(e => e.entry.entry_kind === 'execution').map(e => e.entry.resource_sequence)).toEqual([1, 2]);
+
+    // A guard refusal after the action: the outcome is still recorded, without the refused field.
+    const error = await governedAction(client, recorder, params, async () => ({
+      value: 3, execution_parameters: { secret_version: 'v3', client_secret: 'not-for-evidence' },
+    })).catch(e => e);
+    expect(error).toBeInstanceOf(MetadataRefusedError);
+    expect(error).toMatchObject({ value: 3, submission: { status: 'recorded' }, evidence: { execution_parameters: { secret_version: 'v3' } } });
   }, 30_000);
 
   it('supports observe/enforce, rollback, failure evidence, chain conflicts and retired keys', async () => {

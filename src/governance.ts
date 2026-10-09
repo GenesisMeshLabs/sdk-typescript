@@ -8,7 +8,8 @@ import { randomUUID } from 'node:crypto';
 import type { BoundaryClient, EvaluateParams } from './boundary.js';
 import type { EvidenceStoreClient, ResourceState } from './evidence_store.js';
 import { GenesisMeshError } from './errors.js';
-import type { ExecutionRecorder, PriorResource } from './execution.js';
+import { checkMetadataOnly, SecretMaterialError, type ExecutionRecorder, type PriorResource } from './execution.js';
+import type { QueuedSubmission } from './outbox.js';
 import { verifyBoundaryDecision, type VerifyDecisionOptions } from './verify.js';
 import type {
   BoundaryDecision,
@@ -93,19 +94,108 @@ export interface GovernedActionResult<T> {
   /** Present when the action ran. */
   value?: T;
   evidence?: ExecutionEvidence;
-  submission?: EvidenceSubmission;
+  /**
+   * The NA's acknowledgement, or (v1.2.0) the outbox entry when the record
+   * was not admitted: `pending` for `flushPending` to submit, `dead_letter`
+   * when the NA refused it. A failed submission never throws.
+   */
+  submission?: EvidenceSubmission | QueuedSubmission;
 }
 
-/** The action failed, and recording the failure also failed. `cause` is the action's error. */
+/**
+ * The action failed, and recording the failure also failed. `cause` is the
+ * action's error; `evidence` the signed failure record when it was signed
+ * (v1.2.0).
+ */
 export class GovernedActionError extends GenesisMeshError {
   readonly evidenceError: unknown;
+  readonly evidence?: ExecutionEvidence;
 
-  constructor(cause: unknown, evidenceError: unknown) {
+  constructor(cause: unknown, evidenceError: unknown, evidence?: ExecutionEvidence) {
     super(`action failed and its failure could not be recorded: ${String(evidenceError)}`, 'governed_action_unrecorded', 0);
     this.name = 'GovernedActionError';
     this.cause = cause;
     this.evidenceError = evidenceError;
+    if (evidence) this.evidence = evidence;
   }
+}
+
+/**
+ * The action ran, but the secret guard refused metadata it reported (v1.2.0).
+ * The outcome was recorded without the refused fields (`dropped`), as
+ * `evidence`; `submission` says whether the NA admitted it. `cause` is the
+ * guard's `SecretMaterialError`. Do not rerun the action.
+ */
+export class MetadataRefusedError<T = unknown> extends GenesisMeshError {
+  readonly value: T | undefined;
+  readonly evidence: ExecutionEvidence;
+  readonly submission: EvidenceSubmission | QueuedSubmission;
+  readonly dropped: string[];
+
+  constructor(
+    cause: SecretMaterialError, value: T | undefined, evidence: ExecutionEvidence,
+    submission: EvidenceSubmission | QueuedSubmission, dropped: string[],
+  ) {
+    super(`the action ran; its metadata was refused and recorded without ${dropped.join(', ')}: ${cause.message}`,
+      'governed_action_metadata_refused', 0);
+    this.name = 'MetadataRefusedError';
+    this.cause = cause;
+    this.value = value;
+    this.evidence = evidence;
+    this.submission = submission;
+    this.dropped = dropped;
+  }
+}
+
+/**
+ * The action ran, but its evidence could not be signed or kept in the outbox
+ * (v1.2.0). `evidence` is the signed record when signing succeeded: submit it
+ * (resubmission is idempotent) once the outbox works. `cause` is the error.
+ * Do not rerun the action.
+ */
+export class EvidenceNotKeptError<T = unknown> extends GenesisMeshError {
+  readonly value: T | undefined;
+  readonly evidence?: ExecutionEvidence;
+
+  constructor(cause: unknown, value: T | undefined, evidence?: ExecutionEvidence) {
+    super(`the action ran; its evidence was not kept: ${String(cause)}`, 'governed_action_evidence_unkept', 0);
+    this.name = 'EvidenceNotKeptError';
+    this.cause = cause;
+    this.value = value;
+    if (evidence) this.evidence = evidence;
+  }
+}
+
+const GUARD_NOTE = 'secret guard dropped';
+
+/**
+ * The reported metadata without the parts the secret guard refuses: each
+ * top-level parameter is checked alone, and the outcome detail names what was
+ * dropped. Everything is dropped when the rest is still refused (its size).
+ */
+export function withoutRefusedMetadata(
+  executionParameters: Record<string, unknown>,
+  outcomeDetail: string | null,
+): { execution_parameters: Record<string, unknown>; outcome_detail: string; dropped: string[] } {
+  let kept: Record<string, unknown> = {};
+  let dropped: string[] = [];
+  for (const [key, value] of Object.entries(executionParameters)) {
+    if (checkMetadataOnly({ [key]: value }) === null) kept[key] = value;
+    else dropped.push(key);
+  }
+  const detail = outcomeDetail !== null && checkMetadataOnly({}, outcomeDetail) === null ? outcomeDetail : null;
+  if (outcomeDetail !== null && detail === null) dropped.push('outcome_detail');
+  if (checkMetadataOnly(kept, detail) !== null) {
+    dropped = [...Object.keys(executionParameters), ...(outcomeDetail !== null ? ['outcome_detail'] : [])];
+    kept = {};
+  }
+  dropped.sort();
+  const note = `[${GUARD_NOTE}: ${dropped.join(', ')}]`;
+  const outcome_detail = detail !== null && !dropped.includes('outcome_detail') ? `${detail} ${note}` : note;
+  if (checkMetadataOnly(kept, outcome_detail) !== null) {
+    return { execution_parameters: {}, outcome_detail: `[${GUARD_NOTE}]`, dropped };
+  }
+  return { execution_parameters: kept, outcome_detail, dropped };
 }
 
 /** The decision did not pass offline verification; the action was not run. */
@@ -122,10 +212,16 @@ export interface GovernanceClients {
 }
 
 /**
- * Evaluate, run `action` only on a (verified) ALLOW, then sign and submit the
- * execution evidence. A DENY returns `authorized: false` without running the
- * action. If the action throws, a `failure` record is submitted and the
- * error is rethrown.
+ * Evaluate, run `action` only on a (verified) ALLOW, then sign the execution
+ * evidence, keep it in the outbox and submit it. A DENY returns
+ * `authorized: false` without running the action. If the action throws, a
+ * `failure` record is kept and submitted the same way and the error is
+ * rethrown.
+ *
+ * A failed submission does not throw (v1.2.0): the result's `submission` is
+ * the outbox entry, and `evidenceStore.flushPending` submits it later. A
+ * resource with pending records chains from the newest of them, not from the
+ * NA's head. Requires `ClientOptions.outbox`.
  */
 export async function governedAction<T>(
   clients: GovernanceClients,
@@ -138,6 +234,9 @@ export async function governedAction<T>(
     throw new Error('resource_id and resource_action go together');
   }
   if (!verify?.operatorPublicKeys?.length) throw new DecisionVerificationError('verification_keys_required');
+  if (!clients.evidenceStore.outbox) {
+    throw new GenesisMeshError('governedAction needs an evidence outbox (ClientOptions.outbox)', 'outbox_required', 0);
+  }
   const contextId = params.context?.context_id || randomUUID();
   const evaluation = await clients.boundary.evaluate({
     ...evaluateParams, context: { ...params.context, context_id: contextId },
@@ -162,39 +261,58 @@ export async function governedAction<T>(
   const summary = summarizeDecision(decision);
   if (!decision.authorized) return { evaluation, authorized: false, summary };
 
+  const store = clients.evidenceStore;
   const prior = resource_id === undefined
     ? null
-    : prior_resource !== undefined ? prior_resource : await clients.evidenceStore.resourceHead(resource_id);
+    : prior_resource !== undefined
+      ? prior_resource
+      : await store.pendingHead(resource_id) ?? await store.resourceHead(resource_id);
   // Reading history may outlast the decision's validity window.
   checkDecision();
 
-  const recordAndSubmit = async (report: ActionReport<T>) => {
-    const evidence = await recorder.record({
-      decision,
-      executed_capability: params.requested_capability,
-      outcome: report.outcome ?? 'success',
-      execution_parameters: report.execution_parameters,
-      outcome_detail: report.outcome_detail,
-      resource_id,
-      resource_action,
-      prior_resource: prior,
-    });
-    const submission = await clients.evidenceStore.submit(evidence);
-    return { evidence, submission };
-  };
+  const record = (report: ActionReport<T>) => recorder.record({
+    decision,
+    executed_capability: params.requested_capability,
+    outcome: report.outcome ?? 'success',
+    execution_parameters: report.execution_parameters,
+    outcome_detail: report.outcome_detail,
+    resource_id,
+    resource_action,
+    prior_resource: prior,
+  });
 
   let report: ActionReport<T>;
   try {
     report = (await action(decision)) ?? {};
   } catch (err) {
+    let evidence: ExecutionEvidence | undefined;
     try {
-      await recordAndSubmit({ outcome: 'failure', outcome_detail: 'action failed' });
+      evidence = await record({ outcome: 'failure', outcome_detail: 'action failed' });
+      await store.enqueue(evidence);
     } catch (evidenceError) {
-      throw new GovernedActionError(err, evidenceError);
+      throw new GovernedActionError(err, evidenceError, evidence);
     }
     throw err;
   }
-  const { evidence, submission } = await recordAndSubmit(report);
+
+  // The action ran: from here on its outcome is always recorded.
+  let evidence: ExecutionEvidence | undefined;
+  let refused: { error: SecretMaterialError; dropped: string[] } | undefined;
+  let submission: EvidenceSubmission | QueuedSubmission;
+  try {
+    try {
+      evidence = await record(report);
+    } catch (err) {
+      if (!(err instanceof SecretMaterialError)) throw err;
+      const cleaned = withoutRefusedMetadata(report.execution_parameters ?? {}, report.outcome_detail ?? null);
+      evidence = await record({ ...report, ...cleaned });
+      refused = { error: err, dropped: cleaned.dropped };
+    }
+    submission = await store.enqueue(evidence);
+  } catch (err) {
+    throw new EvidenceNotKeptError(err, report.value, evidence);
+  }
+  if (refused) throw new MetadataRefusedError(refused.error, report.value, evidence, submission, refused.dropped);
   return { evaluation, authorized: true, summary, value: report.value, evidence, submission };
 }
 

@@ -1,7 +1,18 @@
 import { checkMetadataOnly, SecretMaterialError } from './execution.js';
 import type { HttpTransport } from './client.js';
 import { executionDigest } from './canonical.js';
-import { NotFoundError } from './errors.js';
+import { GenesisMeshError, NotFoundError } from './errors.js';
+import {
+  classifySubmissionError,
+  outboxEntry,
+  PREDECESSOR_DEAD_LETTERED,
+  retryDelayMs,
+  type EvidenceOutbox,
+  type FlushOptions,
+  type FlushResult,
+  type OutboxEntry,
+  type QueuedSubmission,
+} from './outbox.js';
 import { parseExportLines } from './verify.js';
 import type {
   EntryKind,
@@ -71,9 +82,20 @@ function resourcePath(resourceId: string): string {
   return resourceId.split('/').map(encodeURIComponent).join('/');
 }
 
+/** The records a signed record chains from: its predecessor under the decision and on the resource. */
+function predecessors(evidence: ExecutionEvidence): string[] {
+  return [evidence.prev_evidence_digest, evidence.prev_resource_digest].filter((d): d is string => !!d);
+}
+
 /** The NA evidence store (v0.59): controller submission, operator search, history, export. */
 export class EvidenceStoreClient {
-  constructor(private readonly http: HttpTransport) {}
+  private flushing: Promise<FlushResult> | null = null;
+
+  /**
+   * @param outbox Durable storage for signed records not yet admitted
+   *   (v1.2.0); `governedAction` requires one (`ClientOptions.outbox`).
+   */
+  constructor(private readonly http: HttpTransport, readonly outbox?: EvidenceOutbox) {}
 
   /**
    * Submit one signed ExecutionEvidence record. Authenticated by the executor
@@ -84,6 +106,112 @@ export class EvidenceStoreClient {
     const reason = checkMetadataOnly(evidence.execution_parameters, evidence.outcome_detail);
     if (reason) throw new SecretMaterialError(reason);
     return this.http.publicPost<EvidenceSubmission>('/evidence/execution', { evidence }, true);
+  }
+
+  /**
+   * Keep a signed record in the outbox, then submit it unless a record it
+   * chains from is still pending (v1.2.0). A failed submission does not
+   * throw: a transient error (network, timeout, 5xx, 429) leaves the record
+   * pending for `flushPending`, and a refusal (any other 4xx) keeps it as a
+   * dead letter with the NA's code. Throws only when the outbox cannot store
+   * the record.
+   */
+  async enqueue(evidence: ExecutionEvidence): Promise<EvidenceSubmission | QueuedSubmission> {
+    const outbox = this.requireOutbox();
+    const entry = outboxEntry(evidence);
+    const queued = await outbox.list();
+    await outbox.add(entry);
+    const waiting = new Set(queued.map(e => executionDigest(e.evidence)));
+    if (predecessors(evidence).some(d => waiting.has(d))) return { status: 'pending', entry };
+    return this.attempt(outbox, entry);
+  }
+
+  /**
+   * Submit the outbox's pending records in the order they were added
+   * (v1.2.0). A record waits while one it chains from is pending; it is
+   * dead-lettered (`evidence_predecessor_dead_lettered`) when that one was
+   * refused. Records in backoff are skipped unless `ignoreBackoff`; a
+   * transient error ends the run, leaving the rest for the next one. Run it
+   * at startup and on a timer. Concurrent calls share one run.
+   */
+  flushPending(options: FlushOptions = {}): Promise<FlushResult> {
+    this.flushing ??= this.flush(this.requireOutbox(), options).finally(() => { this.flushing = null; });
+    return this.flushing;
+  }
+
+  /**
+   * The newest pending record in the outbox for a resource, or null (v1.2.0).
+   * `governedAction` chains from it, not from the NA's head, while it waits.
+   */
+  async pendingHead(resourceId: string): Promise<ExecutionEvidence | null> {
+    const pending = (await this.requireOutbox().list())
+      .filter(e => e.state === 'pending' && e.evidence.resource_id === resourceId);
+    return pending.length ? pending[pending.length - 1]!.evidence : null;
+  }
+
+  private requireOutbox(): EvidenceOutbox {
+    if (!this.outbox) throw new GenesisMeshError('no evidence outbox is configured (ClientOptions.outbox)', 'outbox_required', 0);
+    return this.outbox;
+  }
+
+  private async attempt(outbox: EvidenceOutbox, entry: OutboxEntry): Promise<EvidenceSubmission | QueuedSubmission> {
+    let submission: EvidenceSubmission;
+    try {
+      submission = await this.submit(entry.evidence);
+    } catch (err) {
+      const { failure, transient } = classifySubmissionError(err);
+      const attempts = entry.attempts + 1;
+      const failed: OutboxEntry = transient
+        ? { ...entry, attempts, last_error: failure, next_attempt_at: new Date(Date.now() + retryDelayMs(attempts)).toISOString() }
+        : { ...entry, attempts, last_error: failure, state: 'dead_letter', next_attempt_at: null };
+      await outbox.update(failed);
+      return { status: failed.state, entry: failed };
+    }
+    await outbox.remove(entry.id);
+    return submission;
+  }
+
+  private async flush(outbox: EvidenceOutbox, options: FlushOptions): Promise<FlushResult> {
+    const result: FlushResult = { admitted: [], pending: [], dead_lettered: [] };
+    const waiting = new Set<string>();
+    const dead = new Set<string>();
+    let stopped = false;
+    for (const entry of await outbox.list()) {
+      const digest = executionDigest(entry.evidence);
+      const after = predecessors(entry.evidence);
+      if (entry.state === 'dead_letter') {
+        dead.add(digest);
+        continue;
+      }
+      if (after.some(d => dead.has(d))) {
+        const refused: OutboxEntry = {
+          ...entry, state: 'dead_letter', next_attempt_at: null,
+          last_error: { status: 0, code: PREDECESSOR_DEAD_LETTERED, message: 'a record this one chains from was refused' },
+        };
+        await outbox.update(refused);
+        dead.add(digest);
+        result.dead_lettered.push(refused);
+        continue;
+      }
+      const due = options.ignoreBackoff || !entry.next_attempt_at || Date.parse(entry.next_attempt_at) <= Date.now();
+      if (stopped || !due || after.some(d => waiting.has(d))) {
+        waiting.add(digest);
+        result.pending.push(entry);
+        continue;
+      }
+      const outcome = await this.attempt(outbox, entry);
+      if (outcome.status === 'pending') {
+        waiting.add(digest);
+        result.pending.push(outcome.entry);
+        stopped = true;
+      } else if (outcome.status === 'dead_letter') {
+        dead.add(digest);
+        result.dead_lettered.push(outcome.entry);
+      } else {
+        result.admitted.push(entry);
+      }
+    }
+    return result;
   }
 
   /** Search stored entries (admin). Use `next_after_sequence` as the next `after_sequence`. */
