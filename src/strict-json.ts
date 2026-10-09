@@ -12,7 +12,7 @@
 import { GenesisMeshError } from './errors.js';
 
 export type StrictJsonReason =
-  /** Not JSON, including `NaN` and `Infinity`. */
+  /** Not JSON, including `NaN` and `Infinity`, a byte order mark, and nesting deeper than 64. */
   | 'invalid_json'
   /** An object names a key twice. */
   | 'duplicate_key'
@@ -38,12 +38,15 @@ export class StrictJsonError extends GenesisMeshError {
 
 const MIN_INTEGER = -(2n ** 63n);
 const MAX_INTEGER = 2n ** 64n - 1n;
+/** Arrays and objects nested deeper are refused, as in every implementation. */
+export const MAX_DEPTH = 64;
 const NUMBER = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
 const ESCAPES: Readonly<Record<string, number>> = { '"': 0x22, '\\': 0x5c, '/': 0x2f, b: 8, f: 12, n: 10, r: 13, t: 9 };
 
 /** Throw `StrictJsonError` unless `text` is JSON every implementation reads alike. */
 export function checkStrictJson(text: string): void {
   let i = 0;
+  let depth = 0;
   const fail = (reason: StrictJsonReason, detail: string): never => {
     throw new StrictJsonError(reason, detail);
   };
@@ -110,6 +113,29 @@ export function checkStrictJson(text: string): void {
   const value = (): void => {
     space();
     const c = text[i];
+    if (c === '{' || c === '[') {
+      if (++depth > MAX_DEPTH) fail('invalid_json', `arrays or objects nested more than ${MAX_DEPTH} deep`);
+      container(c);
+      depth--;
+      return;
+    }
+    if (c === '"') {
+      string(false);
+      return;
+    }
+    if (c === '-' || (c !== undefined && c >= '0' && c <= '9')) {
+      number();
+      return;
+    }
+    for (const literal of ['true', 'false', 'null']) {
+      if (text.startsWith(literal, i)) {
+        i += literal.length;
+        return;
+      }
+    }
+    fail('invalid_json', c === undefined ? 'no value' : `unexpected ${JSON.stringify(c)}`);
+  };
+  const container = (c: string): void => {
     if (c === '{') {
       i++;
       space();
@@ -161,28 +187,22 @@ export function checkStrictJson(text: string): void {
         fail('invalid_json', 'expected "," or "]"');
       }
     }
-    if (c === '"') {
-      string(false);
-      return;
-    }
-    if (c === '-' || (c !== undefined && c >= '0' && c <= '9')) {
-      number();
-      return;
-    }
-    for (const literal of ['true', 'false', 'null']) {
-      if (text.startsWith(literal, i)) {
-        i += literal.length;
-        return;
-      }
-    }
-    fail('invalid_json', c === undefined ? 'no value' : `unexpected ${JSON.stringify(c)}`);
   };
-  try {
-    value();
-  } catch (err) {
-    if (err instanceof RangeError) fail('invalid_json', 'nested too deeply');
-    throw err;
-  }
+  value();
   space();
   if (i !== text.length) fail('invalid_json', 'text after the value');
+}
+
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+/**
+ * Decode a body as UTF-8, refusing bytes that are not (`invalid_json`) rather
+ * than replacing them; a byte order mark is kept, so `checkStrictJson` refuses it.
+ */
+export function decodeUtf8(bytes: ArrayBuffer | Uint8Array): string {
+  try {
+    return UTF8.decode(bytes);
+  } catch {
+    throw new StrictJsonError('invalid_json', 'the text is not UTF-8');
+  }
 }

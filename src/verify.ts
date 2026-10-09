@@ -256,7 +256,7 @@ export function parseExportLines(text: string | Iterable<string>): EvidenceEvent
   const lines = typeof text === 'string' ? text.split('\n') : text;
   const events: EvidenceEvent[] = [];
   for (const raw of lines) {
-    const line = raw.trim();
+    const line = raw.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, ''); // JSON whitespace only, as every implementation
     if (!line) continue;
     const event = parseJson(line) as EvidenceEvent;
     if (!validEvent(event)) throw new Error('invalid evidence event envelope or unsupported schema');

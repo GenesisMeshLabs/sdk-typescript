@@ -1,10 +1,12 @@
-import { describe, expect, it } from '@jest/globals';
+import { describe, expect, it, jest } from '@jest/globals';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  canonicalJson, canonicalTimestamp, nonCanonicalTimestamps, parseJson, StrictJsonError, verifyAgreement,
-  verifyBoundaryDecision, verifyDataAccessIntent,
+  canonicalJson, canonicalTimestamp, nonCanonicalTimestamps, parseExportLines, parseJson, StrictJsonError,
+  verifyAgreement, verifyBoundaryDecision, verifyDataAccessIntent,
 } from '../src/index.js';
+import { decodeUtf8 } from '../src/strict-json.js';
+import { buildTransport } from './helpers.js';
 import type { AgreementRecord, BoundaryDecision, DataAccessIntent, DataLicensePolicy } from '../src/index.js';
 
 /**
@@ -70,7 +72,23 @@ describe('canonical conformance suite', () => {
       .toEqual(['agreed_terms.valid_from']);
   });
 
-  it('refuses ambiguous input in HTTP responses and exports too', () => {
+  it('refuses ambiguous input in HTTP responses and exports too', async () => {
     expect(() => parseJson('{"status":"ok","status":"no"}')).toThrow(StrictJsonError);
+    const respond = (body: BodyInit) => jest.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(body, { status: 200 }));
+    await expect(buildTransport(respond('{"status":"ok","status":"no"}')).publicGet('/health'))
+      .rejects.toMatchObject({ name: 'StrictJsonError', reason: 'duplicate_key', code: 'duplicate_key' });
+    // A body that is not JSON, or not UTF-8, stays a NetworkError, as before.
+    await expect(buildTransport(respond(new Uint8Array([0x7b, 0x22, 0xff, 0x22, 0x3a, 0x31, 0x7d]))).publicGet('/health'))
+      .rejects.toMatchObject({ name: 'NetworkError' });
+    await expect(buildTransport(respond(new Uint8Array([0xef, 0xbb, 0xbf, 0x7b, 0x7d]))).publicGet('/health'))
+      .rejects.toMatchObject({ name: 'NetworkError' });
+    expect(decodeUtf8(new Uint8Array([0xef, 0xbb, 0xbf, 0x7b, 0x7d]))).toBe('\ufeff{}');
+    expect(() => decodeUtf8(new Uint8Array([0xff]))).toThrow(StrictJsonError);
+  });
+
+  it('strips only JSON whitespace around export lines', () => {
+    expect(parseExportLines(' \t\r\n')).toEqual([]);
+    expect(() => parseExportLines('\u00a0{}')).toThrow(StrictJsonError);
+    expect(() => parseExportLines('\ufeff{}')).toThrow(StrictJsonError);
   });
 });

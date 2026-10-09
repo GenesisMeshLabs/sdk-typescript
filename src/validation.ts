@@ -50,8 +50,9 @@ const freshnessProof = shape({
 });
 export const validDecision = shape({
   decision_id: string, context_id: string, agreement_id: string, authorized: boolean,
-  denial_reason: nullable(string), gate_results: array(gateResult), decision_made_at: timestamp,
-  decision_valid_until: timestamp, operator_sovereign_id: string, freshness_proof: nullable(freshnessProof),
+  // Absent is read as absent, so a decision whose signature covers a null fails at the signature.
+  denial_reason: optional(nullable(string)), gate_results: array(gateResult), decision_made_at: timestamp,
+  decision_valid_until: timestamp, operator_sovereign_id: string, freshness_proof: optional(nullable(freshnessProof)),
   policy_binding: optional(nullable(policyBinding)), attestation_binding: optional(nullable(attestationBinding)),
   signature: optional(signature),
 });

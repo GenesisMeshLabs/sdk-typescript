@@ -6,6 +6,10 @@
 
 import { buildAdminHeadersWithSigner, canonicalJson, parseJson, seedSigner, type Signer } from './auth.js';
 import { fromHttpError, GenesisMeshError, NetworkError } from './errors.js';
+import { decodeUtf8, StrictJsonError } from './strict-json.js';
+
+/** JSON refused for its form (a duplicate key, ...): the reason is kept; a body that is not JSON stays a NetworkError. */
+const refusedForm = (err: unknown): boolean => err instanceof StrictJsonError && err.reason !== 'invalid_json';
 
 export interface RetryOptions {
   /** Extra attempts after the first. 0 disables retries. */
@@ -222,13 +226,14 @@ export class HttpTransport {
   /** One request to the active endpoint, with the body fully read (a dropped body is a NetworkError). */
   private async _attempt(spec: RequestSpec): Promise<BufferedResponse> {
     const res = await this._once(spec);
-    let body: string;
+    let body: string | ArrayBuffer;
     try {
-      body = await res.text();
+      // The bytes, so a body that is not UTF-8 is refused rather than repaired.
+      body = typeof res.arrayBuffer === 'function' ? await res.arrayBuffer() : await res.text();
     } catch {
       throw new NetworkError(`Failed to read response body (${spec.method} ${spec.path})`);
     }
-    return { ok: res.ok, status: res.status, text: async () => body };
+    return { ok: res.ok, status: res.status, text: async () => (typeof body === 'string' ? body : decodeUtf8(body)) };
   }
 
   /** Unauthenticated GET against one specific endpoint (no failover), e.g. per-instance readiness. */
@@ -240,10 +245,11 @@ export class HttpTransport {
     } catch (err) {
       throw new NetworkError(`GET ${url} failed: ${(err as Error).message}`);
     }
-    const text = await response.text();
     try {
+      const text = typeof response.arrayBuffer === 'function' ? decodeUtf8(await response.arrayBuffer()) : await response.text();
       return { status: response.status, body: parseJson(text) as T };
-    } catch {
+    } catch (err) {
+      if (refusedForm(err)) throw err;
       throw new NetworkError(`Failed to parse response body from ${url} (HTTP ${response.status})`);
     }
   }
@@ -316,7 +322,8 @@ export class HttpTransport {
     let data: unknown;
     try {
       data = parseJson(await response.text());
-    } catch {
+    } catch (err) {
+      if (response.ok && refusedForm(err)) throw err;
       if (!response.ok) {
         throw new GenesisMeshError(`HTTP ${response.status} with a non-JSON body`, 'unknown', response.status);
       }
