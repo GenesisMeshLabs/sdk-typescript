@@ -771,6 +771,8 @@ export interface EvidenceStoreVerification {
   decisions: number;
   executions: number;
   failures: EvidenceVerificationFailure[];
+  /** Findings that do not fail verification (v1.2.0), such as `unsigned_field`. */
+  warnings?: EvidenceVerificationFailure[];
 }
 
 export interface EvidenceSearchResult {

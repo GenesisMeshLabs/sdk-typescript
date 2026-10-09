@@ -1,14 +1,15 @@
 /**
- * Strict verification (v1.2.0): every field of a signed record is known.
+ * Strict verification (v1.2.0): every signed field of a record is known.
  *
- * A verifier that copies every received field into the signed form accepts a
- * field it does not understand whenever the signer covered it, so a field
- * added in a later release could change what a record means. The registry
- * (src/canonical-registry.ts, generated from the Python reference) lists
- * every field of every record this SDK verifies; anything else is refused as
- * `unknown_field`, and an evidence export entry of another kind as
- * `unknown_entry_kind`. See the core's reference page "Canonical Form of
- * Signed Records".
+ * Before 1.2.0 this SDK copied every received field into the signed form, so
+ * a field a newer signer covered verified here and could change what a record
+ * means. The registry (src/canonical-registry.ts, generated from the Python
+ * reference and shipped in the shared conformance suite `field_registry`)
+ * lists every field of every record this SDK verifies. Verifiers check the
+ * signature over the record as received first; a signed field the registry
+ * does not list is then refused as `unknown_field`, and an evidence export
+ * entry of another kind as `unknown_entry_kind`. See the core's reference
+ * page "Canonical Form of Signed Records".
  */
 
 import { CANONICAL_REGISTRY } from './canonical-registry.js';
@@ -34,46 +35,76 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-/**
- * Dotted paths of the fields in `data` that `model` does not define, at any
- * depth (`policy_binding.policies.0.extra`). Free-form fields are not
- * inspected; values of the wrong type are left to validation.
- */
-export function unknownFields(
-  model: string,
-  data: unknown,
-  registry: CanonicalRegistry = CANONICAL_REGISTRY,
-  path = '',
-): string[] {
-  const spec = registry.models[model];
-  if (!spec || !isRecord(data)) return [];
-  const found: string[] = [];
-  for (const [key, value] of Object.entries(data)) {
-    if (!Object.prototype.hasOwnProperty.call(spec.fields, key)) {
-      found.push(`${path}${key}`);
-      continue;
-    }
-    const kind = spec.fields[key];
-    if (value === null || value === undefined || kind === null || kind === 'open' || kind === undefined) continue;
-    if ('object' in kind) {
-      found.push(...unknownFields(kind.object, value, registry, `${path}${key}.`));
-    } else if ('list' in kind && Array.isArray(value)) {
-      value.forEach((item, i) => found.push(...unknownFields(kind.list, item, registry, `${path}${key}.${i}.`)));
-    } else if ('map' in kind && isRecord(value)) {
-      for (const [k, item] of Object.entries(value)) {
-        found.push(...unknownFields(kind.map, item, registry, `${path}${key}.${k}.`));
-      }
-    }
-  }
+function spec(model: string): ModelSpec {
+  const found = CANONICAL_REGISTRY.models[model];
+  if (!found) throw new Error(`no registry entry for ${model}`);
   return found;
 }
 
-/** True when the record has no field outside `model`. */
-export function knownFieldsOnly(model: string, data: unknown): boolean {
-  return unknownFields(model, data).length === 0;
+/** Whether a root's field is outside its signed projection (the signature, an agreement's unsigned fields). */
+function outsideProjection(model: ModelSpec, key: string): boolean {
+  return key === model.signature_field || (model.canonical_fields !== undefined && !model.canonical_fields.includes(key));
+}
+
+type Step = string | number;
+
+function collect(model: string, data: unknown, path: Step[], projection: boolean, found: Step[][]): void {
+  const s = CANONICAL_REGISTRY.models[model];
+  if (!s || !isRecord(data)) return;
+  for (const [key, value] of Object.entries(data)) {
+    if (projection && outsideProjection(s, key)) continue;
+    if (!Object.prototype.hasOwnProperty.call(s.fields, key)) {
+      found.push([...path, key]);
+      continue;
+    }
+    const kind = s.fields[key];
+    if (value === null || value === undefined || kind === null || kind === 'open' || kind === undefined) continue;
+    if ('object' in kind) {
+      collect(kind.object, value, [...path, key], false, found);
+    } else if ('list' in kind && Array.isArray(value)) {
+      value.forEach((item, i) => collect(kind.list, item, [...path, key, i], false, found));
+    } else if ('map' in kind && isRecord(value)) {
+      for (const [k, item] of Object.entries(value)) collect(kind.map, item, [...path, key, k], false, found);
+    }
+  }
+}
+
+/**
+ * Dotted paths of the signed fields in `record` that `model` does not define,
+ * at any depth (`policy_binding.policies.0.extra`), sorted. Only the signed
+ * projection is checked; free-form fields are not inspected; values of the
+ * wrong type are left to validation.
+ */
+export function unknownFields(model: string, record: unknown, path = ''): string[] {
+  const found: Step[][] = [];
+  collect(model, record, [], true, found);
+  return found.map(steps => path + steps.join('.')).sort();
 }
 
 /** True when this SDK knows the evidence entry kind. */
-export function isKnownEntryKind(kind: unknown, registry: CanonicalRegistry = CANONICAL_REGISTRY): boolean {
-  return typeof kind === 'string' && registry.entry_kinds.includes(kind);
+export function isKnownEntryKind(kind: unknown): boolean {
+  return typeof kind === 'string' && CANONICAL_REGISTRY.entry_kinds.includes(kind);
+}
+
+/** The optional fields a root omits from its signed form when absent. */
+export function omittedWhenAbsent(model: string): readonly string[] {
+  return spec(model).omit_when_none ?? [];
+}
+
+/** The fixed signed fields of a root signed over a field list (agreements). */
+export function canonicalFieldsOf(model: string): readonly string[] {
+  return spec(model).canonical_fields ?? [];
+}
+
+/** A copy of `record` without its unknown signed fields (used to verify what the signer did sign). */
+export function withoutUnknownFields<T>(model: string, record: T): T {
+  const copy = JSON.parse(JSON.stringify(record)) as T;
+  const found: Step[][] = [];
+  collect(model, copy, [], true, found);
+  for (const steps of found) {
+    let node: unknown = copy;
+    for (const step of steps.slice(0, -1)) node = (node as Record<string, unknown>)[step as string];
+    if (isRecord(node)) delete node[steps[steps.length - 1] as string];
+  }
+  return copy;
 }

@@ -5,7 +5,16 @@
  */
 import type { CanonicalRegistry } from './strict.js';
 
-export const CANONICAL_REGISTRY: CanonicalRegistry = {
+/** Frozen at every level, so no code in the process can whitelist a field. */
+function freeze<T>(value: T): T {
+  if (typeof value === 'object' && value !== null) {
+    for (const inner of Object.values(value)) freeze(inner);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
   "version": 1,
   "entry_kinds": [
     "decision",
@@ -442,4 +451,4 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = {
       ]
     }
   }
-};
+});

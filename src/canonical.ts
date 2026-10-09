@@ -39,8 +39,11 @@ function without(model: object, always: readonly string[], whenNull: readonly st
   return out;
 }
 
+/** Decision fields omitted from the signed form when absent (checked against the field registry). */
+export const DECISION_OMITTED_WHEN_ABSENT = ['policy_binding', 'attestation_binding'] as const;
+
 export function decisionCanonical(decision: BoundaryDecision): string {
-  return canonicalJson(without(decision, ['signature'], ['policy_binding', 'attestation_binding']));
+  return canonicalJson(without(decision, ['signature'], DECISION_OMITTED_WHEN_ABSENT));
 }
 
 export function executionCanonical(evidence: ExecutionEvidence): string {
@@ -102,7 +105,7 @@ export function payloadDigest(payload: unknown): string {
 }
 
 /** Fields both parties sign; identical for CapabilityCounter and AgreementRecord (excludes ids and timestamps). */
-const AGREEMENT_CANONICAL_FIELDS = [
+export const AGREEMENT_CANONICAL_FIELDS = [
   'agreed_terms', 'graph_digest', 'offer_id', 'offerer_evidence',
   'offerer_sovereign_id', 'responder_evidence', 'responder_sovereign_id',
 ] as const;
