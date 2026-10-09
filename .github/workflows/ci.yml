@@ -51,7 +51,8 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17
+        # Docker Hub's official image, from its ECR Public mirror (Docker Hub outages failed this job).
+        image: public.ecr.aws/docker/library/postgres:17
         env:
           POSTGRES_USER: genesis
           POSTGRES_PASSWORD: genesis
