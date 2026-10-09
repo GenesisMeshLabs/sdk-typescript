@@ -35,8 +35,25 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
   new `warnings` list as `unsigned_field` and the record is verified without
   it.
 
+- **Records are valid only in their canonical form.** A decision, an
+  agreement or a data license policy whose signature verifies over a
+  timestamp the reference does not write (`+00:00` rather than `Z`, a
+  fraction `.000`) is refused as `non_canonical_form`
+  (`verifyDataLicensePolicySignature` returns `false`; an intent check reports
+  `Not in canonical form: intent` or `...: policy`). Records the NA signs are
+  always canonical; build timestamps with `pythonTimestamp`, not
+  `toISOString`. `BoundaryVerificationReason` and
+  `AgreementVerificationReason` gain `non_canonical_form`.
+- **`parseJson` reads strictly.** JSON every implementation would not read
+  alike throws `StrictJsonError` with a `reason`: `duplicate_key`,
+  `non_finite_number` (`1e400`), `integer_out_of_range` (beyond 64 bits),
+  `negative_zero` (the integer `-0`), `lone_surrogate` or `invalid_json`.
+  This covers HTTP responses, `parseExportLines` and the export clients.
+
 ### Added
 
+- `canonicalTimestamp`, `nonCanonicalTimestamps`, `checkStrictJson` and
+  `StrictJsonError`; the shared conformance suite `canonical`.
 - `unknownFields(model, record)` and `isKnownEntryKind(kind)`;
   `npm run sync:registry` regenerates the embedded registry from a new copy
   of the suite.

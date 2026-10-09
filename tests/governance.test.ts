@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import {
-  GenesisMeshClient, ExecutionRecorder, seedSigner, signCanonical, decisionCanonical,
+  GenesisMeshClient, ExecutionRecorder, seedSigner, signCanonical, decisionCanonical, pythonTimestamp,
   governedAction, DecisionVerificationError, GovernedActionError, summarizeDecision, reconcileResources, parseExportLines,
 } from '../src/index.js';
 import type { GovernedActionParams, ResourceState } from '../src/index.js';
@@ -17,8 +17,9 @@ const signer = seedSigner(TEST_KEY.seedBase64, 'test');
 afterEach(() => { jest.useRealTimers(); });
 async function setup(denied = false) {
   const evaluation = structuredClone(denied ? v.denied : v.allowed);
-  evaluation.decision.decision_made_at = new Date(Date.now() - 1000).toISOString();
-  evaluation.decision.decision_valid_until = new Date(Date.now() + 60_000).toISOString();
+  // Timestamps in canonical form, as the NA writes them (v1.2.0).
+  evaluation.decision.decision_made_at = pythonTimestamp(new Date(Date.now() - 1000));
+  evaluation.decision.decision_valid_until = pythonTimestamp(new Date(Date.now() + 60_000));
   evaluation.decision.signature = await signCanonical(decisionCanonical(evaluation.decision), signer);
   const gm = new GenesisMeshClient({ audience: 'TEST', baseUrl: 'http://unused', fetch: mockFetch({ status: 500, body: {} }) as unknown as typeof fetch });
   const evaluate = jest.spyOn(gm.boundary, 'evaluate').mockResolvedValue(evaluation);

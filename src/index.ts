@@ -123,7 +123,9 @@ export type {
 } from './verify.js';
 
 // Strict verification: the field registry of signed records (v1.2.0)
-export { unknownFields, isKnownEntryKind } from './strict.js';
+export { unknownFields, isKnownEntryKind, canonicalTimestamp, nonCanonicalTimestamps } from './strict.js';
+export { checkStrictJson, StrictJsonError } from './strict-json.js';
+export type { StrictJsonReason } from './strict-json.js';
 
 // Data access intents (v0.61)
 export { createDataAccessIntent } from './data_intent.js';

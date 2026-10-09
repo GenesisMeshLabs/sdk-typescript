@@ -227,7 +227,8 @@ export type BoundaryVerificationReason =
   | 'unauthorized_attestation_basis'
   | 'attestation_binding_mismatch'
   | 'attestation_binding_missing'
-  | 'unknown_field';
+  | 'unknown_field'
+  | 'non_canonical_form';
 
 export interface BoundaryVerification {
   accepted: boolean;
