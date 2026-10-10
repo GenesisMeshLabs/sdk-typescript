@@ -91,6 +91,14 @@ function signedBy(canonical: string, signature: Signature | null | undefined, ke
   return !!signature && typeof signature.sig === 'string' && verifyCanonical(canonical, signature.sig, keys);
 }
 
+/**
+ * The registered key a signature names (1.3.1): own entries only, so a
+ * `key_id` such as `constructor` names no key instead of a built-in.
+ */
+function keyNamed(keys: Record<string, ExecutorKeyInfo>, keyId: unknown): ExecutorKeyInfo | undefined {
+  return typeof keyId === 'string' && Object.hasOwn(keys, keyId) ? keys[keyId] : undefined;
+}
+
 function anySigned(canonical: string, signatures: readonly Signature[] | undefined, keys: readonly string[]): boolean {
   return (signatures ?? []).some(sig => verifyCanonical(canonical, sig.sig, keys));
 }
@@ -431,7 +439,7 @@ export function verifyEvidenceEvents(
           break;
         }
         const ev = payload as unknown as ExecutionEvidence;
-        const key = ev.signature ? executorKeys[ev.signature.key_id] : undefined;
+        const key = keyNamed(executorKeys, ev.signature?.key_id);
         // v1.3.0: only an executor key signs execution evidence.
         signature(!!key && key.executor_sovereign_id === ev.executor_sovereign_id
           && (key.role ?? 'executor') === 'executor' && verifyExecutionSignature(ev, key.public_key),
@@ -592,7 +600,7 @@ function outOfBandKeys(
   const role = KEY_ROLES[kind];
   if (role === undefined) return naPublicKeys;
   const signature = payload['signature'] as Signature | null | undefined;
-  const key = signature && typeof signature.key_id === 'string' ? executorKeys[signature.key_id] : undefined;
+  const key = keyNamed(executorKeys, signature?.key_id);
   const sovereign = kind === 'observation' ? payload['observer_sovereign_id'] : payload['executor_sovereign_id'];
   return key && key.executor_sovereign_id === sovereign && (key.role ?? 'executor') === role ? [key.public_key] : [];
 }
@@ -654,7 +662,7 @@ function checkPayloadFields(
   let signedAsReceived = false;
   if (kind === 'execution') {
     const ev = payload as unknown as ExecutionEvidence;
-    const key = ev.signature ? executorKeys[ev.signature.key_id] : undefined;
+    const key = keyNamed(executorKeys, ev.signature?.key_id);
     signedAsReceived = !!key && signedBy(executionCanonical(ev), ev.signature, [key.public_key]);
   } else if (kind === 'justification') {
     signedAsReceived = signedBy(justificationCanonical(payload as unknown as DecisionJustification),
@@ -663,7 +671,7 @@ function checkPayloadFields(
     // The key the signature names, whatever its role: an authentic record with a field this SDK
     // does not know is refused by name first, as the reference refuses it.
     const signature = payload['signature'] as Signature | null | undefined;
-    const named = signature && typeof signature.key_id === 'string' ? executorKeys[signature.key_id] : undefined;
+    const named = keyNamed(executorKeys, signature?.key_id);
     const keys = KEY_ROLES[kind] === undefined ? naPublicKeys : named ? [named.public_key] : [];
     signedAsReceived = signedBy(outOfBandCanonical(payload), signature, keys);
   } else {

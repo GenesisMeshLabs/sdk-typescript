@@ -59,6 +59,7 @@ export type { ClientOptions, RetryOptions, Query } from './client.js';
 export {
   canonicalJson,
   canonicalDigest,
+  checkSignable,
   parseJson,
   sha256Hex,
   signBytes,
@@ -151,6 +152,8 @@ export {
   classifySubmissionError,
   recordOutboxEntry,
   retryDelayMs,
+  nextAttemptAt,
+  LOCAL_ERROR,
   PREDECESSOR_DEAD_LETTERED,
   PERMANENT_REFUSALS,
   RECORD_PERMANENT_REFUSALS,
@@ -171,7 +174,9 @@ export type {
 export {
   ObservationRecorder,
   OutOfBandRecordError,
+  metadataProblem,
   observationFromFinding,
+  observationId,
   outOfBandCanonical,
   outOfBandDigest,
   signBreakGlass,

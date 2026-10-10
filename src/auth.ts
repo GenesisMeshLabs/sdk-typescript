@@ -27,7 +27,7 @@ import {
   sign as cryptoSign,
   verify as cryptoVerify,
 } from 'node:crypto';
-import { checkStrictJson } from './strict-json.js';
+import { checkStrictJson, StrictJsonError } from './strict-json.js';
 
 /** Escape every non-ASCII UTF-16 unit as \uXXXX, as Python's ensure_ascii does. */
 function asciiString(value: string): string {
@@ -137,9 +137,9 @@ export function cloneJson<T>(value: T): T {
   return value;
 }
 
-function canonicalMember(holder: object, key: string, value: unknown): string {
+function member(holder: object, key: string, value: unknown, ascii: boolean): string {
   if (typeof value === 'number') return pythonNumber(value, PYTHON_FLOATS.get(holder)?.has(key) ?? false);
-  return canonicalJson(value);
+  return encodeJson(value, ascii);
 }
 
 /** Python orders strings by Unicode code point, not UTF-16 code unit. */
@@ -152,20 +152,58 @@ export function compareCodePoints(a: string, b: string): number {
   return left.length - right.length;
 }
 
-/** Compact sorted JSON, byte-identical to the Python canonical form. */
-export function canonicalJson(value: unknown): string {
+/** Compact sorted JSON; strings with non-ASCII escaped (`ascii`, the canonical form) or kept as they are. */
+function encodeJson(value: unknown, ascii: boolean): string {
+  const text = (s: string) => (ascii ? asciiString(s) : JSON.stringify(s));
   if (value === null || value === undefined) return 'null';
-  if (typeof value === 'string') return asciiString(value);
+  if (typeof value === 'string') return text(value);
   if (typeof value === 'number') return pythonNumber(value);
   if (typeof value === 'bigint') return value.toString();
   if (typeof value === 'boolean') return value ? 'true' : 'false';
-  if (Array.isArray(value)) return '[' + value.map((v, i) => canonicalMember(value, String(i), v)).join(',') + ']';
+  if (Array.isArray(value)) return '[' + value.map((v, i) => member(value, String(i), v, ascii)).join(',') + ']';
   if (typeof value === 'object') {
     const record = value as Record<string, unknown>;
     const keys = Object.keys(record).filter(k => record[k] !== undefined).sort(compareCodePoints);
-    return '{' + keys.map(k => `${asciiString(k)}:${canonicalMember(record, k, record[k])}`).join(',') + '}';
+    return '{' + keys.map(k => `${text(k)}:${member(record, k, record[k], ascii)}`).join(',') + '}';
   }
   throw new Error(`canonical JSON cannot encode a ${typeof value}`);
+}
+
+/** Compact sorted JSON, byte-identical to the Python canonical form. */
+export function canonicalJson(value: unknown): string {
+  return encodeJson(value, true);
+}
+
+/**
+ * The UTF-8 size of a value's compact JSON with non-ASCII text unescaped, as
+ * Pydantic's `model_dump_json` writes it: the size the NA limits execution
+ * metadata by (1.3.1). Unlike `JSON.stringify`, it encodes `bigint`.
+ */
+export function jsonUtf8Size(value: unknown): number {
+  return Buffer.byteLength(encodeJson(value, false), 'utf-8');
+}
+
+/**
+ * Nesting a signed record sits under in what carries it: the list of a batch
+ * request, or an export entry's quarantine record that holds it.
+ */
+const RECORD_NESTING = 2;
+
+/**
+ * Throw `StrictJsonError` unless a record about to be signed is JSON every
+ * implementation reads alike (1.3.1): no lone surrogate, no integer outside
+ * 64 bits, no non-finite number, and nesting that leaves room for the request
+ * and the export that carry it. Once signed, such a record could only be
+ * refused (`invalid_json`); checked first, it never is.
+ */
+export function checkSignable(record: unknown): void {
+  let text: string;
+  try {
+    text = canonicalJson(record);
+  } catch (err) {
+    throw new StrictJsonError('invalid_json', (err as Error).message);
+  }
+  checkStrictJson('['.repeat(RECORD_NESTING) + text + ']'.repeat(RECORD_NESTING));
 }
 
 /** SHA-256 hex of a string's UTF-8 bytes. */

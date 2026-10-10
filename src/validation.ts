@@ -12,9 +12,11 @@ const optional = (check: Check): Check => v => v === undefined || check(v);
 const array = (check: Check): Check => v => Array.isArray(v) && v.every(check);
 const oneOf = (...values: unknown[]): Check => v => values.includes(v);
 const dictionary = (check: Check): Check => v => isObject(v) && Object.values(v).every(check);
+// Own properties only (1.3.1): a key named `constructor` or `toString` is a field like any other.
+const own = (v: Record<string, unknown>, k: string): unknown => (Object.hasOwn(v, k) ? v[k] : undefined);
 const shape = (fields: Record<string, Check>, exact = false): Check => v =>
-  isObject(v) && Object.entries(fields).every(([k, check]) => check(v[k]))
-  && (!exact || Object.keys(v).every(k => k in fields));
+  isObject(v) && Object.entries(fields).every(([k, check]) => check(own(v, k)))
+  && (!exact || Object.keys(v).every(k => Object.hasOwn(fields, k)));
 
 export const timestamp: Check = v => {
   if (typeof v !== 'string') return false;
@@ -129,8 +131,18 @@ export const validObservation: Check = v => {
   const given = (k: string) => r[k] !== undefined && r[k] !== null;
   if (given('changed_at')) return !given('changed_not_before') && !given('changed_not_after');
   if (!given('changed_not_before') || !given('changed_not_after')) return false;
-  return Date.parse(r['changed_not_before'] as string) <= Date.parse(r['changed_not_after'] as string);
+  return timestampOrder(r['changed_not_before'] as string, r['changed_not_after'] as string) <= 0;
 };
+
+/**
+ * Compare two timestamps with an offset to the microsecond, as the reference
+ * compares them (1.3.1; `Date` keeps milliseconds): negative, zero or positive.
+ */
+export function timestampOrder(a: string, b: string): number {
+  const seconds = (t: string) => Date.parse(t.replace(/\.\d+/, ''));
+  const micros = (t: string) => Number((/\.(\d+)/.exec(t)?.[1] ?? '').slice(0, 6).padEnd(6, '0'));
+  return seconds(a) - seconds(b) || micros(a) - micros(b);
+}
 export const validBreakGlass = shape({
   break_glass_id: bounded(128), executor_sovereign_id: bounded(256), resource_id: bounded(256), resource_action: action,
   capability: bounded(256), attestation_id: absent(bounded(128)), request_parameters: filled(isObject),

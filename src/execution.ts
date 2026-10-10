@@ -5,7 +5,7 @@
 
 import { signBreakGlass, type BreakGlassInput, type BreakGlassRecord } from './out-of-band.js';
 import { randomUUID } from 'node:crypto';
-import { pythonTimestamp, signCanonical, type Signer } from './auth.js';
+import { checkSignable, jsonUtf8Size, pythonTimestamp, signCanonical, type Signer } from './auth.js';
 import { executionCanonical, executionDigest } from './canonical.js';
 import { GenesisMeshError } from './errors.js';
 import type {
@@ -24,8 +24,9 @@ const SECRET_KEYS = new Set([
   'accesstoken', 'refreshtoken', 'bearer', 'privatekey', 'keymaterial',
   'credential', 'credentials', 'clientsecret', 'apikey', 'pem', 'connectionstring',
 ]);
-const LONG_OPAQUE = /^[A-Za-z0-9+/=_-]{120,}$/;
-const JWT = /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
+// `\n?$`: the reference's `$` also matches before a final newline (1.3.1).
+const LONG_OPAQUE = /^[A-Za-z0-9+/=_-]{120,}\n?$/;
+const JWT = /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\n?$/;
 
 /** Thrown before signing when a record would carry secret material; the NA would refuse it. */
 export class SecretMaterialError extends GenesisMeshError {
@@ -39,7 +40,8 @@ function normaliseKey(key: string): string {
   return key.toLowerCase().replace(/[-_.]/g, '');
 }
 
-function secretMaterial(value: unknown, path = ''): string | null {
+/** The reference's `_secret_material`: the first field named like a secret, or holding a PEM block, key or token. */
+export function secretMaterial(value: unknown, path = ''): string | null {
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
       const found = secretMaterial(value[i], `${path}${i}.`);
@@ -67,10 +69,8 @@ export function checkMetadataOnly(
   executionParameters: Record<string, unknown>,
   outcomeDetail: string | null = null,
 ): string | null {
-  const size = Buffer.byteLength(
-    JSON.stringify({ execution_parameters: executionParameters, outcome_detail: outcomeDetail }),
-    'utf-8',
-  );
+  // 1.3.1: sized as the NA sizes it, without JSON.stringify (which throws on a `bigint` read back from the outbox).
+  const size = jsonUtf8Size({ execution_parameters: executionParameters, outcome_detail: outcomeDetail });
   if (size > MAX_METADATA_BYTES) return `metadata is ${size} bytes, over the ${MAX_METADATA_BYTES}-byte limit`;
   return secretMaterial(executionParameters) ?? (outcomeDetail ? secretMaterial({ outcome_detail: outcomeDetail }) : null);
 }
@@ -181,6 +181,8 @@ export class ExecutionRecorder {
       record.resource_sequence = head ? head.resource_sequence + 1 : 1;
       record.prev_resource_digest = head ? head.record_digest : null;
     }
+    // 1.3.1: a value the NA would refuse as `invalid_json` is refused before signing (`StrictJsonError`).
+    checkSignable(record);
     record.signature = await signCanonical(executionCanonical(record), this.signer);
     return record;
   }

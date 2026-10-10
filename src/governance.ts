@@ -5,13 +5,17 @@ import { randomUUID } from 'node:crypto';
  * compare cloud state with the NA's history.
  */
 
+import { canonicalJson, checkSignable } from './auth.js';
 import type { BoundaryClient, EvaluateParams } from './boundary.js';
 import type { EvidenceStoreClient, RecordSubmission, ResourceState } from './evidence_store.js';
 import { GenesisMeshError, NetworkError } from './errors.js';
 import {
   checkMetadataOnly, MAX_METADATA_BYTES, SecretMaterialError, type ExecutionRecorder, type PriorResource,
 } from './execution.js';
-import { OutOfBandRecordError, type BreakGlassRecord, type EvaluationFailure } from './out-of-band.js';
+import {
+  breakGlassRecord, checkBreakGlassRecord, OutOfBandRecordError, type BreakGlassRecord, type EvaluationFailure,
+} from './out-of-band.js';
+import { StrictJsonError } from './strict-json.js';
 import type { Delivery, OutboxEntry, RecordOutboxEntry } from './outbox.js';
 import { verifyBoundaryDecision, type VerifyDecisionOptions } from './verify.js';
 import type {
@@ -164,7 +168,9 @@ export class GovernedActionError extends GenesisMeshError {
  * With an outbox (v1.2.0): the action ran, but the secret guard refused
  * metadata it reported. The outcome was recorded without the refused fields
  * (`dropped`), as `evidence`; `submission` or `queued` say what became of it.
- * `cause` is the guard's `SecretMaterialError`. Do not rerun the action.
+ * `cause` is the guard's `SecretMaterialError`, or (1.3.1) a `StrictJsonError`
+ * for a value the NA would not read alike (a lone surrogate, an integer
+ * beyond 64 bits, nesting too deep). Do not rerun the action.
  */
 export class MetadataRefusedError<T = unknown> extends GenesisMeshError {
   readonly value: T | undefined;
@@ -174,7 +180,8 @@ export class MetadataRefusedError<T = unknown> extends GenesisMeshError {
   readonly dropped: string[];
 
   constructor(
-    cause: SecretMaterialError, value: T | undefined, evidence: ExecutionEvidence, delivery: Delivery, dropped: string[],
+    cause: SecretMaterialError | StrictJsonError, value: T | undefined, evidence: ExecutionEvidence, delivery: Delivery,
+    dropped: string[],
   ) {
     super(`the action ran; its metadata was refused and recorded without ${dropped.join(', ')}: ${cause.message}`,
       'governed_action_metadata_refused', 0);
@@ -219,9 +226,25 @@ function guardNote(dropped: readonly string[]): string {
 }
 
 /**
- * The reported metadata without the parts the secret guard refuses: each
- * top-level parameter is checked alone, and the outcome detail names what was
- * dropped. Everything is dropped when the rest is still refused (its size).
+ * True when reported metadata cannot be recorded: the secret guard refuses
+ * it, or (1.3.1) it is JSON the NA would not read alike (`StrictJsonError`).
+ */
+function unrecordable(executionParameters: Record<string, unknown>, outcomeDetail: string | null): boolean {
+  if (checkMetadataOnly(executionParameters, outcomeDetail) !== null) return true;
+  try {
+    // As deep as a record holds them.
+    checkSignable({ execution_parameters: executionParameters, outcome_detail: outcomeDetail });
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The reported metadata without the parts the secret guard refuses, or
+ * (1.3.1) that are JSON the NA would not read alike: each top-level parameter
+ * is checked alone, and the outcome detail names what was dropped. Everything
+ * is dropped when the rest is still refused (its size).
  */
 export function withoutRefusedMetadata(
   executionParameters: Record<string, unknown>,
@@ -230,19 +253,19 @@ export function withoutRefusedMetadata(
   let kept: Record<string, unknown> = {};
   let dropped: string[] = [];
   for (const [key, value] of Object.entries(executionParameters)) {
-    if (checkMetadataOnly({ [key]: value }) === null) kept[key] = value;
+    if (!unrecordable({ [key]: value }, null)) kept[key] = value;
     else dropped.push(key);
   }
-  const detail = outcomeDetail !== null && checkMetadataOnly({}, outcomeDetail) === null ? outcomeDetail : null;
+  const detail = outcomeDetail !== null && !unrecordable({}, outcomeDetail) ? outcomeDetail : null;
   if (outcomeDetail !== null && detail === null) dropped.push('outcome_detail');
-  if (checkMetadataOnly(kept, detail) !== null) {
+  if (unrecordable(kept, detail)) {
     dropped = [...Object.keys(executionParameters), ...(outcomeDetail !== null ? ['outcome_detail'] : [])];
     kept = {};
   }
   dropped.sort();
   const note = guardNote(dropped);
   const outcome_detail = detail !== null && !dropped.includes('outcome_detail') ? `${detail} ${note}` : note;
-  if (checkMetadataOnly(kept, outcome_detail) !== null) {
+  if (unrecordable(kept, outcome_detail)) {
     const all = [...Object.keys(executionParameters), ...(outcomeDetail !== null ? ['outcome_detail'] : [])].sort();
     return { execution_parameters: {}, outcome_detail: `[${GUARD_NOTE}]`, dropped: all };
   }
@@ -273,7 +296,13 @@ const NOT_BREAKABLE: ReadonlySet<string> = new Set([
   'response_body_unreadable',
 ]);
 
-/** The transient failure an evaluation error is, or null for any other error (a DENY is not an error). */
+/**
+ * The transient failure an evaluation error is, or null for any other error
+ * (a DENY is not an error). A request that got no answer is a network error
+ * or a timeout; an answer is one only when it is a `5xx` or `429`. Since
+ * 1.3.1 that holds for the NA public key lookup before the request too: its
+ * `403` or `404` (`na_public_key_unavailable`) keeps its status.
+ */
 export function evaluationFailure(err: unknown): EvaluationFailure | null {
   if (err instanceof NetworkError) {
     if (NOT_BREAKABLE.has(err.code)) return null;
@@ -334,7 +363,7 @@ export async function governedAction<T>(
   const outbox = store.outbox;
   // An outbox that cannot be read fails here, before anything is evaluated or run.
   if (outbox) await outbox.list();
-  if (breakGlass) await checkBreakGlass(store, params, breakGlass);
+  if (breakGlass) await checkBreakGlass(store, recorder, params, breakGlass);
   const contextId = params.context?.context_id || randomUUID();
   const request = { ...evaluateParams, context: { ...params.context, context_id: contextId } } as EvaluateParams;
   let evaluation: BoundaryEvaluation;
@@ -407,13 +436,13 @@ export async function governedAction<T>(
 
   // The action ran: from here on its outcome is always recorded.
   let evidence: ExecutionEvidence | undefined;
-  let refused: { error: SecretMaterialError; dropped: string[] } | undefined;
+  let refused: { error: SecretMaterialError | StrictJsonError; dropped: string[] } | undefined;
   let delivery: Delivery;
   try {
     try {
       evidence = await record(report);
     } catch (err) {
-      if (!(err instanceof SecretMaterialError)) throw err;
+      if (!(err instanceof SecretMaterialError) && !(err instanceof StrictJsonError)) throw err;
       const cleaned = withoutRefusedMetadata(report.execution_parameters ?? {}, report.outcome_detail ?? null);
       evidence = await record({ ...report, ...cleaned });
       refused = { error: err, dropped: cleaned.dropped };
@@ -429,6 +458,7 @@ export async function governedAction<T>(
 /** Everything break-glass needs is checked before anything is evaluated or run. */
 async function checkBreakGlass(
   store: EvidenceStoreClient,
+  recorder: ExecutionRecorder,
   params: GovernedActionParams,
   options: BreakGlassOptions,
 ): Promise<void> {
@@ -446,10 +476,6 @@ async function checkBreakGlass(
     throw new OutOfBandRecordError('breakGlass needs requested_capability', 'break_glass_malformed');
   }
   const justification = options.justification;
-  const length = typeof justification === 'string' ? Array.from(justification).length : 0;
-  if (length < 1 || length > 1024) {
-    throw new OutOfBandRecordError('a justification of 1 to 1024 characters is required', 'break_glass_malformed');
-  }
   // Everything the record carries besides the action's report is checked now, with room left
   // for the report, so a record can always be kept once the action has run.
   const context = params.context ?? {};
@@ -459,10 +485,23 @@ async function checkBreakGlass(
       throw new OutOfBandRecordError(`context.${name} must be an object`, 'break_glass_malformed');
     }
   }
-  const carried = { request_parameters: context.request_parameters ?? {}, attributes: context.attributes ?? {} };
-  const secret = checkMetadataOnly({ ...context }) ?? checkMetadataOnly({}, justification);
+  const secret = checkMetadataOnly({ ...context });
   if (secret) throw new OutOfBandRecordError(secret, 'break_glass_secret_material');
-  if (Buffer.byteLength(JSON.stringify({ ...carried, justification }), 'utf-8') > MAX_METADATA_BYTES - RECORD_RESERVE) {
+  // 1.3.1: the record as it will be signed, with an empty report, passes the checks `signBreakGlass`
+  // makes (the reference's), with room left for the report as the reference sizes it.
+  const record = breakGlassRecord({
+    executor_sovereign_id: recorder.executorSovereignId, resource_id: params.resource_id,
+    resource_action: params.resource_action!, capability: params.requested_capability,
+    attestation_id: params.attestation_id, request_parameters: context.request_parameters,
+    attributes: context.attributes, justification, evaluation_request: {}, evaluation_failure: 'network_error',
+    outcome: 'success',
+  });
+  checkBreakGlassRecord(record);
+  const carried = {
+    execution_parameters: {}, request_parameters: record.request_parameters, attributes: record.attributes,
+    outcome_detail: '', justification,
+  };
+  if (canonicalJson(carried).length > MAX_METADATA_BYTES - RECORD_RESERVE) {
     throw new OutOfBandRecordError(`the context and justification leave no room for the record within `
       + `${MAX_METADATA_BYTES} bytes`, 'break_glass_malformed');
   }
@@ -521,17 +560,20 @@ async function breakTheGlass<T>(
   let record: BreakGlassRecord | undefined;
   let dropped: string[] | undefined;
   let delivery: { submission?: RecordSubmission; queued?: RecordOutboxEntry };
+  // What the report can be recorded without: secret material, or (1.3.1) JSON the NA would not read alike.
+  const refusedReport = (err: unknown) => err instanceof StrictJsonError
+    || (err instanceof OutOfBandRecordError && err.code === 'break_glass_secret_material');
   try {
     try {
       record = await sign(report);
     } catch (err) {
-      if (!(err instanceof OutOfBandRecordError) || err.code !== 'break_glass_secret_material') throw err;
+      if (!refusedReport(err)) throw err;
       const cleaned = withoutRefusedMetadata(report.execution_parameters ?? {}, report.outcome_detail ?? null);
       try {
         record = await sign({ ...report, ...cleaned });
         dropped = cleaned.dropped;
       } catch (again) {
-        if (!(again instanceof OutOfBandRecordError) || again.code !== 'break_glass_secret_material') throw again;
+        if (!refusedReport(again)) throw again;
         // The report together with the context is still refused (its size): keep the outcome alone.
         const all = [...Object.keys(report.execution_parameters ?? {}),
           ...(report.outcome_detail != null ? ['outcome_detail'] : [])].sort();

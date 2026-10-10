@@ -7,6 +7,8 @@ export class GenesisMeshError extends Error {
   details: Record<string, unknown> = {};
   /** `error.request_id` from the NA envelope, for correlating with NA logs. */
   requestId: string | null = null;
+  /** Seconds to wait before trying again, from the response's `Retry-After` header (1.3.1); null without one. */
+  retryAfterSeconds: number | null = null;
 
   constructor(message: string, code: string, status: number) {
     super(message);
@@ -86,6 +88,15 @@ export class BadRequestError extends GenesisMeshError {
     super(message, code, 400);
     this.name = 'BadRequestError';
   }
+}
+
+/** Seconds a `Retry-After` header asks for (delay-seconds or an HTTP date), or null when it says nothing usable. */
+export function retryAfterSeconds(header: string | null | undefined, now = Date.now()): number | null {
+  const value = header?.trim();
+  if (!value) return null;
+  if (/^\d+$/.test(value)) return Number(value);
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? null : Math.max(0, Math.ceil((at - now) / 1000));
 }
 
 /** Maps an HTTP error response body to the appropriate typed error.
