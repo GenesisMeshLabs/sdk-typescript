@@ -10,7 +10,9 @@ import {
   verifyRevocationFeedSignature, verifyEvidenceEvents, parseExportLines, ConflictError,
   MemoryOutbox, MetadataRefusedError, executionDigest, ObservationRecorder,
 } from '../src/index.js';
-import type { BoundaryPolicyIntent, BreakGlassResult, EvidenceEvent, RecordOutboxEntry } from '../src/index.js';
+import type {
+  BoundaryPolicyIntent, BreakGlassResult, EvidenceEvent, GovernedActionParams, RecordOutboxEntry,
+} from '../src/index.js';
 import { generateTestKeyPair } from './helpers.js';
 
 const enabled = Boolean(process.env.GM_E2E_PYTHON || process.env.GM_E2E_BASE_URL);
@@ -213,22 +215,38 @@ suite('SDK against a live Python Network Authority', () => {
     const again = await gm.evidenceStore.judgeObservation(denied.payload['observation_id'] as string);
     expect(again.status).toBe('existing');
 
-    // Break-glass: the NA cannot be reached for the evaluation; the action runs and is recorded.
+    // Break-glass: the NA cannot be reached at all. The action runs, its record waits in the
+    // outbox, and is admitted and judged once the NA is back.
     const executor = generateTestKeyPair();
     await gm.evidenceStore.registerExecutorKey({ key_id: `executor-${id}`, public_key: executor.pubBase64, executor_sovereign_id: `executor-${id}` });
     const recorder = new ExecutionRecorder({ executorSovereignId: `executor-${id}`, signer: seedSigner(executor.seedBase64, `executor-${id}`) });
+    let offline = true;
     const outage: typeof fetch = async (input, init) => {
-      if (String(input).endsWith('/admin/boundary/evaluate')) throw new TypeError('fetch failed');
+      const url = String(input);
+      if (offline && (url.endsWith('/admin/boundary/evaluate') || url.endsWith('/evidence/break-glass'))) {
+        throw new TypeError('fetch failed');
+      }
       return fetch(input, init);
     };
     const client = new GenesisMeshClient({ ...config, fetch: outage, recordOutbox: new MemoryOutbox<RecordOutboxEntry>() });
-    const result = await governedAction(client, recorder, {
+    const params: GovernedActionParams & { breakGlass: { justification: string } } = {
       attestation_id: attestation.attestation_id, requested_capability: capability, resource_id: resource, resource_action: 'rotate',
       context: { request_parameters: { lifetime_days: 30 } }, breakGlass: { justification: 'incident drill: NA unreachable' },
       verify: { operatorPublicKeys: [naPublicKey], expectedPolicies: [policy], expectedAttestation: attestation },
-    }, async decision => ({ value: decision, execution_parameters: { version_id: 'v2' } })) as BreakGlassResult<unknown>;
-    expect(result).toMatchObject({ brokeGlass: true, failure: 'network_error', value: null, submission: { status: 'recorded' } });
-    expect(result.submission?.judgement?.payload.verdict).toBe('allow');
+    };
+    const result = await governedAction(client, recorder, params,
+      async decision => ({ value: decision, execution_parameters: { version_id: 'v2' } })) as BreakGlassResult<unknown>;
+    expect(result).toMatchObject({ brokeGlass: true, failure: 'network_error', value: null, queued: { state: 'pending', kind: 'break_glass' } });
+    offline = false;
+    const flushed = await client.evidenceStore.flushRecords({ ignoreBackoff: true });
+    expect(flushed.admitted.map(e => e.id)).toEqual([result.record.break_glass_id]);
+    expect(await client.evidenceStore.recordOutbox!.list()).toEqual([]);
+
+    // A DENY is never broken through, breakGlass or not.
+    const denyAction = jest.fn(async () => ({}));
+    const refused = await governedAction(client, recorder, { ...params, context: { request_parameters: { lifetime_days: 400 } } }, denyAction);
+    expect(refused).toMatchObject({ authorized: false });
+    expect(denyAction).not.toHaveBeenCalled();
 
     const changes = await gm.evidenceStore.resourceChanges(resource);
     expect(changes.changes.map(c => [c.kind, c.state])).toEqual([
