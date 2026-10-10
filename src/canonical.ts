@@ -90,13 +90,19 @@ export function freshnessProofCanonical(proof: object): string {
   return canonicalJson(without(proof, ['signature']));
 }
 
+/** Checkpoint fields omitted from the signed form when absent (v1.3.0; checked against the field registry). */
+export const CHECKPOINT_OMITTED_WHEN_ABSENT = ['observation_heads'] as const;
+
 export function checkpointCanonical(checkpoint: RetentionCheckpoint): string {
-  return canonicalJson(without(checkpoint, ['signature']));
+  return canonicalJson(without(checkpoint, ['signature'], CHECKPOINT_OMITTED_WHEN_ABSENT));
 }
+
+/** Envelope fields left out when absent (v1.3.0; checked against the field registry), so 1.2 digests hold. */
+export const ENVELOPE_OMITTED_WHEN_ABSENT = ['record_id', 'subject_id', 'matched_evidence_id', 'observation_sequence'] as const;
 
 /** `EvidenceStoreEntry.digest()`: every envelope field. */
 export function entryDigest(entry: EvidenceStoreEntry): string {
-  return canonicalDigest(entry);
+  return canonicalDigest(without(entry, [], ENVELOPE_OMITTED_WHEN_ABSENT));
 }
 
 /** SHA-256 of a stored payload's canonical JSON. */

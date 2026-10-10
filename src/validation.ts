@@ -87,6 +87,7 @@ export const validCheckpoint = shape({
   last_removed_entry_digest: string, removed_count: nonnegative, previous_checkpoint_id: nullable(string),
   issued_by: string, signature: optional(signature),
   resource_heads: dictionary(shape({ resource_sequence: positive, record_digest: string }, true)),
+  observation_heads: optional(nullable(dictionary(nonnegative))),
 });
 const entry = shape({
   store_sequence: positive, entry_kind: string,
@@ -95,7 +96,55 @@ const entry = shape({
   attestation_id: nullable(string), capability: nullable(string), outcome: nullable(string),
   evidence_id: nullable(string), executor_sovereign_id: nullable(string), exec_sequence_no: nullable(integer),
   resource_id: nullable(string), resource_action: nullable(string), resource_sequence: nullable(integer),
+  // v1.3.0, left out when absent (a null reads as absent, as the reference reads it).
+  record_id: optional(nullable(string)), subject_id: optional(nullable(string)),
+  matched_evidence_id: optional(nullable(string)), observation_sequence: optional(nullable(positive)),
 }, true);
+// v1.3.0: records of changes made outside the controlled path. An absent
+// optional field is left out of the signed form; a null reads as absent.
+const absent = (check: Check): Check => optional(nullable(check));
+const bounded = (max: number, min = 1): Check => v => string(v) && (v as string).length >= min && (v as string).length <= max;
+const sha256 = bounded(64, 64);
+const verdict = oneOf('allow', 'deny', 'indeterminate');
+export const validObservation = shape({
+  observation_id: bounded(128), observer_sovereign_id: bounded(256), resource_id: bounded(256), action,
+  capability: bounded(256), changed_at: absent(timestamp), changed_not_before: absent(timestamp),
+  changed_not_after: absent(timestamp), observed_at: timestamp, actor: absent(bounded(256)), source: bounded(128),
+  source_event_id: bounded(256), version_id: absent(bounded(256)), metadata: isObject, signature: optional(signature),
+});
+export const validBreakGlass = shape({
+  break_glass_id: bounded(128), executor_sovereign_id: bounded(256), resource_id: bounded(256), resource_action: action,
+  capability: bounded(256), attestation_id: absent(bounded(128)), request_parameters: isObject, attributes: isObject,
+  justification: bounded(1024), evaluation_request_digest: sha256,
+  evaluation_failure: oneOf('network_error', 'timeout', 'server_error', 'rate_limited'), executed_at: timestamp,
+  outcome: string, outcome_detail: absent(bounded(1024, 0)), execution_parameters: isObject, signature: optional(signature),
+});
+export const validJudgement = shape({
+  judgement_id: bounded(128), subject_kind: oneOf('observation', 'break_glass'), subject_id: bounded(128),
+  subject_digest: sha256, subject_store_sequence: positive, resource_id: bounded(256), action, capability: bounded(256),
+  governed_by: oneOf('prior_decision', 'after_the_fact'), verdict, reason: absent(bounded(1024, 0)),
+  evaluated_as_of: timestamp, evaluated_from: absent(timestamp), policy_binding: absent(policyBinding),
+  gate_results: array(gateResult), current_verdict: absent(verdict), current_policy_set_digest: absent(string),
+  flagged_for_review: absent(boolean), matched_evidence_id: absent(string), matched_decision_id: absent(string),
+  possible_match_evidence_id: absent(string), judged_at: timestamp, issuer_sovereign_id: string, issued_by: string,
+  signature: optional(signature),
+});
+export const validQuarantine = shape({
+  quarantine_id: bounded(128), record_kind: oneOf('execution', 'observation', 'break_glass'), record: isObject,
+  record_digest: sha256, rejection_code: bounded(128), detail: bounded(1024, 0), resource_id: absent(bounded(256)),
+  quarantined_at: timestamp, issuer_sovereign_id: string, issued_by: string, signature: optional(signature),
+});
+export const validRegistry = shape({
+  registry_record_id: bounded(128),
+  event: oneOf('policy_history_started', 'policy_activated', 'policy_deactivated', 'executor_key_registered',
+    'executor_key_retired', 'operator_key_holder'),
+  effective_at: timestamp, reconstructed: absent(boolean), policy_id: absent(string), policy_version: absent(positive),
+  policy_digest: absent(string), key_id: absent(string), public_key: absent(string), executor_sovereign_id: absent(string),
+  key_role: absent(oneOf('executor', 'observer')), resource_prefix: absent(string), operator_tier: absent(string),
+  holder: absent(string), approved_by: absent(string), recorded_by: absent(string), issuer_sovereign_id: string,
+  issued_by: string, signature: optional(signature),
+});
+
 export const validEvent = shape({
   schema: oneOf('gm.evidence.event'), schema_version: oneOf(1), entry,
   entry_digest: string, payload: isObject,

@@ -6,10 +6,11 @@ import { randomUUID } from 'node:crypto';
  */
 
 import type { BoundaryClient, EvaluateParams } from './boundary.js';
-import type { EvidenceStoreClient, ResourceState } from './evidence_store.js';
-import { GenesisMeshError } from './errors.js';
+import type { EvidenceStoreClient, RecordSubmission, ResourceState } from './evidence_store.js';
+import { GenesisMeshError, NetworkError } from './errors.js';
 import { checkMetadataOnly, SecretMaterialError, type ExecutionRecorder, type PriorResource } from './execution.js';
-import type { Delivery, OutboxEntry } from './outbox.js';
+import { OutOfBandRecordError, type BreakGlassRecord, type EvaluationFailure } from './out-of-band.js';
+import type { Delivery, OutboxEntry, RecordOutboxEntry } from './outbox.js';
 import { verifyBoundaryDecision, type VerifyDecisionOptions } from './verify.js';
 import type {
   BoundaryDecision,
@@ -85,7 +86,42 @@ export type GovernedActionParams = EvaluateParams & {
   prior_resource?: PriorResource | null;
   /** Verify the decision offline before acting (signature, expiry, bindings). */
   verify: Omit<VerifyDecisionOptions, 'now' | 'expectedPolicies'> & { expectedPolicies: readonly BoundaryPolicy[] };
+  /**
+   * v1.3.0: run the action even when the NA cannot be reached (network error,
+   * timeout, `5xx`, `429`), and record it as a break-glass record signed by
+   * the executor key, with this justification. Never on a DENY. Needs a
+   * record outbox (`ClientOptions.recordOutbox`) and `resource_id`.
+   */
+  breakGlass?: BreakGlassOptions;
 };
+
+/** An action run with `breakGlass`: the decision is null when it ran under break-glass. */
+export type BreakGlassAction<T> = (decision: BoundaryDecision | null) => Promise<ActionReport<T> | void>;
+
+export interface BreakGlassOptions {
+  /** Why the change cannot wait for the NA (1 to 1024 characters; no secret values). */
+  justification: string;
+}
+
+/**
+ * v1.3.0: the evaluation failed transiently, and the action ran under
+ * break-glass. The NA judges the record after the fact, as the failed
+ * evaluation would have gone.
+ */
+export interface BreakGlassResult<T> {
+  brokeGlass: true;
+  failure: EvaluationFailure;
+  /** The evaluation's error. */
+  evaluationError: unknown;
+  value?: T;
+  record: BreakGlassRecord;
+  /** The NA's acknowledgement, when it was reachable again by then. */
+  submission?: RecordSubmission;
+  /** The record outbox entry holding the record otherwise. */
+  queued?: RecordOutboxEntry;
+  /** Reported metadata the secret guard refused, left out of the record. */
+  dropped?: string[];
+}
 
 export interface GovernedActionResult<T> {
   evaluation: BoundaryEvaluation;
@@ -224,6 +260,18 @@ export interface GovernanceClients {
   evidenceStore: EvidenceStoreClient;
 }
 
+/** The transient failure an evaluation error is, or null for any other error (a DENY is not an error). */
+export function evaluationFailure(err: unknown): EvaluationFailure | null {
+  if (err instanceof NetworkError) {
+    return (err.cause as { name?: unknown } | undefined)?.name === 'TimeoutError' ? 'timeout' : 'network_error';
+  }
+  if (err instanceof GenesisMeshError) {
+    if (err.status === 429) return 'rate_limited';
+    if (err.status >= 500 && err.status < 600) return 'server_error';
+  }
+  return null;
+}
+
 /**
  * Evaluate, run `action` only on a (verified) ALLOW, then sign and submit the
  * execution evidence. A DENY returns `authorized: false` without running the
@@ -241,10 +289,29 @@ export interface GovernanceClients {
 export async function governedAction<T>(
   clients: GovernanceClients,
   recorder: ExecutionRecorder,
+  params: GovernedActionParams & { breakGlass: BreakGlassOptions },
+  action: (decision: BoundaryDecision | null) => Promise<ActionReport<T> | void>,
+): Promise<GovernedActionResult<T> | BreakGlassResult<T>>;
+export async function governedAction<T>(
+  clients: GovernanceClients,
+  recorder: ExecutionRecorder,
   params: GovernedActionParams,
   action: (decision: BoundaryDecision) => Promise<ActionReport<T> | void>,
-): Promise<GovernedActionResult<T>> {
-  const { resource_id, resource_action, prior_resource, verify, ...evaluateParams } = params;
+): Promise<GovernedActionResult<T>>;
+/**
+ * With `breakGlass` (v1.3.0), an evaluation that fails transiently (network
+ * error, timeout, `5xx`, `429`) runs the action anyway, with a null decision,
+ * and records a break-glass record in the record outbox: the result is a
+ * `BreakGlassResult` (`brokeGlass: true`). A DENY, a decision that fails
+ * verification, or any other error never breaks the glass.
+ */
+export async function governedAction<T>(
+  clients: GovernanceClients,
+  recorder: ExecutionRecorder,
+  params: GovernedActionParams,
+  action: BreakGlassAction<T> | ((decision: BoundaryDecision) => Promise<ActionReport<T> | void>),
+): Promise<GovernedActionResult<T> | BreakGlassResult<T>> {
+  const { resource_id, resource_action, prior_resource, verify, breakGlass, ...evaluateParams } = params;
   if ((resource_id === undefined) !== (resource_action === undefined)) {
     throw new Error('resource_id and resource_action go together');
   }
@@ -253,10 +320,18 @@ export async function governedAction<T>(
   const outbox = store.outbox;
   // An outbox that cannot be read fails here, before anything is evaluated or run.
   if (outbox) await outbox.list();
+  if (breakGlass) await checkBreakGlass(store, params, breakGlass);
   const contextId = params.context?.context_id || randomUUID();
-  const evaluation = await clients.boundary.evaluate({
-    ...evaluateParams, context: { ...params.context, context_id: contextId },
-  } as EvaluateParams);
+  const request = { ...evaluateParams, context: { ...params.context, context_id: contextId } } as EvaluateParams;
+  let evaluation: BoundaryEvaluation;
+  try {
+    evaluation = await clients.boundary.evaluate(request);
+  } catch (err) {
+    const failure = breakGlass ? evaluationFailure(err) : null;
+    if (!failure) throw err;
+    // Only the breakGlass overload gets here, whose action takes a null decision.
+    return breakTheGlass(store, recorder, params, request, failure, err, action as BreakGlassAction<T>);
+  }
   const decision = evaluation.decision;
   const checkDecision = () => {
     if (!Array.isArray(verify.expectedPolicies)) throw new DecisionVerificationError('policy_expectations_required');
@@ -335,6 +410,84 @@ export async function governedAction<T>(
   }
   if (refused) throw new MetadataRefusedError(refused.error, report.value, evidence, delivery, refused.dropped);
   return { evaluation, authorized: true, summary, value: report.value, evidence, ...delivery };
+}
+
+/** Everything break-glass needs is checked before anything is evaluated or run. */
+async function checkBreakGlass(
+  store: EvidenceStoreClient,
+  params: GovernedActionParams,
+  options: BreakGlassOptions,
+): Promise<void> {
+  if (!store.recordOutbox) {
+    throw new GenesisMeshError('breakGlass needs a record outbox (ClientOptions.recordOutbox)', 'record_outbox_required', 0);
+  }
+  if (params.resource_id === undefined) throw new Error('breakGlass needs resource_id and resource_action');
+  const justification = options.justification;
+  if (typeof justification !== 'string' || justification.length < 1 || justification.length > 1024) {
+    throw new OutOfBandRecordError('a justification of 1 to 1024 characters is required', 'break_glass_malformed');
+  }
+  const secret = checkMetadataOnly({ ...params.context }) ?? checkMetadataOnly({}, justification);
+  if (secret) throw new OutOfBandRecordError(secret, 'break_glass_secret_material');
+  await store.recordOutbox.list();
+}
+
+/** Run the action without a decision and keep its break-glass record. */
+async function breakTheGlass<T>(
+  store: EvidenceStoreClient,
+  recorder: ExecutionRecorder,
+  params: GovernedActionParams,
+  request: EvaluateParams,
+  failure: EvaluationFailure,
+  evaluationError: unknown,
+  action: BreakGlassAction<T>,
+): Promise<BreakGlassResult<T>> {
+  const sign = (report: ActionReport<T>) => recorder.signBreakGlass({
+    resource_id: params.resource_id!,
+    resource_action: params.resource_action!,
+    capability: params.requested_capability,
+    attestation_id: params.attestation_id,
+    request_parameters: params.context?.request_parameters,
+    attributes: params.context?.attributes,
+    justification: params.breakGlass!.justification,
+    evaluation_request: request,
+    evaluation_failure: failure,
+    outcome: report.outcome ?? 'success',
+    outcome_detail: report.outcome_detail ?? undefined,
+    execution_parameters: report.execution_parameters,
+  });
+
+  let report: ActionReport<T>;
+  try {
+    report = (await action(null)) ?? {};
+  } catch (err) {
+    try {
+      await store.enqueueRecord(await sign({ outcome: 'failure', outcome_detail: 'action failed' }));
+    } catch (recordError) {
+      throw new GovernedActionError(err, recordError);
+    }
+    throw err;
+  }
+
+  // The action ran: from here on its outcome is always recorded.
+  let record: BreakGlassRecord | undefined;
+  let dropped: string[] | undefined;
+  let delivery: { submission?: RecordSubmission; queued?: RecordOutboxEntry };
+  try {
+    try {
+      record = await sign(report);
+    } catch (err) {
+      if (!(err instanceof OutOfBandRecordError) || err.code !== 'break_glass_secret_material') throw err;
+      const cleaned = withoutRefusedMetadata(report.execution_parameters ?? {}, report.outcome_detail ?? null);
+      record = await sign({ ...report, ...cleaned });
+      dropped = cleaned.dropped;
+    }
+    delivery = await store.enqueueRecord(record);
+  } catch (err) {
+    throw new EvidenceNotKeptError(err, report.value);
+  }
+  return {
+    brokeGlass: true, failure, evaluationError, value: report.value, record, ...delivery, ...(dropped ? { dropped } : {}),
+  };
 }
 
 // ── Reconciliation ────────────────────────────────────────────────────────────

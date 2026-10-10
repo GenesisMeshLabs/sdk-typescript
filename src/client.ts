@@ -6,7 +6,7 @@
 
 import { buildAdminHeadersWithSigner, canonicalJson, parseJson, seedSigner, type Signer } from './auth.js';
 import { fromHttpError, GenesisMeshError, NetworkError } from './errors.js';
-import type { EvidenceOutbox } from './outbox.js';
+import type { EvidenceOutbox, RecordOutbox } from './outbox.js';
 import { decodeUtf8, StrictJsonError } from './strict-json.js';
 
 /** JSON refused for its form (a duplicate key, ...): the reason is kept; a body that is not JSON stays a NetworkError. */
@@ -57,6 +57,13 @@ export interface ClientOptions {
    * `evidenceStore.flushPending`.
    */
   outbox?: EvidenceOutbox;
+  /**
+   * Durable storage for signed observations and break-glass records not yet
+   * admitted (v1.3.0), e.g. `new FileRecordOutbox('/var/lib/app/gm-records')`,
+   * in a directory of its own. `governedAction` with `breakGlass` needs one;
+   * see `evidenceStore.flushRecords`.
+   */
+  recordOutbox?: RecordOutbox;
 }
 
 export type Query = Record<string, string | number | boolean | undefined | null>;
@@ -299,6 +306,7 @@ export class HttpTransport {
     } catch (err) {
       const error = new NetworkError(`${spec.method} ${spec.path} failed: ${(err as Error).message}`);
       error.connectFailed = isConnectFailure(err);
+      error.cause = err;
       throw error;
     }
   }

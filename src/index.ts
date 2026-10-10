@@ -30,7 +30,7 @@ export class GenesisMeshClient {
     this.boundary      = new BoundaryClient(http);
     this.policy        = new PolicyClient(http);
     this.evidence      = new EvidenceClient(http);
-    this.evidenceStore = new EvidenceStoreClient(http, options.outbox);
+    this.evidenceStore = new EvidenceStoreClient(http, options.outbox, options.recordOutbox);
     this.health        = new HealthClient(http);
     this.attestation   = new AttestationClient(http);
     this.disclosure    = new DisclosureClient(http);
@@ -143,23 +143,55 @@ export {
   withoutRefusedMetadata,
 } from './governance.js';
 
-// Evidence outbox (v1.2.0)
+// Evidence outbox (v1.2.0) and record outbox (v1.3.0)
 export {
   FileOutbox,
+  FileRecordOutbox,
   MemoryOutbox,
   classifySubmissionError,
+  recordOutboxEntry,
   retryDelayMs,
   PREDECESSOR_DEAD_LETTERED,
   PERMANENT_REFUSALS,
+  RECORD_PERMANENT_REFUSALS,
 } from './outbox.js';
 export type {
   EvidenceOutbox,
+  Outbox,
   OutboxEntry,
+  RecordOutbox,
+  RecordOutboxEntry,
   Delivery,
   SubmissionFailure,
   FlushResult,
   FlushOptions,
 } from './outbox.js';
+
+// Changes outside the controlled path (v1.3.0)
+export {
+  ObservationRecorder,
+  OutOfBandRecordError,
+  observationFromFinding,
+  outOfBandCanonical,
+  outOfBandDigest,
+  signBreakGlass,
+  verifyOutOfBandRecord,
+} from './out-of-band.js';
+export type {
+  BreakGlassInput,
+  BreakGlassRecord,
+  EvaluationFailure,
+  FindingObservationOptions,
+  GovernedBy,
+  JudgementRecord,
+  ObservationInput,
+  ObservationRecord,
+  ObservationRecorderOptions,
+  OutOfBandRecord,
+  QuarantineRecord,
+  RegistryRecord,
+  Verdict,
+} from './out-of-band.js';
 export type {
   ActionReport,
   DecisionSummary,
@@ -167,6 +199,8 @@ export type {
   GovernanceClients,
   GovernedActionParams,
   GovernedActionResult,
+  BreakGlassOptions,
+  BreakGlassResult,
   ObservedResource,
   ReconcileOptions,
   ReconciliationFinding,

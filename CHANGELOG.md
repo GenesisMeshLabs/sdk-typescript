@@ -7,6 +7,52 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [1.3.0] - Unreleased
+
+### Added
+
+- **Changes made outside the controlled path** (Genesis Mesh 1.3.0, NA with
+  `EVIDENCE_OUT_OF_BAND=on`). See `docs/out-of-band-changes.md`.
+  - `ObservationRecorder` signs an `ObservationRecord` with an observer key;
+    `observationFromFinding` turns a reconciliation finding into one, known
+    within the window between two scans.
+  - `governedAction` with `breakGlass: { justification }` runs the action when
+    the evaluation fails transiently (network error, timeout, `5xx`, `429`)
+    and keeps a signed `BreakGlassRecord`; the result is a `BreakGlassResult`
+    (`brokeGlass: true`). Never on a DENY. `ExecutionRecorder.signBreakGlass`
+    and `signBreakGlass` sign one directly.
+  - A record outbox (`ClientOptions.recordOutbox`, `FileRecordOutbox`, format
+    `gm.evidence.record-outbox.v1`) keeps observations and break-glass
+    records until the NA admits them: `evidenceStore.enqueueRecord` and
+    `flushRecords`, observations up to 100 per request.
+  - `evidenceStore.submitObservation`, `submitObservations`,
+    `submitBreakGlass`, `judgeObservation`, `judgeBreakGlass`,
+    `resourceChanges`, `operatorHolders`, `proposeHolder` and
+    `approveHolder`; `registerExecutorKey` takes `role` and
+    `resource_prefix`.
+  - `verifyEvidenceEvents` verifies the entry kinds `observation`,
+    `break_glass`, `judgement`, `quarantine` and `registry`, with the reasons
+    `envelope_mismatch`, `observation_chain_break`, `duplicate_judgement`,
+    `judgement_subject_mismatch`, `judgement_subject_missing`,
+    `match_reused`, `quarantine_digest_mismatch` and
+    `evidence_cites_judgement`, and counts them (`observations`,
+    `break_glass`, `judgements`, `quarantined`). The conformance suite
+    `out_of_band` runs in the tests.
+  - `outOfBandCanonical`, `outOfBandDigest` and `verifyOutOfBandRecord` for
+    the records' signed forms.
+
+### Changed
+
+- An execution record verifies only under an executor key: a key listed with
+  `role: 'observer'` signs observations only (`ExecutorKeyInfo.role`).
+- The embedded field registry lists the 1.3.0 records and the envelope fields
+  `record_id`, `subject_id`, `matched_evidence_id` and
+  `observation_sequence`, left out of the entry digest when absent, and the
+  checkpoint's `observation_heads`.
+- `MemoryOutbox` is generic (`MemoryOutbox<RecordOutboxEntry>` holds records);
+  `EvidenceOutbox` is now `Outbox<OutboxEntry>`. `classifySubmissionError`
+  takes the set of permanent refusals.
+
 ## [1.2.0] - Unreleased
 
 ### Changed (breaking)
