@@ -9,8 +9,37 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ## [1.2.0] - Unreleased
 
+### Changed (breaking)
+
+- **Verifiers refuse signed fields they do not know.** This SDK used to copy
+  every received field into the signed form, so a field a newer signer
+  covered verified here and could change what a record means. The SDK now
+  embeds the field registry of signed records (generated from the Python
+  reference, shipped in the shared conformance suite `field_registry`).
+  Verifiers check the signature over the record as received first; an
+  authentic record with a signed field the registry does not list is then
+  refused as `unknown_field`, meaning this SDK must be upgraded:
+  `verifyBoundaryDecision` (also for the expected policies and attestation),
+  `verifyAgreement`, the signature helpers (which return `false`),
+  `verifyDataAccessIntent` (an `intent_exceeds_license` violation naming the
+  field) and `verifyEvidenceEvents`. Only the signed projection is checked:
+  the signature, and an agreement's unsigned fields, are not. Free-form
+  fields (`claims`, `scope`, `execution_parameters`, ...) stay open.
+  `BoundaryVerificationReason` and `AgreementVerificationReason` gain
+  `unknown_field`.
+- `verifyEvidenceEvents` names an entry of an unknown kind
+  (`unknown_entry_kind`, previously `payload_invalid`) and keeps it in the
+  chain; `parseExportLines` and the export clients accept entries of any
+  kind, so one new kind no longer aborts a whole page. A field outside a
+  stored record's signature (records stored before 1.1.1) is reported in the
+  new `warnings` list as `unsigned_field` and the record is verified without
+  it.
+
 ### Added
 
+- `unknownFields(model, record)` and `isKnownEntryKind(kind)`;
+  `npm run sync:registry` regenerates the embedded registry from a new copy
+  of the suite.
 - **An evidence outbox keeps signed evidence until the NA admits it.** With
   `ClientOptions.outbox`, `governedAction` writes each signed record to the
   outbox before submitting it and removes it once admitted. A failed

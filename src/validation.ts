@@ -88,7 +88,7 @@ export const validCheckpoint = shape({
   resource_heads: dictionary(shape({ resource_sequence: positive, record_digest: string }, true)),
 });
 const entry = shape({
-  store_sequence: positive, entry_kind: oneOf('decision', 'justification', 'execution', 'retention_checkpoint'),
+  store_sequence: positive, entry_kind: string,
   recorded_at: timestamp, payload_digest: string, prev_entry_digest: nullable(string),
   decision_id: nullable(string), context_id: nullable(string), vendor_id: nullable(string),
   attestation_id: nullable(string), capability: nullable(string), outcome: nullable(string),
