@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import {
   ExecutionRecorder, FileOutbox, FileRecordOutbox, GenesisMeshClient, MemoryOutbox, NetworkError, ObservationRecorder,
   RateLimitError, ServiceUnavailableError, ValidationError, BadRequestError, GovernedActionError, OutOfBandRecordError,
+  GenesisMeshError,
   decisionCanonical, governedAction, pythonTimestamp, recordOutboxEntry, seedSigner, signCanonical,
   verifyOutOfBandRecord,
 } from '../src/index.js';
@@ -212,5 +213,40 @@ describe('governedAction with breakGlass', () => {
     expect(result.queued?.state).toBe('pending');
     expect(result.dropped).toEqual(['client_secret']);
     expect(result.record.execution_parameters).toEqual({ version_id: 'v9' });
+  });
+});
+
+describe('review fixes (1.3.0)', () => {
+  it('breakGlass needs an attestation-based evaluation', async () => {
+    const { gm } = client();
+    const recorder = new ExecutionRecorder({ executorSovereignId: 'executor', signer });
+    const params = {
+      agreement: { agreement_id: 'a' } as never, requested_capability: 'sp-secret.rotate', resource_id: 'kv:v/s',
+      resource_action: 'rotate' as const,
+      verify: { operatorPublicKeys: [TEST_KEY.pubBase64], expectedPolicies: [] },
+      breakGlass: { justification: 'outage' },
+    };
+    await expect(governedAction(gm, recorder, params, async () => ({}))).rejects.toMatchObject({ code: 'break_glass_malformed' });
+  });
+  it.each(['admin_auth_throttled', 'evidence_store_unavailable'])('%s never breaks the glass', async code => {
+    const { gm, outbox } = client();
+    const status = code === 'admin_auth_throttled' ? 429 : 503;
+    jest.spyOn(gm.boundary, 'evaluate').mockRejectedValue(new GenesisMeshError('refused', code, status));
+    const recorder = new ExecutionRecorder({ executorSovereignId: 'executor', signer });
+    const action = jest.fn(async () => ({}));
+    await expect(governedAction(gm, recorder, {
+      attestation_id: 'att', requested_capability: 'c', resource_id: 'kv:v/s', resource_action: 'rotate',
+      verify: { operatorPublicKeys: [TEST_KEY.pubBase64], expectedPolicies: [] }, breakGlass: { justification: 'x' },
+    }, action)).rejects.toMatchObject({ code });
+    expect(action).not.toHaveBeenCalled();
+    expect(await outbox.list()).toEqual([]);
+  });
+  it('a removal is never undone by an update in flight', async () => {
+    const dir = await directory();
+    const outbox = new FileRecordOutbox(dir);
+    const entry = recordOutboxEntry(await observe(1));
+    await outbox.add(entry);
+    await Promise.all([outbox.update({ ...entry, attempts: 1 }), outbox.remove(entry.id)]);
+    expect(await new FileRecordOutbox(dir).list()).toEqual([]);
   });
 });

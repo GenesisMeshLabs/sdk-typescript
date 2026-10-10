@@ -841,6 +841,8 @@ export interface EvidenceStoreStatus {
   rejections?: number;
   active_executor_keys?: number;
   retention_checkpoint: number | null;
+  /** v1.3.0: observations and break-glass records not judged yet (they hold retention back). */
+  unjudged_records?: number;
 }
 
 export interface ExecutorKeyRecord {
@@ -871,6 +873,8 @@ export interface RetentionResult {
 export type EvidenceRejectionCode =
   | 'evidence_malformed'
   | 'evidence_unknown_executor'
+  | 'evidence_executor_key_retired'
+  | 'evidence_out_of_scope'
   | 'evidence_invalid_signature'
   | 'evidence_decision_not_found'
   | 'evidence_decision_denied'
@@ -892,12 +896,14 @@ export type OutOfBandRejectionCode =
   | 'observation_malformed'
   | 'observation_invalid_signature'
   | 'observation_unknown_key'
+  | 'observation_key_retired'
   | 'observation_out_of_scope'
   | 'observation_secret_material'
   | 'observation_conflict'
   | 'break_glass_malformed'
   | 'break_glass_invalid_signature'
   | 'break_glass_unknown_key'
+  | 'break_glass_key_retired'
   | 'break_glass_out_of_scope'
   | 'break_glass_secret_material'
   | 'break_glass_conflict';

@@ -28,7 +28,7 @@ import {
   type ObservationRecord,
   type QuarantineRecord,
 } from './out-of-band.js';
-import { isKnownEntryKind, nonCanonicalTimestamps, unknownFields, withoutUnknownFields } from './strict.js';
+import { isKnownEntryKind, nonCanonicalFields, unknownFields, withoutUnknownFields } from './strict.js';
 import {
   agreementCanonical,
   attestationCanonical,
@@ -186,7 +186,7 @@ export function verifyBoundaryDecision(
     return reject('unknown_field');
   }
   // v1.2.0: a decision signed over a form the reference does not write.
-  if (nonCanonicalTimestamps('BoundaryDecision', decision).length > 0) return reject('non_canonical_form');
+  if (nonCanonicalFields('BoundaryDecision', decision).length > 0) return reject('non_canonical_form');
 
   const proof = decision.freshness_proof;
   if (proof && options.freshnessProofIssuerKeys && options.freshnessProofIssuerKeys.length > 0) {
@@ -382,6 +382,15 @@ export function verifyEvidenceEvents(
     }
     if (checked.unsigned.length > 0) warn(seq, 'unsigned_field', checked.unsigned.join(', '));
     const payload = checked.payload;
+    // v1.3.0: a record whose signature covers it as received, in a form the reference
+    // does not write, is refused by name, as the reference refuses it (checked when the
+    // whole record was signed: not after unsigned fields were set aside).
+    const signature = (signed: boolean, model: string, record: unknown, detail: string) => {
+      if (!signed) fail(seq, 'invalid_signature', detail);
+      else if (checked.unsigned.length === 0 && nonCanonicalFields(model, record).length > 0) {
+        fail(seq, 'non_canonical_form', detail);
+      }
+    };
     switch (entry.entry_kind) {
       case 'decision': {
         const decision = payload['decision'];
@@ -390,7 +399,7 @@ export function verifyEvidenceEvents(
           break;
         }
         const model = decision as unknown as BoundaryDecision;
-        if (!verifyDecisionSignature(model, options.naPublicKeys)) fail(seq, 'invalid_signature', 'decision');
+        signature(verifyDecisionSignature(model, options.naPublicKeys), 'BoundaryDecision', model, 'decision');
         result.decisions += 1;
         decisions.set(model.decision_id, model);
         const context = payload['context'];
@@ -406,9 +415,8 @@ export function verifyEvidenceEvents(
           fail(seq, 'payload_invalid');
           break;
         }
-        if (!verifyJustificationSignature(payload as unknown as DecisionJustification, options.naPublicKeys)) {
-          fail(seq, 'invalid_signature', 'justification');
-        }
+        signature(verifyJustificationSignature(payload as unknown as DecisionJustification, options.naPublicKeys),
+          'JustificationProof', payload, 'justification');
         break;
       }
       case 'execution': {
@@ -419,10 +427,9 @@ export function verifyEvidenceEvents(
         const ev = payload as unknown as ExecutionEvidence;
         const key = ev.signature ? executorKeys[ev.signature.key_id] : undefined;
         // v1.3.0: only an executor key signs execution evidence.
-        if (!key || key.executor_sovereign_id !== ev.executor_sovereign_id || (key.role ?? 'executor') !== 'executor'
-          || !verifyExecutionSignature(ev, key.public_key)) {
-          fail(seq, 'invalid_signature', 'execution');
-        }
+        signature(!!key && key.executor_sovereign_id === ev.executor_sovereign_id
+          && (key.role ?? 'executor') === 'executor' && verifyExecutionSignature(ev, key.public_key),
+        'ExecutionEvidence', ev, 'execution');
         result.executions += 1;
         const decision = decisions.get(ev.decision_id);
         if (decision) {
@@ -461,9 +468,8 @@ export function verifyEvidenceEvents(
           fail(seq, 'payload_invalid');
           break;
         }
-        if (!verifyRetentionCheckpoint(payload as unknown as RetentionCheckpoint, options.naPublicKeys)) {
-          fail(seq, 'invalid_signature', 'retention_checkpoint');
-        }
+        signature(verifyRetentionCheckpoint(payload as unknown as RetentionCheckpoint, options.naPublicKeys),
+          'RetentionCheckpoint', payload, 'retention_checkpoint');
         break;
       }
       case 'observation':
@@ -473,9 +479,8 @@ export function verifyEvidenceEvents(
           fail(seq, 'payload_invalid');
           break;
         }
-        if (!outOfBandSigned(entry.entry_kind, payload, options.naPublicKeys, executorKeys)) {
-          fail(seq, 'invalid_signature', entry.entry_kind);
-        }
+        signature(outOfBandSigned(entry.entry_kind, payload, options.naPublicKeys, executorKeys),
+          OUT_OF_BAND_MODELS[entry.entry_kind]!, payload, entry.entry_kind);
         const record = payload as unknown as ObservationRecord | BreakGlassRecord;
         const recordId = observation
           ? (record as ObservationRecord).observation_id
@@ -503,9 +508,8 @@ export function verifyEvidenceEvents(
           fail(seq, 'payload_invalid');
           break;
         }
-        if (!outOfBandSigned('judgement', payload, options.naPublicKeys, executorKeys)) {
-          fail(seq, 'invalid_signature', 'judgement');
-        }
+        signature(outOfBandSigned('judgement', payload, options.naPublicKeys, executorKeys), 'JudgementRecord',
+          payload, 'judgement');
         const judgement = payload as unknown as JudgementRecord;
         counts.judgements += 1;
         notDecisions.add(judgement.judgement_id);
@@ -534,9 +538,8 @@ export function verifyEvidenceEvents(
           fail(seq, 'payload_invalid');
           break;
         }
-        if (!outOfBandSigned('quarantine', payload, options.naPublicKeys, executorKeys)) {
-          fail(seq, 'invalid_signature', 'quarantine');
-        }
+        signature(outOfBandSigned('quarantine', payload, options.naPublicKeys, executorKeys), 'QuarantineRecord',
+          payload, 'quarantine');
         counts.quarantined += 1;
         const quarantine = payload as unknown as QuarantineRecord;
         if (payloadDigest(quarantine.record) !== quarantine.record_digest) fail(seq, 'quarantine_digest_mismatch');
@@ -547,9 +550,8 @@ export function verifyEvidenceEvents(
           fail(seq, 'payload_invalid');
           break;
         }
-        if (!outOfBandSigned('registry', payload, options.naPublicKeys, executorKeys)) {
-          fail(seq, 'invalid_signature', 'registry');
-        }
+        signature(outOfBandSigned('registry', payload, options.naPublicKeys, executorKeys), 'RegistryRecord',
+          payload, 'registry');
         break;
       }
       default:
@@ -589,21 +591,16 @@ function outOfBandKeys(
   return key && key.executor_sovereign_id === sovereign && (key.role ?? 'executor') === role ? [key.public_key] : [];
 }
 
-/**
- * A Stage 2 record verifies when its signature covers the form received and
- * that form is the reference's: the reference signs what it serializes.
- */
+/** Whether a Stage 2 record's signature covers it as received, under the key that may sign it. */
 function outOfBandSigned(
   kind: string,
   payload: Record<string, unknown>,
   naPublicKeys: readonly string[],
   executorKeys: Record<string, ExecutorKeyInfo>,
 ): boolean {
-  const model = OUT_OF_BAND_MODELS[kind]!;
   return signedBy(outOfBandCanonical(payload), payload['signature'] as Signature | null | undefined,
     outOfBandKeys(kind, payload, naPublicKeys, executorKeys))
-    && unknownFields(model, payload).length === 0
-    && nonCanonicalTimestamps(model, payload).length === 0;
+    && unknownFields(OUT_OF_BAND_MODELS[kind]!, payload).length === 0;
 }
 
 const PAYLOAD_MODELS: Record<string, string> = {
@@ -711,7 +708,7 @@ export function verifyAgreement(
   // v1.2.0: an authentic agreement with a signed field this SDK does not know.
   if (unknownFields('AgreementRecord', record).length > 0) return result(false, 'unknown_field');
   // v1.2.0: an agreement signed over a form the reference does not write.
-  if (nonCanonicalTimestamps('AgreementRecord', record).length > 0) return result(false, 'non_canonical_form');
+  if (nonCanonicalFields('AgreementRecord', record).length > 0) return result(false, 'non_canonical_form');
   return result(true, 'accepted');
 }
 
@@ -721,7 +718,7 @@ export function verifyAgreement(
 export function verifyDataLicensePolicySignature(policy: DataLicensePolicy, licensorPublicKeys: readonly string[]): boolean {
   return signedBy(dataLicensePolicyCanonical(policy), policy.signature, licensorPublicKeys)
     && unknownFields('DataLicensePolicy', policy).length === 0
-    && nonCanonicalTimestamps('DataLicensePolicy', policy).length === 0;
+    && nonCanonicalFields('DataLicensePolicy', policy).length === 0;
 }
 
 export type DataUsageViolationType =
@@ -762,19 +759,19 @@ export function verifyDataAccessIntent(
   // v1.2.0: fields this SDK does not know, and forms the reference does not
   // write, as the reference reports them.
   const intentUnknown = unknownFields('DataAccessIntent', intent);
-  const intentLoose = nonCanonicalTimestamps('DataAccessIntent', intent);
+  const intentLoose = nonCanonicalFields('DataAccessIntent', intent);
   if ((intentUnknown.length > 0 || intentLoose.length > 0)
     && !signedBy(dataAccessIntentCanonical(intent), intent.signature, agentPublicKeys)) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: 'Invalid intent signature' }]);
   }
-  const unknown = [...intentUnknown, ...unknownFields('DataLicensePolicy', policy, 'policy.')].sort();
+  const unknown = [...intentUnknown, ...unknownFields('DataLicensePolicy', policy, 'policy.')].sort(compareCodePoints);
   if (unknown.length > 0) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: `Unknown field: ${unknown.join(', ')}` }]);
   }
   if (intentLoose.length > 0) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: 'Not in canonical form: intent' }]);
   }
-  if (nonCanonicalTimestamps('DataLicensePolicy', policy).length > 0) {
+  if (nonCanonicalFields('DataLicensePolicy', policy).length > 0) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: 'Not in canonical form: policy' }]);
   }
   if (!intent.signature) return fail([{ violation_type: 'intent_exceeds_license', detail: 'Missing intent signature' }]);

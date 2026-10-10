@@ -121,6 +121,9 @@ export const PREDECESSOR_DEAD_LETTERED = 'evidence_predecessor_dead_lettered';
 export const PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
   'invalid_evidence',
   'evidence_malformed',
+  // v1.3.0: a retired key, and a key whose role or resource prefix does not cover the record.
+  'evidence_executor_key_retired',
+  'evidence_out_of_scope',
   'evidence_invalid_signature',
   'evidence_decision_denied',
   'evidence_decision_mismatch',
@@ -141,12 +144,14 @@ export const RECORD_PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
   'invalid_observation',
   'observation_malformed',
   'observation_invalid_signature',
+  'observation_key_retired',
   'observation_out_of_scope',
   'observation_secret_material',
   'observation_conflict',
   'invalid_break_glass',
   'break_glass_malformed',
   'break_glass_invalid_signature',
+  'break_glass_key_retired',
   'break_glass_out_of_scope',
   'break_glass_secret_material',
   'break_glass_conflict',
@@ -243,6 +248,16 @@ interface StoredEntry<E> {
 class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
   private stored: Map<string, StoredEntry<E>> | null = null;
   private loading: Promise<Map<string, StoredEntry<E>>> | null = null;
+  /** The highest file sequence used, so an add never scans every entry (v1.3.0). */
+  private lastSequence = 0;
+  /** Changes run one at a time: an update never renames a file back over one a removal deleted. */
+  private queue: Promise<unknown> = Promise.resolve();
+
+  private serial<R>(change: () => Promise<R>): Promise<R> {
+    const run = this.queue.then(change, change);
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
 
   protected constructor(
     readonly directory: string,
@@ -250,37 +265,41 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
     private readonly isEntry: (entry: Record<string, unknown>) => boolean,
   ) {}
 
-  async add(entry: E): Promise<void> {
-    const stored = await this.load();
-    const stem = fileStem(entry.id);
-    if (stored.has(stem)) throw new Error(`outbox entry ${entry.id} exists`);
-    const sequence = Math.max(0, ...[...stored.values()].map(s => s.sequence)) + 1;
-    const file = `${String(sequence).padStart(12, '0')}-${stem}.json`;
-    // Reserve the position before the first await, so concurrent adds keep their order.
-    const record = { file, sequence, entry: structuredClone(entry) };
-    stored.set(stem, record);
-    try {
-      await this.write(file, entry);
-    } catch (err) {
-      stored.delete(stem);
-      throw err;
-    }
+  add(entry: E): Promise<void> {
+    return this.serial(async () => {
+      const stored = await this.load();
+      const stem = fileStem(entry.id);
+      if (stored.has(stem)) throw new Error(`outbox entry ${entry.id} exists`);
+      const sequence = ++this.lastSequence;
+      const file = `${String(sequence).padStart(12, '0')}-${stem}.json`;
+      stored.set(stem, { file, sequence, entry: structuredClone(entry) });
+      try {
+        await this.write(file, entry);
+      } catch (err) {
+        stored.delete(stem);
+        throw err;
+      }
+    });
   }
 
-  async update(entry: E): Promise<void> {
-    const found = (await this.load()).get(fileStem(entry.id));
-    if (!found) return;
-    await this.write(found.file, entry);
-    found.entry = structuredClone(entry);
+  update(entry: E): Promise<void> {
+    return this.serial(async () => {
+      const found = (await this.load()).get(fileStem(entry.id));
+      if (!found) return;
+      await this.write(found.file, entry);
+      found.entry = structuredClone(entry);
+    });
   }
 
-  async remove(id: string): Promise<void> {
-    const stored = await this.load();
-    const found = stored.get(fileStem(id));
-    if (!found) return;
-    await rm(join(this.directory, found.file), { force: true });
-    await syncDirectory(this.directory);
-    stored.delete(fileStem(id));
+  remove(id: string): Promise<void> {
+    return this.serial(async () => {
+      const stored = await this.load();
+      const found = stored.get(fileStem(id));
+      if (!found) return;
+      await rm(join(this.directory, found.file), { force: true });
+      await syncDirectory(this.directory);
+      stored.delete(fileStem(id));
+    });
   }
 
   async list(): Promise<E[]> {
@@ -292,7 +311,11 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
   private load(): Promise<Map<string, StoredEntry<E>>> {
     if (this.stored) return Promise.resolve(this.stored);
     this.loading ??= this.read().then(
-      stored => { this.stored = stored; return stored; },
+      stored => {
+        this.stored = stored;
+        for (const s of stored.values()) this.lastSequence = Math.max(this.lastSequence, s.sequence);
+        return stored;
+      },
       err => { this.loading = null; throw err; },
     );
     return this.loading;

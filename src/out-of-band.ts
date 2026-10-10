@@ -20,7 +20,9 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { canonicalJson, pythonTimestamp, signCanonical, verifyCanonical, type Signer } from './auth.js';
+import {
+  canonicalJson, copyPythonFloats, defineMember, pythonTimestamp, signCanonical, verifyCanonical, type Signer,
+} from './auth.js';
 import { GenesisMeshError } from './errors.js';
 import { checkMetadataOnly } from './execution.js';
 import type { ReconciliationFinding, ReconciliationStatus } from './governance.js';
@@ -159,8 +161,9 @@ export class OutOfBandRecordError extends GenesisMeshError {
 function signedFields(record: object): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    if (key !== 'signature' && value !== undefined && value !== null) out[key] = value;
+    if (key !== 'signature' && value !== undefined && value !== null) defineMember(out, key, value);
   }
+  copyPythonFloats(record, out);
   return out;
 }
 

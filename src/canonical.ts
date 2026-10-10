@@ -4,7 +4,7 @@
  * digest() derive them. Pure functions; key operations live in auth.ts.
  */
 
-import { canonicalDigest, canonicalJson } from './auth.js';
+import { canonicalDigest, canonicalJson, copyPythonFloats, defineMember } from './auth.js';
 import type {
   AgreementRecord,
   AppliedPolicy,
@@ -34,8 +34,10 @@ function without(model: object, always: readonly string[], whenNull: readonly st
   for (const [key, value] of Object.entries(model)) {
     if (always.includes(key)) continue;
     if (whenNull.includes(key) && (value === null || value === undefined)) continue;
-    out[key] = value;
+    defineMember(out, key, value);
   }
+  // The copy keeps the record's float spellings (`1000.0`), so it signs as received.
+  copyPythonFloats(model, out);
   return out;
 }
 

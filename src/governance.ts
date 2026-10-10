@@ -260,12 +260,19 @@ export interface GovernanceClients {
   evidenceStore: EvidenceStoreClient;
 }
 
+/**
+ * Refusals that look transient but are not: the NA throttling a caller whose
+ * operator signatures keep failing, and an evaluation the NA computed (perhaps
+ * a DENY) but could not store. Neither breaks the glass.
+ */
+const NOT_BREAKABLE: ReadonlySet<string> = new Set(['admin_auth_throttled', 'evidence_store_unavailable']);
+
 /** The transient failure an evaluation error is, or null for any other error (a DENY is not an error). */
 export function evaluationFailure(err: unknown): EvaluationFailure | null {
   if (err instanceof NetworkError) {
     return (err.cause as { name?: unknown } | undefined)?.name === 'TimeoutError' ? 'timeout' : 'network_error';
   }
-  if (err instanceof GenesisMeshError) {
+  if (err instanceof GenesisMeshError && !NOT_BREAKABLE.has(err.code)) {
     if (err.status === 429) return 'rate_limited';
     if (err.status >= 500 && err.status < 600) return 'server_error';
   }
@@ -422,6 +429,12 @@ async function checkBreakGlass(
     throw new GenesisMeshError('breakGlass needs a record outbox (ClientOptions.recordOutbox)', 'record_outbox_required', 0);
   }
   if (params.resource_id === undefined) throw new Error('breakGlass needs resource_id and resource_action');
+  // An agreement-based evaluation rests on the agreement, which a break-glass record does
+  // not carry: the NA could not judge it after the fact.
+  if (params.attestation_id === undefined) {
+    throw new OutOfBandRecordError('breakGlass needs an attestation-based evaluation (attestation_id)',
+      'break_glass_malformed');
+  }
   const justification = options.justification;
   if (typeof justification !== 'string' || justification.length < 1 || justification.length > 1024) {
     throw new OutOfBandRecordError('a justification of 1 to 1024 characters is required', 'break_glass_malformed');

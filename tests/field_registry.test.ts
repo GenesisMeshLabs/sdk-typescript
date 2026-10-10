@@ -66,7 +66,9 @@ describe('field_registry conformance suite', () => {
         break;
       }
       case 'export': {
-        const result = verifyEvidenceEvents(parseExportLines(input['lines'] as string), { naPublicKeys: [], executorKeys: [] });
+        const result = verifyEvidenceEvents(parseExportLines(input['lines'] as string), {
+          naPublicKeys: (input['na_public_keys'] as string[] | undefined) ?? [], executorKeys: [],
+        });
         expect({ failures: result.failures.map(f => ({ store_sequence: f.store_sequence, reason: f.reason })) }).toEqual(v.expected);
         break;
       }

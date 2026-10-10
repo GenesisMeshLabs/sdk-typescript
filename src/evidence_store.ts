@@ -226,6 +226,8 @@ export class EvidenceStoreClient {
   private flushingRecords: Promise<RecordFlushResult> | null = null;
   /** Digests of outbox records by id: a record never changes once signed. */
   private readonly digests = new Map<string, string>();
+  /** Records `enqueue` is submitting right now: a concurrent flush leaves them to it. */
+  private readonly inFlight = new Set<string>();
 
   /**
    * @param outbox Durable storage for signed records not yet admitted
@@ -276,7 +278,14 @@ export class EvidenceStoreClient {
     if (entry.state === 'dead_letter') return { queued: entry };
     const chain = this.chainOf(entries, entry);
     if (chain.dead) return { queued: await this.deadLetter(outbox, entries, entry, PREDECESSOR_DEAD_LETTERED) };
-    if (!chain.pending.length) return this.attempt(outbox, entries, entry);
+    if (!chain.pending.length) {
+      this.inFlight.add(entry.id);
+      try {
+        return await this.attempt(outbox, entries, entry);
+      } finally {
+        this.inFlight.delete(entry.id);
+      }
+    }
     if (this.flushing || chain.pending.length > MAX_INLINE_DRAIN) return { queued: entry };
     const only = new Set([...chain.pending.map(e => e.id), entry.id]);
     const run = this.flush(outbox, { ignoreBackoff: true }, only);
@@ -411,6 +420,7 @@ export class EvidenceStoreClient {
     }
     try {
       await outbox.remove(entry.id);
+      this.digests.delete(entry.id);
     } catch {
       // The NA holds the record: the next flush resubmits it, gets a duplicate and removes it.
     }
@@ -429,6 +439,13 @@ export class EvidenceStoreClient {
       const entry = entries[i]!;
       const digest = this.digestOf(entry);
       if (entry.state === 'dead_letter') continue;
+      if (this.inFlight.has(entry.id)) {
+        // `enqueue` is submitting it: still pending as far as this run knows.
+        waiting.add(digest);
+        result.pending.push(entry);
+        outcomes.set(entry.id, { queued: entry });
+        continue;
+      }
       if (only && !only.has(entry.id)) {
         waiting.add(digest);
         continue;

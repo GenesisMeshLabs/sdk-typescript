@@ -52,6 +52,37 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 - `MemoryOutbox` is generic (`MemoryOutbox<RecordOutboxEntry>` holds records);
   `EvidenceOutbox` is now `Outbox<OutboxEntry>`. `classifySubmissionError`
   takes the set of permanent refusals.
+- The NA refuses execution evidence from a retired key as
+  `evidence_executor_key_retired`, and from a key whose role or resource
+  prefix does not cover it as `evidence_out_of_scope` (they were
+  `evidence_unknown_executor`, which the outbox retried forever, holding
+  every later record of the resource behind it). Both are permanent
+  refusals, as are `observation_key_retired` and `break_glass_key_retired`.
+- `governedAction` breaks the glass only under an attestation-based
+  evaluation (an agreement-based one cannot be judged after the fact), and
+  never on `429 admin_auth_throttled` or `503 evidence_store_unavailable`.
+
+### Fixed
+
+- **Verifiers refuse a record that leaves out a field the reference always
+  writes** (`non_canonical_form`), as the reference does: a decision signed
+  without `denial_reason` used to verify here and was refused by the NA.
+  `nonCanonicalFields` replaces `nonCanonicalTimestamps` in every verifier.
+- `verifyEvidenceEvents` reports a stored record signed over a form the
+  reference does not write as `non_canonical_form` (it verified here), for
+  every entry kind.
+- A record's integral floats (`1000.0`) and a `"__proto__"` key are kept when
+  its signed form is built, so the signature is checked over what was
+  received; they were lost (an intent re-encoded as `1000` verified).
+- `verifyEvidenceEvents` no longer throws on a decision entry whose context
+  holds an integer beyond 2^53 or is missing; it reports it.
+- Unknown-field paths are sorted by code point, as the other implementations
+  sort them.
+- The file outboxes run their changes one at a time (an update could rename
+  a record back over one just removed, so an admitted record came back as
+  pending after a restart), an add no longer scans every entry (it threw
+  past about 125,000 entries), and a flush during `enqueue` leaves the record
+  being submitted to it.
 
 ## [1.2.0] - Unreleased
 
