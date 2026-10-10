@@ -226,7 +226,8 @@ export type BoundaryVerificationReason =
   | 'policy_binding_missing'
   | 'unauthorized_attestation_basis'
   | 'attestation_binding_mismatch'
-  | 'attestation_binding_missing';
+  | 'attestation_binding_missing'
+  | 'unknown_field';
 
 export interface BoundaryVerification {
   accepted: boolean;
@@ -770,6 +771,8 @@ export interface EvidenceStoreVerification {
   decisions: number;
   executions: number;
   failures: EvidenceVerificationFailure[];
+  /** Findings that do not fail verification (v1.2.0), such as `unsigned_field`. */
+  warnings?: EvidenceVerificationFailure[];
 }
 
 export interface EvidenceSearchResult {

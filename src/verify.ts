@@ -8,6 +8,7 @@ import { validDecision, validContext, validExecution, validJustification, validC
  */
 
 import { compareCodePoints, parseJson, verifyCanonical } from './auth.js';
+import { isKnownEntryKind, unknownFields, withoutUnknownFields } from './strict.js';
 import {
   agreementCanonical,
   attestationCanonical,
@@ -74,35 +75,51 @@ function anySigned(canonical: string, signatures: readonly Signature[] | undefin
   return (signatures ?? []).some(sig => verifyCanonical(canonical, sig.sig, keys));
 }
 
+// Since v1.2.0 a record with a signed field this SDK does not know never
+// verifies (src/strict.ts): a field it cannot read could change the record's meaning.
+
+function decisionSigned(decision: BoundaryDecision, publicKeys: readonly string[]): boolean {
+  return signedBy(decisionCanonical(decision), decision.signature, publicKeys);
+}
+
 /** True when the decision signature verifies under any of the operator (NA) keys. */
 export function verifyDecisionSignature(decision: BoundaryDecision, publicKeys: readonly string[]): boolean {
-  return signedBy(decisionCanonical(decision), decision.signature, publicKeys);
+  return decisionSigned(decision, publicKeys) && unknownFields('BoundaryDecision', decision).length === 0;
 }
 
 /** True when any attestation signature verifies under the issuer keys. */
 export function verifyAttestationSignature(attestation: MembershipAttestation, publicKeys: readonly string[]): boolean {
-  return anySigned(attestationCanonical(attestation), attestation.signatures, publicKeys);
+  return unknownFields('MembershipAttestation', attestation).length === 0
+    && anySigned(attestationCanonical(attestation), attestation.signatures, publicKeys);
 }
 
 export function verifyPolicySignature(policy: BoundaryPolicy, publicKeys: readonly string[]): boolean {
-  return signedBy(policyCanonical(policy), policy.signature, publicKeys);
+  return unknownFields('BoundaryPolicy', policy).length === 0
+    && signedBy(policyCanonical(policy), policy.signature, publicKeys);
 }
 
 export function verifyJustificationSignature(proof: DecisionJustification, publicKeys: readonly string[]): boolean {
-  return signedBy(justificationCanonical(proof), proof.signature, publicKeys);
+  return unknownFields('JustificationProof', proof).length === 0
+    && signedBy(justificationCanonical(proof), proof.signature, publicKeys);
 }
 
 export function verifyRevocationFeedSignature(feed: SovereignRevocationFeed, publicKeys: readonly string[]): boolean {
-  return anySigned(revocationFeedCanonical(feed), feed.signatures, publicKeys);
+  return unknownFields('SovereignRevocationFeed', feed).length === 0
+    && anySigned(revocationFeedCanonical(feed), feed.signatures, publicKeys);
+}
+
+function checkpointSigned(checkpoint: RetentionCheckpoint, publicKeys: readonly string[]): boolean {
+  return signedBy(checkpointCanonical(checkpoint), checkpoint.signature, publicKeys);
 }
 
 export function verifyRetentionCheckpoint(checkpoint: RetentionCheckpoint, publicKeys: readonly string[]): boolean {
-  return signedBy(checkpointCanonical(checkpoint), checkpoint.signature, publicKeys);
+  return checkpointSigned(checkpoint, publicKeys) && unknownFields('RetentionCheckpoint', checkpoint).length === 0;
 }
 
 /** True when the record's signature verifies under the executor's public key. */
 export function verifyExecutionSignature(evidence: ExecutionEvidence, executorPublicKey: string): boolean {
-  return signedBy(executionCanonical(evidence), evidence.signature, [executorPublicKey]);
+  return unknownFields('ExecutionEvidence', evidence).length === 0
+    && signedBy(executionCanonical(evidence), evidence.signature, [executorPublicKey]);
 }
 
 // ── Boundary decisions ────────────────────────────────────────────────────────
@@ -137,7 +154,17 @@ export function verifyBoundaryDecision(
   if (!Number.isFinite((options.now ?? new Date()).getTime())) return reject('payload_invalid');
   if (!decision.signature) return reject('missing_signature');
   if (micros(options.now ?? new Date()) > micros(decision.decision_valid_until)) return reject('decision_expired');
-  if (!verifyDecisionSignature(decision, options.operatorPublicKeys)) return reject('invalid_signature');
+  if (!decisionSigned(decision, options.operatorPublicKeys)) return reject('invalid_signature');
+  // v1.2.0: an authentic decision with a signed field this SDK does not know, or
+  // expected inputs it cannot read, is refused by name: upgrade this SDK.
+  if (
+    unknownFields('BoundaryDecision', decision).length > 0
+    || (options.expectedPolicies ?? []).some(p => unknownFields('BoundaryPolicy', p).length > 0)
+    || (options.expectedAttestation !== undefined
+      && unknownFields('MembershipAttestation', options.expectedAttestation).length > 0)
+  ) {
+    return reject('unknown_field');
+  }
 
   const proof = decision.freshness_proof;
   if (proof && options.freshnessProofIssuerKeys && options.freshnessProofIssuerKeys.length > 0) {
@@ -246,6 +273,9 @@ export function verifyEvidenceEvents(
     result.verified = false;
     result.failures.push({ store_sequence: storeSequence, reason, detail });
   };
+  const warn = (storeSequence: number | null, reason: string, detail = '') => {
+    (result.warnings ??= []).push({ store_sequence: storeSequence, reason, detail });
+  };
   const executorKeys: Record<string, ExecutorKeyInfo> = Array.isArray(options.executorKeys)
     ? Object.fromEntries((options.executorKeys as readonly ExecutorKeyInfo[]).map(k => [k.key_id, k]))
     : options.executorKeys as Record<string, ExecutorKeyInfo>;
@@ -258,8 +288,12 @@ export function verifyEvidenceEvents(
   const resourceHeads = new Map<string, ResourceHead>(Object.entries(checkpoint?.resource_heads ?? {}));
   let prev: EvidenceEvent['entry'] | null = null;
 
-  if (checkpoint && (!validCheckpoint(checkpoint) || !verifyRetentionCheckpoint(checkpoint, options.naPublicKeys))) {
+  if (checkpoint && (!validCheckpoint(checkpoint) || !checkpointSigned(checkpoint, options.naPublicKeys))) {
     fail(null, 'invalid_signature', 'retention_checkpoint');
+    return result;
+  }
+  if (checkpoint && unknownFields('RetentionCheckpoint', checkpoint).length > 0) {
+    fail(null, 'unknown_field', unknownFields('RetentionCheckpoint', checkpoint).map(f => `checkpoint.${f}`).join(', '));
     return result;
   }
   for (const event of events) {
@@ -282,8 +316,19 @@ export function verifyEvidenceEvents(
       }
     }
     prev = entry;
+    if (!isKnownEntryKind(entry.entry_kind)) {
+      // v1.2.0: a kind from a later release; its envelope still chains.
+      fail(seq, 'unknown_entry_kind', String(entry.entry_kind));
+      continue;
+    }
 
-    const payload = event.payload;
+    const checked = checkPayloadFields(entry.entry_kind, event.payload, options.naPublicKeys, executorKeys);
+    if (checked.signed.length > 0) {
+      fail(seq, 'unknown_field', checked.signed.join(', '));
+      continue;
+    }
+    if (checked.unsigned.length > 0) warn(seq, 'unsigned_field', checked.unsigned.join(', '));
+    const payload = checked.payload;
     switch (entry.entry_kind) {
       case 'decision': {
         const decision = payload['decision'];
@@ -365,10 +410,67 @@ export function verifyEvidenceEvents(
         break;
       }
       default:
-        fail(seq, 'payload_invalid', `unknown entry kind ${String(entry.entry_kind)}`);
+        fail(seq, 'unknown_entry_kind', String(entry.entry_kind));
     }
   }
   return result;
+}
+
+const PAYLOAD_MODELS: Record<string, string> = {
+  justification: 'JustificationProof',
+  execution: 'ExecutionEvidence',
+  retention_checkpoint: 'RetentionCheckpoint',
+};
+
+interface CheckedPayload {
+  /** Unknown fields the signature covers: an authentic record from a newer signer. */
+  signed: string[];
+  /** Unknown fields outside the signature (stored before 1.1.1, or in a decision's wrapper): reported, then ignored. */
+  unsigned: string[];
+  /** The payload to verify further: without its unsigned unknown fields. */
+  payload: Record<string, unknown>;
+}
+
+/** Sort an export payload's unknown fields into signed (refused) and unsigned (reported, removed). */
+function checkPayloadFields(
+  kind: string,
+  payload: Record<string, unknown>,
+  naPublicKeys: readonly string[],
+  executorKeys: Record<string, ExecutorKeyInfo>,
+): CheckedPayload {
+  if (kind === 'decision') {
+    const unsigned = [
+      ...Object.keys(payload).filter(k => k !== 'decision' && k !== 'context'),
+      ...unknownFields('ContextRecord', payload['context'], 'context.'),
+    ];
+    const decision = payload['decision'] as BoundaryDecision | undefined;
+    const found = unknownFields('BoundaryDecision', decision, 'decision.');
+    if (found.length > 0 && decision && decisionSigned(decision, naPublicKeys)) {
+      return { signed: found, unsigned, payload };
+    }
+    const cleaned: Record<string, unknown> = {
+      decision: found.length > 0 ? withoutUnknownFields('BoundaryDecision', decision) : decision,
+      context: withoutUnknownFields('ContextRecord', payload['context']),
+    };
+    return { signed: [], unsigned: [...unsigned, ...found], payload: cleaned };
+  }
+  const model = PAYLOAD_MODELS[kind];
+  const found = model ? unknownFields(model, payload) : [];
+  if (!model || found.length === 0) return { signed: [], unsigned: [], payload };
+  let signedAsReceived = false;
+  if (kind === 'execution') {
+    const ev = payload as unknown as ExecutionEvidence;
+    const key = ev.signature ? executorKeys[ev.signature.key_id] : undefined;
+    signedAsReceived = !!key && signedBy(executionCanonical(ev), ev.signature, [key.public_key]);
+  } else if (kind === 'justification') {
+    signedAsReceived = signedBy(justificationCanonical(payload as unknown as DecisionJustification),
+      (payload as unknown as DecisionJustification).signature, naPublicKeys);
+  } else {
+    signedAsReceived = checkpointSigned(payload as unknown as RetentionCheckpoint, naPublicKeys);
+  }
+  return signedAsReceived
+    ? { signed: found, unsigned: [], payload }
+    : { signed: [], unsigned: found, payload: withoutUnknownFields(model, payload) };
 }
 
 // ── Agreements (v0.61) ────────────────────────────────────────────────────────
@@ -379,7 +481,8 @@ export type AgreementVerificationReason =
   | 'invalid_offerer_signature'
   | 'missing_responder_signature'
   | 'invalid_responder_signature'
-  | 'graph_digest_mismatch';
+  | 'graph_digest_mismatch'
+  | 'unknown_field';
 
 export interface AgreementVerification {
   accepted: boolean;
@@ -410,6 +513,8 @@ export function verifyAgreement(
   if (expectedGraphDigest !== undefined && record.graph_digest !== expectedGraphDigest) {
     return result(false, 'graph_digest_mismatch');
   }
+  // v1.2.0: an authentic agreement with a signed field this SDK does not know.
+  if (unknownFields('AgreementRecord', record).length > 0) return result(false, 'unknown_field');
   return result(true, 'accepted');
 }
 
@@ -417,7 +522,8 @@ export function verifyAgreement(
 
 /** True when the licensor signed the DataLicensePolicy. */
 export function verifyDataLicensePolicySignature(policy: DataLicensePolicy, licensorPublicKeys: readonly string[]): boolean {
-  return signedBy(dataLicensePolicyCanonical(policy), policy.signature, licensorPublicKeys);
+  return signedBy(dataLicensePolicyCanonical(policy), policy.signature, licensorPublicKeys)
+    && unknownFields('DataLicensePolicy', policy).length === 0;
 }
 
 export type DataUsageViolationType =
@@ -455,6 +561,15 @@ export function verifyDataAccessIntent(
 ): DataIntentVerification {
   const fail = (violations: DataUsageViolationDetail[]): DataIntentVerification =>
     ({ valid: false, violation_reason: violations[0]!.violation_type, violations });
+  // v1.2.0: fields this SDK does not know, as the reference reports them.
+  const intentUnknown = unknownFields('DataAccessIntent', intent);
+  if (intentUnknown.length > 0 && !signedBy(dataAccessIntentCanonical(intent), intent.signature, agentPublicKeys)) {
+    return fail([{ violation_type: 'intent_exceeds_license', detail: 'Invalid intent signature' }]);
+  }
+  const unknown = [...intentUnknown, ...unknownFields('DataLicensePolicy', policy, 'policy.')].sort();
+  if (unknown.length > 0) {
+    return fail([{ violation_type: 'intent_exceeds_license', detail: `Unknown field: ${unknown.join(', ')}` }]);
+  }
   if (!intent.signature) return fail([{ violation_type: 'intent_exceeds_license', detail: 'Missing intent signature' }]);
   if (!signedBy(dataAccessIntentCanonical(intent), intent.signature, agentPublicKeys)) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: 'Invalid intent signature' }]);
