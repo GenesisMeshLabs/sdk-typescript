@@ -3,15 +3,27 @@ import type { HttpTransport } from './client.js';
 import { executionDigest } from './canonical.js';
 import { GenesisMeshError, NotFoundError } from './errors.js';
 import {
+  outOfBandDigest,
+  type BreakGlassRecord,
+  type GovernedBy,
+  type JudgementRecord,
+  type ObservationRecord,
+  type Verdict,
+} from './out-of-band.js';
+import {
   classifySubmissionError,
   outboxEntry,
   PREDECESSOR_DEAD_LETTERED,
+  RECORD_PERMANENT_REFUSALS,
+  recordOutboxEntry,
   retryDelayMs,
   type Delivery,
   type EvidenceOutbox,
   type FlushOptions,
   type FlushResult,
   type OutboxEntry,
+  type RecordOutbox,
+  type RecordOutboxEntry,
 } from './outbox.js';
 import { parseExportLines } from './verify.js';
 import type {
@@ -20,10 +32,12 @@ import type {
   EvidenceSearchResult,
   EvidenceStoreStatus,
   EvidenceStoreVerification,
+  EvidenceStoreEntry,
   EvidenceSubmission,
   ExecutionEvidence,
   ExecutorKeyRecord,
   ExecutorKeyState,
+  ResourceAction,
   ResourceHead,
   ResourceHistory,
   RetentionCheckpoint,
@@ -61,7 +75,123 @@ export interface RegisterExecutorKeyParams {
   /** Raw 32-byte Ed25519 public key, base64. */
   public_key: string;
   executor_sovereign_id: string;
+  /** v1.3.0: `executor` (default) or `observer`, which signs observations only. */
+  role?: 'executor' | 'observer';
+  /** v1.3.0: the key signs only for resources whose ID starts with this; null or absent for any resource. */
+  resource_prefix?: string | null;
 }
+
+// ── Changes outside the controlled path (v1.3.0) ─────────────────────────────
+
+/** The NA's answer to an observation or break-glass record. */
+export interface RecordSubmission {
+  /** `quarantined`: authentic but outside its time bounds; kept, not judged. */
+  status: 'recorded' | 'duplicate' | 'quarantined';
+  entry: EvidenceStoreEntry;
+  entry_digest: string;
+  payload: Record<string, unknown>;
+  /** The judgement made at admission (`NA_JUDGE_ON_ADMISSION`); null when judging failed and waits for the judge route. */
+  judgement?: JudgementSubmission | null;
+}
+
+/** One observation's result in a batch, at its index in the request. */
+export interface ObservationBatchResult {
+  index: number;
+  status: 'recorded' | 'duplicate' | 'quarantined' | 'refused';
+  entry?: EvidenceStoreEntry;
+  entry_digest?: string;
+  payload?: Record<string, unknown>;
+  judgement?: JudgementSubmission | null;
+  /** Present when refused. */
+  error?: { code: string; message: string };
+}
+
+/** A judgement: made now (`judged`), or the one made before (`existing`). */
+export interface JudgementSubmission {
+  status: 'judged' | 'existing';
+  entry: EvidenceStoreEntry;
+  entry_digest: string;
+  payload: JudgementRecord;
+}
+
+/** How a change to a resource stands: see *Changes Outside the Controlled Path* in the NA runbooks. */
+export type ChangeState =
+  | 'recorded'
+  | 'matched'
+  | 'judged_allowed'
+  | 'judged_denied'
+  | 'indeterminate'
+  | 'observed'
+  | 'quarantined';
+
+/** One change to a resource, oldest first. */
+export interface ResourceChange {
+  store_sequence: number;
+  kind: 'execution' | 'observation' | 'break_glass' | 'quarantine';
+  recorded_at: string;
+  record_id: string | null;
+  action: ResourceAction | null;
+  /** When the change happened (for a window, its end); when it was quarantined, for a quarantine entry. */
+  at: string | null;
+  governed_by: GovernedBy | null;
+  state: ChangeState;
+  verdict?: Verdict;
+  flagged_for_review?: boolean;
+  decision_id?: string | null;
+  /** The observation that matched this execution or break-glass record. */
+  observed_by?: string | null;
+  possible_match_evidence_id?: string;
+  justification?: string;
+  record_kind?: string;
+  rejection_code?: string;
+}
+
+export interface ResourceChanges {
+  resource_id: string;
+  /** True when the resource has more changes than one response holds. */
+  truncated: boolean;
+  changes: ResourceChange[];
+}
+
+/** An operator key's holder, as the store records it. */
+export interface OperatorKeyHolder {
+  key_id: string;
+  holder: string;
+  public_key: string | null;
+  operator_tier: string | null;
+  since: string;
+  approved_by: string | null;
+  registry_record_id: string;
+}
+
+export interface HolderChange {
+  proposal_id: string;
+  key_id: string;
+  holder: string;
+  proposed_by?: string;
+  approved: boolean;
+  approved_by?: string;
+  registry_record_id?: string;
+}
+
+/** What became of a record handed to the record outbox. */
+export interface RecordDelivery {
+  submission?: RecordSubmission;
+  queued?: RecordOutboxEntry;
+}
+
+/** What one `flushRecords` run did. */
+export interface RecordFlushResult {
+  /** Entries the NA admitted (or already held), now removed from the record outbox. */
+  admitted: RecordOutboxEntry[];
+  /** Of those, the ones the NA kept as quarantine entries (outside their time bounds). */
+  quarantined: RecordOutboxEntry[];
+  pending: RecordOutboxEntry[];
+  dead_lettered: RecordOutboxEntry[];
+}
+
+/** Most observations one batch request carries. */
+const OBSERVATION_BATCH = 100;
 
 /** Latest successful state of one resource, from its execution history. */
 export interface ResourceState {
@@ -93,15 +223,24 @@ const MAX_INLINE_DRAIN = 100;
 /** The NA evidence store (v0.59): controller submission, operator search, history, export. */
 export class EvidenceStoreClient {
   private flushing: Promise<FlushResult> | null = null;
+  private flushingRecords: Promise<RecordFlushResult> | null = null;
   /** Digests of outbox records by id: a record never changes once signed. */
   private readonly digests = new Map<string, string>();
+  /** Records `enqueue` is submitting right now: a concurrent flush leaves them to it. */
+  private readonly inFlight = new Set<string>();
 
   /**
    * @param outbox Durable storage for signed records not yet admitted
    *   (v1.2.0, `ClientOptions.outbox`). With one, `governedAction` keeps every
    *   record until the NA admits it.
+   * @param recordOutbox Durable storage for signed observations and
+   *   break-glass records not yet admitted (v1.3.0, `ClientOptions.recordOutbox`).
    */
-  constructor(private readonly http: HttpTransport, readonly outbox?: EvidenceOutbox) {}
+  constructor(
+    private readonly http: HttpTransport,
+    readonly outbox?: EvidenceOutbox,
+    readonly recordOutbox?: RecordOutbox,
+  ) {}
 
   /**
    * Submit one signed ExecutionEvidence record. Authenticated by the executor
@@ -139,7 +278,14 @@ export class EvidenceStoreClient {
     if (entry.state === 'dead_letter') return { queued: entry };
     const chain = this.chainOf(entries, entry);
     if (chain.dead) return { queued: await this.deadLetter(outbox, entries, entry, PREDECESSOR_DEAD_LETTERED) };
-    if (!chain.pending.length) return this.attempt(outbox, entries, entry);
+    if (!chain.pending.length) {
+      this.inFlight.add(entry.id);
+      try {
+        return await this.attempt(outbox, entries, entry);
+      } finally {
+        this.inFlight.delete(entry.id);
+      }
+    }
     if (this.flushing || chain.pending.length > MAX_INLINE_DRAIN) return { queued: entry };
     const only = new Set([...chain.pending.map(e => e.id), entry.id]);
     const run = this.flush(outbox, { ignoreBackoff: true }, only);
@@ -274,6 +420,7 @@ export class EvidenceStoreClient {
     }
     try {
       await outbox.remove(entry.id);
+      this.digests.delete(entry.id);
     } catch {
       // The NA holds the record: the next flush resubmits it, gets a duplicate and removes it.
     }
@@ -292,6 +439,13 @@ export class EvidenceStoreClient {
       const entry = entries[i]!;
       const digest = this.digestOf(entry);
       if (entry.state === 'dead_letter') continue;
+      if (this.inFlight.has(entry.id)) {
+        // `enqueue` is submitting it: still pending as far as this run knows.
+        waiting.add(digest);
+        result.pending.push(entry);
+        outcomes.set(entry.id, { queued: entry });
+        continue;
+      }
       if (only && !only.has(entry.id)) {
         waiting.add(digest);
         continue;
@@ -326,6 +480,208 @@ export class EvidenceStoreClient {
       }
     }
     return { result, outcomes };
+  }
+
+  // ── Changes outside the controlled path (v1.3.0) ───────────────────────────
+
+  /**
+   * Submit one signed observation. Authenticated by the observer key's
+   * signature, not by operator headers. Idempotent per source event: a
+   * resubmission returns `status: "duplicate"`.
+   */
+  submitObservation(observation: ObservationRecord): Promise<RecordSubmission> {
+    return this.http.publicPost<RecordSubmission>('/evidence/observations', { observation }, true);
+  }
+
+  /** Submit up to 100 observations; the NA admits them in order of their change times. One result each, by index. */
+  async submitObservations(observations: readonly ObservationRecord[]): Promise<ObservationBatchResult[]> {
+    const body = await this.http.publicPost<{ results: ObservationBatchResult[] }>(
+      '/evidence/observations/batch', { observations }, true,
+    );
+    return body.results;
+  }
+
+  /** Submit one signed break-glass record (authenticated by the executor key's signature). */
+  submitBreakGlass(record: BreakGlassRecord): Promise<RecordSubmission> {
+    return this.http.publicPost<RecordSubmission>('/evidence/break-glass', { record }, true);
+  }
+
+  /**
+   * Keep a signed observation or break-glass record in the record outbox and
+   * submit it. A failed submission does not throw: a transient error leaves
+   * it pending for `flushRecords`, and a refusal no retry can overcome keeps
+   * it as a dead letter. Throws only when the record outbox cannot store it.
+   */
+  async enqueueRecord(record: ObservationRecord | BreakGlassRecord): Promise<RecordDelivery> {
+    const outbox = this.requireRecordOutbox();
+    const fresh = recordOutboxEntry(record);
+    let entry = (await outbox.list()).find(e => e.id === fresh.id);
+    if (entry && outOfBandDigest(entry.record) !== outOfBandDigest(record)) {
+      throw new Error(`a different record with id ${fresh.id} is in the record outbox`);
+    }
+    if (!entry) {
+      entry = fresh;
+      await outbox.add(entry);
+    }
+    if (entry.state === 'dead_letter') return { queued: entry };
+    return this.attemptRecord(outbox, entry);
+  }
+
+  /**
+   * Submit the record outbox's pending records in the order they were added,
+   * observations up to 100 at a time. Records in backoff are skipped unless
+   * `ignoreBackoff`; a transient error ends the run. Concurrent calls share
+   * one run.
+   */
+  async flushRecords(options: FlushOptions = {}): Promise<RecordFlushResult> {
+    const outbox = this.requireRecordOutbox();
+    this.flushingRecords ??= this.flushRecordRun(outbox, options).finally(() => { this.flushingRecords = null; });
+    return this.flushingRecords;
+  }
+
+  /** Judge an observation once (admin); returns the existing judgement when it was judged before. */
+  judgeObservation(observationId: string): Promise<JudgementSubmission> {
+    return this.http.adminPost<JudgementSubmission>(
+      `/admin/evidence/observations/${encodeURIComponent(observationId)}/judge`, {}, true,
+    );
+  }
+
+  /** Judge a break-glass record once (admin); returns the existing judgement when it was judged before. */
+  judgeBreakGlass(breakGlassId: string): Promise<JudgementSubmission> {
+    return this.http.adminPost<JudgementSubmission>(
+      `/admin/evidence/break-glass/${encodeURIComponent(breakGlassId)}/judge`, {}, true,
+    );
+  }
+
+  /** Every change to a resource, with how it was governed and its state, oldest first (admin). */
+  resourceChanges(resourceId: string): Promise<ResourceChanges> {
+    return this.http.adminGet<ResourceChanges>(`/admin/evidence/changes/${resourcePath(resourceId)}`);
+  }
+
+  /** Operator key holders, as the store records them (admin). */
+  async operatorHolders(): Promise<OperatorKeyHolder[]> {
+    return (await this.http.adminGet<{ holders: OperatorKeyHolder[] }>('/admin/evidence/operator-holders')).holders;
+  }
+
+  /** Propose a new holder for an operator key (admin, privileged); a key of another holder approves it. */
+  proposeHolder(keyId: string, holder: string): Promise<HolderChange> {
+    return this.http.adminPost<HolderChange>(`/admin/operator-keys/${encodeURIComponent(keyId)}/holder`, { holder });
+  }
+
+  /** Approve a holder change with a privileged key of a different holder (admin, privileged). */
+  approveHolder(proposalId: string): Promise<HolderChange> {
+    return this.http.adminPost<HolderChange>(
+      `/admin/operator-keys/holder-changes/${encodeURIComponent(proposalId)}/approve`, {},
+    );
+  }
+
+  private requireRecordOutbox(): RecordOutbox {
+    if (!this.recordOutbox) {
+      throw new GenesisMeshError('no record outbox is configured (ClientOptions.recordOutbox)', 'record_outbox_required', 0);
+    }
+    return this.recordOutbox;
+  }
+
+  private async attemptRecord(outbox: RecordOutbox, entry: RecordOutboxEntry): Promise<RecordDelivery> {
+    let submission: RecordSubmission;
+    try {
+      submission = entry.kind === 'observation'
+        ? await this.submitObservation(entry.record as ObservationRecord)
+        : await this.submitBreakGlass(entry.record as BreakGlassRecord);
+    } catch (err) {
+      return { queued: await this.recordFailed(outbox, entry, err) };
+    }
+    await this.removeRecord(outbox, entry.id);
+    return { submission };
+  }
+
+  /** The entry after a failed submission: pending with a backoff, or a dead letter. */
+  private async recordFailed(outbox: RecordOutbox, entry: RecordOutboxEntry, err: unknown): Promise<RecordOutboxEntry> {
+    const { failure, transient } = classifySubmissionError(err, RECORD_PERMANENT_REFUSALS);
+    const attempts = entry.attempts + 1;
+    const next: RecordOutboxEntry = transient
+      ? { ...entry, attempts, last_error: failure, next_attempt_at: new Date(Date.now() + retryDelayMs(attempts)).toISOString() }
+      : { ...entry, attempts, state: 'dead_letter', next_attempt_at: null, last_error: failure };
+    try {
+      await outbox.update(next);
+    } catch {
+      // The entry keeps its previous state; the next flush settles it.
+    }
+    return next;
+  }
+
+  private async removeRecord(outbox: RecordOutbox, id: string): Promise<void> {
+    try {
+      await outbox.remove(id);
+    } catch {
+      // The NA holds the record: the next flush resubmits it, gets a duplicate and removes it.
+    }
+  }
+
+  private async flushRecordRun(outbox: RecordOutbox, options: FlushOptions): Promise<RecordFlushResult> {
+    const result: RecordFlushResult = { admitted: [], quarantined: [], pending: [], dead_lettered: [] };
+    const entries = (await outbox.list()).filter(e => e.state === 'pending');
+    const due = (e: RecordOutboxEntry) => options.ignoreBackoff || !(Date.parse(e.next_attempt_at ?? '') > Date.now());
+    const settle = (entry: RecordOutboxEntry, delivery: RecordDelivery): boolean => {
+      if (delivery.submission) {
+        result.admitted.push(entry);
+        if (delivery.submission.status === 'quarantined') result.quarantined.push(entry);
+        return true;
+      }
+      const queued = delivery.queued!;
+      (queued.state === 'dead_letter' ? result.dead_lettered : result.pending).push(queued);
+      return queued.state === 'dead_letter';
+    };
+    let stopped = false;
+    for (let i = 0; i < entries.length;) {
+      const entry = entries[i]!;
+      if (stopped || !due(entry)) {
+        result.pending.push(entry);
+        i += 1;
+        continue;
+      }
+      if (entry.kind === 'break_glass') {
+        stopped = !settle(entry, await this.attemptRecord(outbox, entry));
+        i += 1;
+        continue;
+      }
+      const batch: RecordOutboxEntry[] = [];
+      while (i < entries.length && batch.length < OBSERVATION_BATCH && entries[i]!.kind === 'observation' && due(entries[i]!)) {
+        batch.push(entries[i]!);
+        i += 1;
+      }
+      let results: ObservationBatchResult[];
+      try {
+        results = await this.submitObservations(batch.map(e => e.record as ObservationRecord));
+      } catch (err) {
+        const tooLarge = err instanceof GenesisMeshError && err.status === 413;
+        if (!tooLarge && classifySubmissionError(err, RECORD_PERMANENT_REFUSALS).transient) {
+          for (const e of batch) settle(e, { queued: await this.recordFailed(outbox, e, err) });
+          stopped = true;
+          continue;
+        }
+        // The batch itself was refused, or is larger than the NA takes: each observation is tried alone.
+        for (const e of batch) {
+          if (stopped) result.pending.push(e);
+          else stopped = !settle(e, await this.attemptRecord(outbox, e));
+        }
+        continue;
+      }
+      for (const [index, e] of batch.entries()) {
+        const answer = results.find(r => r.index === index);
+        if (!answer) {
+          result.pending.push(e);
+        } else if (answer.status === 'refused') {
+          const code = answer.error?.code ?? 'unknown';
+          const refusal = new GenesisMeshError(answer.error?.message ?? code, code, code.endsWith('_conflict') ? 409 : 422);
+          settle(e, { queued: await this.recordFailed(outbox, e, refusal) });
+        } else {
+          await this.removeRecord(outbox, e.id);
+          settle(e, { submission: answer as RecordSubmission });
+        }
+      }
+    }
+    return result;
   }
 
   /** Search stored entries (admin). Use `next_after_sequence` as the next `after_sequence`. */

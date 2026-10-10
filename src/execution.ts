@@ -3,6 +3,7 @@
  * `record_execution` does, and refuse secret material before anything is signed.
  */
 
+import { signBreakGlass, type BreakGlassInput, type BreakGlassRecord } from './out-of-band.js';
 import { randomUUID } from 'node:crypto';
 import { pythonTimestamp, signCanonical, type Signer } from './auth.js';
 import { executionCanonical, executionDigest } from './canonical.js';
@@ -137,6 +138,15 @@ export class ExecutionRecorder {
 
   get keyId(): string {
     return this.signer.keyId;
+  }
+
+  /**
+   * Sign a break-glass record with this executor's key (v1.3.0).
+   * `governedAction` with `breakGlass` calls it when evaluation fails
+   * transiently.
+   */
+  signBreakGlass(input: Omit<BreakGlassInput, 'executor_sovereign_id'>): Promise<BreakGlassRecord> {
+    return signBreakGlass({ ...input, executor_sovereign_id: this.executorSovereignId }, this.signer);
   }
 
   async record(params: RecordExecutionParams): Promise<ExecutionEvidence> {

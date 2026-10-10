@@ -8,9 +8,9 @@ import {
   GenesisMeshClient, ExecutionRecorder, seedSigner, governedAction, reconcileResources,
   verifyBoundaryDecision, verifyAttestationSignature, verifyPolicySignature, verifyJustificationSignature,
   verifyRevocationFeedSignature, verifyEvidenceEvents, parseExportLines, ConflictError,
-  MemoryOutbox, MetadataRefusedError, executionDigest,
+  MemoryOutbox, MetadataRefusedError, executionDigest, ObservationRecorder,
 } from '../src/index.js';
-import type { BoundaryPolicyIntent, EvidenceEvent } from '../src/index.js';
+import type { BoundaryPolicyIntent, BreakGlassResult, EvidenceEvent, RecordOutboxEntry } from '../src/index.js';
 import { generateTestKeyPair } from './helpers.js';
 
 const enabled = Boolean(process.env.GM_E2E_PYTHON || process.env.GM_E2E_BASE_URL);
@@ -19,7 +19,7 @@ const suite = enabled ? describe : describe.skip;
 suite('SDK against a live Python Network Authority', () => {
   let child: ChildProcessWithoutNullStreams | undefined;
   let gm: GenesisMeshClient;
-  let config: { baseUrl: string; signingKeyBase64: string; keyId: string; naPublicKey: string };
+  let config: { baseUrl: string; signingKeyBase64: string; keyId: string; naPublicKey: string; outOfBand?: boolean };
   let naPublicKey: string;
   let diagnostics = '';
   beforeAll(async () => {
@@ -183,6 +183,69 @@ suite('SDK against a live Python Network Authority', () => {
     expect(error).toMatchObject({ value: 3, submission: { status: 'recorded' }, evidence: { execution_parameters: { secret_version: 'v3' } } });
   }, 30_000);
 
+  it('records and judges changes made outside the controlled path, and verifies the export (1.3.0)', async () => {
+    if (!config.outOfBand) return; // a core before 1.3.0
+    const id = randomUUID();
+    const capability = `sdk.oob.${id}`;
+    const resource = `kv:oob-${id}/secret`;
+    const attestation = await gm.attestation.issue({ subject_id: id, roles: ['role:client'], claims: { capabilities: [capability] } });
+    const policy = await gm.policy.publish({
+      policy_id: `oob-${id}`, valid_from: new Date(Date.now() - 60_000).toISOString(),
+      valid_until: new Date(Date.now() + 3600_000).toISOString(), selector: { capabilities: [capability] },
+      gates: [{ gate_id: 'lifetime', gate_type: 'max_value.v1', order: 0, config: { path: 'request_parameters.lifetime_days', max: 90 } }],
+    });
+    await gm.policy.activate(policy.policy_id, policy.version);
+
+    const observerKey = generateTestKeyPair();
+    await gm.evidenceStore.registerExecutorKey({
+      key_id: `observer-${id}`, public_key: observerKey.pubBase64, executor_sovereign_id: `observer-${id}`,
+      role: 'observer', resource_prefix: `kv:oob-${id}/`,
+    });
+    const observer = new ObservationRecorder({ observerSovereignId: `observer-${id}`, signer: seedSigner(observerKey.seedBase64, `observer-${id}`) });
+    const observe = (lifetime: number, event: string) => observer.record({
+      resource_id: resource, action: 'rotate', capability, changed_at: new Date(), source: 'cloud-activity-log',
+      source_event_id: event, actor: 'principal-7f3a', metadata: { lifetime_days: lifetime },
+    });
+    const denied = await gm.evidenceStore.submitObservation(await observe(400, `${id}-1`));
+    expect(denied).toMatchObject({ status: 'recorded', judgement: { payload: { verdict: 'deny', governed_by: 'after_the_fact' } } });
+    const allowed = await gm.evidenceStore.submitObservations([await observe(30, `${id}-2`)]);
+    expect(allowed[0]).toMatchObject({ status: 'recorded', judgement: { payload: { verdict: 'allow' } } });
+    const again = await gm.evidenceStore.judgeObservation(denied.payload['observation_id'] as string);
+    expect(again.status).toBe('existing');
+
+    // Break-glass: the NA cannot be reached for the evaluation; the action runs and is recorded.
+    const executor = generateTestKeyPair();
+    await gm.evidenceStore.registerExecutorKey({ key_id: `executor-${id}`, public_key: executor.pubBase64, executor_sovereign_id: `executor-${id}` });
+    const recorder = new ExecutionRecorder({ executorSovereignId: `executor-${id}`, signer: seedSigner(executor.seedBase64, `executor-${id}`) });
+    const outage: typeof fetch = async (input, init) => {
+      if (String(input).endsWith('/admin/boundary/evaluate')) throw new TypeError('fetch failed');
+      return fetch(input, init);
+    };
+    const client = new GenesisMeshClient({ ...config, fetch: outage, recordOutbox: new MemoryOutbox<RecordOutboxEntry>() });
+    const result = await governedAction(client, recorder, {
+      attestation_id: attestation.attestation_id, requested_capability: capability, resource_id: resource, resource_action: 'rotate',
+      context: { request_parameters: { lifetime_days: 30 } }, breakGlass: { justification: 'incident drill: NA unreachable' },
+      verify: { operatorPublicKeys: [naPublicKey], expectedPolicies: [policy], expectedAttestation: attestation },
+    }, async decision => ({ value: decision, execution_parameters: { version_id: 'v2' } })) as BreakGlassResult<unknown>;
+    expect(result).toMatchObject({ brokeGlass: true, failure: 'network_error', value: null, submission: { status: 'recorded' } });
+    expect(result.submission?.judgement?.payload.verdict).toBe('allow');
+
+    const changes = await gm.evidenceStore.resourceChanges(resource);
+    expect(changes.changes.map(c => [c.kind, c.state])).toEqual([
+      ['observation', 'judged_denied'], ['observation', 'judged_allowed'], ['break_glass', 'judged_allowed'],
+    ]);
+    expect(changes.changes[2]!.justification).toBe('incident drill: NA unreachable');
+    expect((await gm.evidenceStore.operatorHolders()).map(h => h.key_id)).toContain('ops');
+
+    const exported: EvidenceEvent[] = [];
+    for await (const event of gm.evidenceStore.exportAll()) exported.push(event);
+    const verification = verifyEvidenceEvents(exported, { naPublicKeys: [naPublicKey], executorKeys: await gm.evidenceStore.listExecutorKeys() });
+    expect(verification.failures).toEqual([]);
+    expect(verification.observations).toBeGreaterThanOrEqual(2);
+    expect(verification.break_glass).toBeGreaterThanOrEqual(1);
+    expect(verification.judgements).toBeGreaterThanOrEqual(3);
+  }, 30_000);
+
   it('supports observe/enforce, rollback, failure evidence, chain conflicts and retired keys', async () => {
     const id = randomUUID();
     const attestation = await gm.attestation.issue({ subject_id: id, roles: ['role:client'], claims: { capabilities: ['sdk.run'] } });
@@ -208,7 +271,9 @@ suite('SDK against a live Python Network Authority', () => {
     await expect(gm.evidenceStore.submit(badHead)).rejects.toBeInstanceOf(ConflictError);
     await gm.evidenceStore.retireExecutorKey(id);
     const retired = await recorder.record({ decision: evaluation.decision, executed_capability: 'sdk.run', outcome: 'success' });
-    await expect(gm.evidenceStore.submit(retired)).rejects.toMatchObject({ code: 'evidence_unknown_executor' });
+    // 1.3.0 names a retired key (evidence_executor_key_retired); a 1.2 core does not.
+    const refusal = await gm.evidenceStore.submit(retired).then(() => null, (e: { code: string }) => e.code);
+    expect(['evidence_executor_key_retired', 'evidence_unknown_executor']).toContain(refusal);
     expect((await gm.policy.deactivate(id, first.version)).active).toBe(false);
     expect(verifyBoundaryDecision((await gm.boundary.evaluate(request)).decision, params.verify)).toMatchObject({ accepted: false, reason: 'policy_binding_mismatch' });
   }, 30_000);

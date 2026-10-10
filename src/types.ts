@@ -689,7 +689,17 @@ export interface ExecutionEvidence {
   signature: Signature | null;
 }
 
-export type EntryKind = 'decision' | 'justification' | 'execution' | 'retention_checkpoint';
+export type EntryKind =
+  | 'decision'
+  | 'justification'
+  | 'execution'
+  | 'retention_checkpoint'
+  // v1.3.0: changes made outside the controlled path, and the NA's registry.
+  | 'observation'
+  | 'break_glass'
+  | 'judgement'
+  | 'quarantine'
+  | 'registry';
 
 /** Store envelope; every entry commits to the previous one. */
 export interface EvidenceStoreEntry {
@@ -710,6 +720,14 @@ export interface EvidenceStoreEntry {
   resource_id: string | null;
   resource_action: string | null;
   resource_sequence: number | null;
+  /** v1.3.0, left out when absent: the Stage 2 record's id (observation, break-glass, judgement, quarantine, registry). */
+  record_id?: string;
+  /** v1.3.0: the observation or break-glass record a judgement judges. */
+  subject_id?: string;
+  /** v1.3.0: the execution evidence a judgement matched (consumed by the match). */
+  matched_evidence_id?: string;
+  /** v1.3.0: an observation's position among the resource's observations, gap-free from 1. */
+  observation_sequence?: number;
 }
 
 /** `gm.evidence.event` schema version 1: one stored entry with its signed payload. */
@@ -738,6 +756,8 @@ export interface RetentionCheckpoint {
   previous_checkpoint_id: string | null;
   issued_by: string;
   signature: Signature | null;
+  /** v1.3.0, left out when absent: the last removed observation position per resource. */
+  observation_heads?: Record<string, number>;
 }
 
 /** `POST /evidence/execution` response: the stored entry, for a new record and for an identical resubmission. */
@@ -758,7 +778,18 @@ export type EvidenceVerificationFailureReason =
   | 'evidence_outside_decision_window'
   | 'evidence_capability_mismatch'
   | 'evidence_chain_break'
-  | 'resource_chain_break';
+  | 'resource_chain_break'
+  | 'unknown_entry_kind'
+  | 'unknown_field'
+  // v1.3.0
+  | 'envelope_mismatch'
+  | 'observation_chain_break'
+  | 'duplicate_judgement'
+  | 'judgement_subject_mismatch'
+  | 'judgement_subject_missing'
+  | 'match_reused'
+  | 'quarantine_digest_mismatch'
+  | 'evidence_cites_judgement';
 
 export interface EvidenceVerificationFailure {
   store_sequence: number | null;
@@ -771,6 +802,11 @@ export interface EvidenceStoreVerification {
   checked_entries: number;
   decisions: number;
   executions: number;
+  /** v1.3.0, present when nonzero. */
+  observations?: number;
+  break_glass?: number;
+  judgements?: number;
+  quarantined?: number;
   failures: EvidenceVerificationFailure[];
   /** Findings that do not fail verification (v1.2.0), such as `unsigned_field`. */
   warnings?: EvidenceVerificationFailure[];
@@ -805,6 +841,8 @@ export interface EvidenceStoreStatus {
   rejections?: number;
   active_executor_keys?: number;
   retention_checkpoint: number | null;
+  /** v1.3.0: observations and break-glass records not judged yet (they hold retention back). */
+  unjudged_records?: number;
 }
 
 export interface ExecutorKeyRecord {
@@ -813,6 +851,10 @@ export interface ExecutorKeyRecord {
   executor_sovereign_id: string;
   registered_at: string;
   retired_at: string | null;
+  /** v1.3.0: `executor` signs execution evidence and break-glass records; `observer` signs observations. */
+  role?: 'executor' | 'observer';
+  /** v1.3.0: the key signs only for resources whose ID starts with this. */
+  resource_prefix?: string | null;
   [key: string]: unknown;
 }
 
@@ -831,6 +873,8 @@ export interface RetentionResult {
 export type EvidenceRejectionCode =
   | 'evidence_malformed'
   | 'evidence_unknown_executor'
+  | 'evidence_executor_key_retired'
+  | 'evidence_out_of_scope'
   | 'evidence_invalid_signature'
   | 'evidence_decision_not_found'
   | 'evidence_decision_denied'
@@ -843,6 +887,26 @@ export type EvidenceRejectionCode =
   | 'resource_chain_mismatch'
   | 'evidence_conflict'
   | 'evidence_secret_material';
+
+/**
+ * Rejection codes from `POST /evidence/observations` and `/evidence/break-glass`
+ * (v1.3.0; 422, or 409 for `*_conflict`).
+ */
+export type OutOfBandRejectionCode =
+  | 'observation_malformed'
+  | 'observation_invalid_signature'
+  | 'observation_unknown_key'
+  | 'observation_key_retired'
+  | 'observation_out_of_scope'
+  | 'observation_secret_material'
+  | 'observation_conflict'
+  | 'break_glass_malformed'
+  | 'break_glass_invalid_signature'
+  | 'break_glass_unknown_key'
+  | 'break_glass_key_retired'
+  | 'break_glass_out_of_scope'
+  | 'break_glass_secret_material'
+  | 'break_glass_conflict';
 
 // ── Health and readiness (v0.60) ──────────────────────────────────────────────
 

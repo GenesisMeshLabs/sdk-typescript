@@ -17,9 +17,14 @@ function freeze<T>(value: T): T {
 export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
   "version": 2,
   "entry_kinds": [
+    "break_glass",
     "decision",
     "execution",
+    "judgement",
     "justification",
+    "observation",
+    "quarantine",
+    "registry",
     "retention_checkpoint"
   ],
   "models": {
@@ -135,6 +140,34 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
       "root": true,
       "signature_field": "signature"
     },
+    "BreakGlassRecord": {
+      "fields": {
+        "attestation_id": null,
+        "attributes": "open",
+        "break_glass_id": null,
+        "capability": null,
+        "evaluation_failure": null,
+        "evaluation_request_digest": null,
+        "executed_at": "timestamp",
+        "execution_parameters": "open",
+        "executor_sovereign_id": null,
+        "justification": null,
+        "outcome": null,
+        "outcome_detail": null,
+        "request_parameters": "open",
+        "resource_action": null,
+        "resource_id": null,
+        "signature": {
+          "object": "Signature"
+        }
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "attestation_id",
+        "outcome_detail"
+      ]
+    },
     "ContextRecord": {
       "fields": {
         "agreement_id": null,
@@ -210,18 +243,28 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "evidence_id": null,
         "exec_sequence_no": null,
         "executor_sovereign_id": null,
+        "matched_evidence_id": null,
+        "observation_sequence": null,
         "outcome": null,
         "payload_digest": null,
         "prev_entry_digest": null,
+        "record_id": null,
         "recorded_at": "timestamp",
         "resource_action": null,
         "resource_id": null,
         "resource_sequence": null,
         "store_sequence": null,
+        "subject_id": null,
         "vendor_id": null
       },
       "root": true,
-      "signature_field": null
+      "signature_field": null,
+      "omit_when_none": [
+        "record_id",
+        "subject_id",
+        "matched_evidence_id",
+        "observation_sequence"
+      ]
     },
     "ExecutionEvidence": {
       "fields": {
@@ -310,6 +353,54 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "result": null
       }
     },
+    "JudgementRecord": {
+      "fields": {
+        "action": null,
+        "capability": null,
+        "current_policy_set_digest": null,
+        "current_verdict": null,
+        "evaluated_as_of": "timestamp",
+        "evaluated_from": "timestamp",
+        "flagged_for_review": null,
+        "gate_results": {
+          "list": "GateResult"
+        },
+        "governed_by": null,
+        "issued_by": null,
+        "issuer_sovereign_id": null,
+        "judged_at": "timestamp",
+        "judgement_id": null,
+        "matched_decision_id": null,
+        "matched_evidence_id": null,
+        "policy_binding": {
+          "object": "PolicyBinding"
+        },
+        "possible_match_evidence_id": null,
+        "reason": null,
+        "resource_id": null,
+        "signature": {
+          "object": "Signature"
+        },
+        "subject_digest": null,
+        "subject_id": null,
+        "subject_kind": null,
+        "subject_store_sequence": null,
+        "verdict": null
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "reason",
+        "evaluated_from",
+        "policy_binding",
+        "current_verdict",
+        "current_policy_set_digest",
+        "flagged_for_review",
+        "matched_evidence_id",
+        "matched_decision_id",
+        "possible_match_evidence_id"
+      ]
+    },
     "JustificationProof": {
       "fields": {
         "decision_id": null,
@@ -345,6 +436,36 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
       },
       "root": true,
       "signature_field": "signatures"
+    },
+    "ObservationRecord": {
+      "fields": {
+        "action": null,
+        "actor": null,
+        "capability": null,
+        "changed_at": "timestamp",
+        "changed_not_after": "timestamp",
+        "changed_not_before": "timestamp",
+        "metadata": "open",
+        "observation_id": null,
+        "observed_at": "timestamp",
+        "observer_sovereign_id": null,
+        "resource_id": null,
+        "signature": {
+          "object": "Signature"
+        },
+        "source": null,
+        "source_event_id": null,
+        "version_id": null
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "changed_at",
+        "changed_not_before",
+        "changed_not_after",
+        "actor",
+        "version_id"
+      ]
     },
     "PolicyBinding": {
       "fields": {
@@ -383,6 +504,70 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "requester_sovereign_ids": null
       }
     },
+    "QuarantineRecord": {
+      "fields": {
+        "detail": null,
+        "issued_by": null,
+        "issuer_sovereign_id": null,
+        "quarantine_id": null,
+        "quarantined_at": "timestamp",
+        "record": "open",
+        "record_digest": null,
+        "record_kind": null,
+        "rejection_code": null,
+        "resource_id": null,
+        "signature": {
+          "object": "Signature"
+        }
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "resource_id"
+      ]
+    },
+    "RegistryRecord": {
+      "fields": {
+        "approved_by": null,
+        "effective_at": "timestamp",
+        "event": null,
+        "executor_sovereign_id": null,
+        "holder": null,
+        "issued_by": null,
+        "issuer_sovereign_id": null,
+        "key_id": null,
+        "key_role": null,
+        "operator_tier": null,
+        "policy_digest": null,
+        "policy_id": null,
+        "policy_version": null,
+        "public_key": null,
+        "reconstructed": null,
+        "recorded_by": null,
+        "registry_record_id": null,
+        "resource_prefix": null,
+        "signature": {
+          "object": "Signature"
+        }
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "reconstructed",
+        "policy_id",
+        "policy_version",
+        "policy_digest",
+        "key_id",
+        "public_key",
+        "executor_sovereign_id",
+        "key_role",
+        "resource_prefix",
+        "operator_tier",
+        "holder",
+        "approved_by",
+        "recorded_by"
+      ]
+    },
     "ResourceHead": {
       "fields": {
         "record_digest": null,
@@ -396,6 +581,7 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "cutoff": "timestamp",
         "issued_by": null,
         "last_removed_entry_digest": null,
+        "observation_heads": "open",
         "previous_checkpoint_id": null,
         "removed_count": null,
         "removed_through_sequence": null,
@@ -407,7 +593,10 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         }
       },
       "root": true,
-      "signature_field": "signature"
+      "signature_field": "signature",
+      "omit_when_none": [
+        "observation_heads"
+      ]
     },
     "Signature": {
       "fields": {

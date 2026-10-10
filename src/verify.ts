@@ -1,4 +1,17 @@
-import { validDecision, validContext, validExecution, validJustification, validCheckpoint, validEvent, timestamp } from './validation.js';
+import {
+  timestamp,
+  validBreakGlass,
+  validCheckpoint,
+  validContext,
+  validDecision,
+  validEvent,
+  validExecution,
+  validJudgement,
+  validJustification,
+  validObservation,
+  validQuarantine,
+  validRegistry,
+} from './validation.js';
 /**
  * Offline verification of NA-signed artifacts and evidence exports.
  * Direct ports of the Python reference with the same reason codes:
@@ -8,7 +21,14 @@ import { validDecision, validContext, validExecution, validJustification, validC
  */
 
 import { compareCodePoints, parseJson, verifyCanonical } from './auth.js';
-import { isKnownEntryKind, nonCanonicalTimestamps, unknownFields, withoutUnknownFields } from './strict.js';
+import {
+  outOfBandCanonical,
+  type BreakGlassRecord,
+  type JudgementRecord,
+  type ObservationRecord,
+  type QuarantineRecord,
+} from './out-of-band.js';
+import { isKnownEntryKind, nonCanonicalFields, unknownFields, withoutUnknownFields } from './strict.js';
 import {
   agreementCanonical,
   attestationCanonical,
@@ -166,7 +186,7 @@ export function verifyBoundaryDecision(
     return reject('unknown_field');
   }
   // v1.2.0: a decision signed over a form the reference does not write.
-  if (nonCanonicalTimestamps('BoundaryDecision', decision).length > 0) return reject('non_canonical_form');
+  if (nonCanonicalFields('BoundaryDecision', decision).length > 0) return reject('non_canonical_form');
 
   const proof = decision.freshness_proof;
   if (proof && options.freshnessProofIssuerKeys && options.freshnessProofIssuerKeys.length > 0) {
@@ -234,6 +254,13 @@ export interface ExecutorKeyInfo {
   key_id: string;
   public_key: string;
   executor_sovereign_id: string;
+  /**
+   * v1.3.0: `executor` (the default) signs execution evidence and break-glass
+   * records; `observer` signs observations only.
+   */
+  role?: 'executor' | 'observer';
+  /** v1.3.0: the key signs only for resources under this prefix (checked by the NA at admission). */
+  resource_prefix?: string | null;
 }
 
 export interface VerifyEvidenceOptions {
@@ -299,6 +326,15 @@ export function verifyEvidenceEvents(
   const contexts = new Map<string, ContextRecord>();
   const lastExec = new Map<string, ExecutionEvidence>();
   const resourceHeads = new Map<string, ResourceHead>(Object.entries(checkpoint?.resource_heads ?? {}));
+  // v1.3.0: observation positions per resource, judged records, matched evidence.
+  const observationHeads = new Map<string, number>(Object.entries(checkpoint?.observation_heads ?? {}));
+  const subjects = new Map<string, { digest: string; sequence: number }>();
+  const judged = new Set<string>();
+  const matched = new Set<string>();
+  const notDecisions = new Set<string>();
+  const counts = { observations: 0, break_glass: 0, judgements: 0, quarantined: 0 };
+  let firstSequence: number | null = null;
+  let fromStart = false;
   let prev: EvidenceEvent['entry'] | null = null;
 
   if (checkpoint && (!validCheckpoint(checkpoint) || !checkpointSigned(checkpoint, options.naPublicKeys))) {
@@ -328,6 +364,10 @@ export function verifyEvidenceEvents(
         fail(seq, 'store_chain_break', 'does not continue from the checkpoint');
       }
     }
+    if (firstSequence === null) {
+      firstSequence = seq;
+      fromStart = seq === 1 || (checkpoint !== null && seq === checkpoint.removed_through_sequence + 1);
+    }
     prev = entry;
     if (!isKnownEntryKind(entry.entry_kind)) {
       // v1.2.0: a kind from a later release; its envelope still chains.
@@ -341,7 +381,22 @@ export function verifyEvidenceEvents(
       continue;
     }
     if (checked.unsigned.length > 0) warn(seq, 'unsigned_field', checked.unsigned.join(', '));
+    if (checked.unsigned.length > 0 && entry.entry_kind in OUT_OF_BAND_MODELS) {
+      // v1.3.0: the reference stores these records exactly as signed; a field outside the
+      // signature is no part of one (the reference refuses it as it reads the record).
+      fail(seq, 'payload_invalid', checked.unsigned.join(', '));
+      continue;
+    }
     const payload = checked.payload;
+    // v1.3.0: a record whose signature covers it as received, in a form the reference
+    // does not write, is refused by name, as the reference refuses it (checked when the
+    // whole record was signed: not after unsigned fields were set aside).
+    const signature = (signed: boolean, model: string, record: unknown, detail: string) => {
+      if (!signed) fail(seq, 'invalid_signature', detail);
+      else if (checked.unsigned.length === 0 && nonCanonicalFields(model, record).length > 0) {
+        fail(seq, 'non_canonical_form', detail);
+      }
+    };
     switch (entry.entry_kind) {
       case 'decision': {
         const decision = payload['decision'];
@@ -350,7 +405,7 @@ export function verifyEvidenceEvents(
           break;
         }
         const model = decision as unknown as BoundaryDecision;
-        if (!verifyDecisionSignature(model, options.naPublicKeys)) fail(seq, 'invalid_signature', 'decision');
+        signature(verifyDecisionSignature(model, options.naPublicKeys), 'BoundaryDecision', model, 'decision');
         result.decisions += 1;
         decisions.set(model.decision_id, model);
         const context = payload['context'];
@@ -366,9 +421,8 @@ export function verifyEvidenceEvents(
           fail(seq, 'payload_invalid');
           break;
         }
-        if (!verifyJustificationSignature(payload as unknown as DecisionJustification, options.naPublicKeys)) {
-          fail(seq, 'invalid_signature', 'justification');
-        }
+        signature(verifyJustificationSignature(payload as unknown as DecisionJustification, options.naPublicKeys),
+          'JustificationProof', payload, 'justification');
         break;
       }
       case 'execution': {
@@ -378,9 +432,10 @@ export function verifyEvidenceEvents(
         }
         const ev = payload as unknown as ExecutionEvidence;
         const key = ev.signature ? executorKeys[ev.signature.key_id] : undefined;
-        if (!key || key.executor_sovereign_id !== ev.executor_sovereign_id || !verifyExecutionSignature(ev, key.public_key)) {
-          fail(seq, 'invalid_signature', 'execution');
-        }
+        // v1.3.0: only an executor key signs execution evidence.
+        signature(!!key && key.executor_sovereign_id === ev.executor_sovereign_id
+          && (key.role ?? 'executor') === 'executor' && verifyExecutionSignature(ev, key.public_key),
+        'ExecutionEvidence', ev, 'execution');
         result.executions += 1;
         const decision = decisions.get(ev.decision_id);
         if (decision) {
@@ -393,6 +448,8 @@ export function verifyEvidenceEvents(
             fail(seq, 'evidence_capability_mismatch');
           }
         }
+        // v1.3.0: execution evidence never rests on a judgement or a record of one.
+        if (notDecisions.has(ev.decision_id)) fail(seq, 'evidence_cites_judgement', ev.decision_id);
         const prior = lastExec.get(ev.decision_id);
         if (prior) {
           if (ev.sequence_no !== prior.sequence_no + 1 || ev.prev_evidence_digest !== executionDigest(prior)) {
@@ -417,22 +474,146 @@ export function verifyEvidenceEvents(
           fail(seq, 'payload_invalid');
           break;
         }
-        if (!verifyRetentionCheckpoint(payload as unknown as RetentionCheckpoint, options.naPublicKeys)) {
-          fail(seq, 'invalid_signature', 'retention_checkpoint');
+        signature(verifyRetentionCheckpoint(payload as unknown as RetentionCheckpoint, options.naPublicKeys),
+          'RetentionCheckpoint', payload, 'retention_checkpoint');
+        break;
+      }
+      case 'observation':
+      case 'break_glass': {
+        const observation = entry.entry_kind === 'observation';
+        if (!(observation ? validObservation(payload) : validBreakGlass(payload))) {
+          fail(seq, 'payload_invalid');
+          break;
         }
+        signature(outOfBandSigned(entry.entry_kind, payload, options.naPublicKeys, executorKeys),
+          OUT_OF_BAND_MODELS[entry.entry_kind]!, payload, entry.entry_kind);
+        const record = payload as unknown as ObservationRecord | BreakGlassRecord;
+        const recordId = observation
+          ? (record as ObservationRecord).observation_id
+          : (record as BreakGlassRecord).break_glass_id;
+        if ((entry.record_id ?? null) !== recordId || entry.resource_id !== record.resource_id) {
+          fail(seq, 'envelope_mismatch', entry.entry_kind);
+        }
+        subjects.set(recordId, { digest: entry.payload_digest, sequence: seq });
+        notDecisions.add(recordId);
+        if (observation) {
+          counts.observations += 1;
+          const resource = record.resource_id;
+          const position = entry.observation_sequence ?? null;
+          if (observationHeads.has(resource) || fromStart) {
+            if (position !== (observationHeads.get(resource) ?? 0) + 1) fail(seq, 'observation_chain_break', resource);
+          }
+          observationHeads.set(resource, position || (observationHeads.get(resource) ?? 0));
+        } else {
+          counts.break_glass += 1;
+        }
+        break;
+      }
+      case 'judgement': {
+        if (!validJudgement(payload)) {
+          fail(seq, 'payload_invalid');
+          break;
+        }
+        signature(outOfBandSigned('judgement', payload, options.naPublicKeys, executorKeys), 'JudgementRecord',
+          payload, 'judgement');
+        const judgement = payload as unknown as JudgementRecord;
+        counts.judgements += 1;
+        notDecisions.add(judgement.judgement_id);
+        if ((entry.subject_id ?? null) !== judgement.subject_id || (entry.record_id ?? null) !== judgement.judgement_id) {
+          fail(seq, 'envelope_mismatch', 'judgement');
+        }
+        if (judged.has(judgement.subject_id)) fail(seq, 'duplicate_judgement', judgement.subject_id);
+        judged.add(judgement.subject_id);
+        const subject = subjects.get(judgement.subject_id);
+        if (subject) {
+          if (subject.digest !== judgement.subject_digest || subject.sequence !== judgement.subject_store_sequence) {
+            fail(seq, 'judgement_subject_mismatch', judgement.subject_id);
+          }
+        } else if (contiguous && firstSequence !== null && judgement.subject_store_sequence >= firstSequence) {
+          fail(seq, 'judgement_subject_missing', judgement.subject_id);
+        }
+        const match = judgement.matched_evidence_id;
+        if (match !== undefined && match !== null) {
+          if (matched.has(match)) fail(seq, 'match_reused', match);
+          matched.add(match);
+        }
+        break;
+      }
+      case 'quarantine': {
+        if (!validQuarantine(payload)) {
+          fail(seq, 'payload_invalid');
+          break;
+        }
+        signature(outOfBandSigned('quarantine', payload, options.naPublicKeys, executorKeys), 'QuarantineRecord',
+          payload, 'quarantine');
+        counts.quarantined += 1;
+        const quarantine = payload as unknown as QuarantineRecord;
+        if (payloadDigest(quarantine.record) !== quarantine.record_digest) fail(seq, 'quarantine_digest_mismatch');
+        break;
+      }
+      case 'registry': {
+        if (!validRegistry(payload)) {
+          fail(seq, 'payload_invalid');
+          break;
+        }
+        signature(outOfBandSigned('registry', payload, options.naPublicKeys, executorKeys), 'RegistryRecord',
+          payload, 'registry');
         break;
       }
       default:
         fail(seq, 'unknown_entry_kind', String(entry.entry_kind));
     }
   }
+  for (const [name, count] of Object.entries(counts)) {
+    if (count > 0) result[name as keyof typeof counts] = count;
+  }
   return result;
+}
+
+/** v1.3.0: the model each Stage 2 entry kind holds. */
+const OUT_OF_BAND_MODELS: Record<string, string> = {
+  observation: 'ObservationRecord',
+  break_glass: 'BreakGlassRecord',
+  judgement: 'JudgementRecord',
+  quarantine: 'QuarantineRecord',
+  registry: 'RegistryRecord',
+};
+
+/** Kinds signed by a registered key, and the role that key must have; the other Stage 2 kinds are signed by the NA. */
+const KEY_ROLES: Record<string, 'executor' | 'observer'> = { observation: 'observer', break_glass: 'executor' };
+
+/** The keys that may sign a Stage 2 record: the registered key it names (with the right sovereign and role), or the NA's. */
+function outOfBandKeys(
+  kind: string,
+  payload: Record<string, unknown>,
+  naPublicKeys: readonly string[],
+  executorKeys: Record<string, ExecutorKeyInfo>,
+): readonly string[] {
+  const role = KEY_ROLES[kind];
+  if (role === undefined) return naPublicKeys;
+  const signature = payload['signature'] as Signature | null | undefined;
+  const key = signature && typeof signature.key_id === 'string' ? executorKeys[signature.key_id] : undefined;
+  const sovereign = kind === 'observation' ? payload['observer_sovereign_id'] : payload['executor_sovereign_id'];
+  return key && key.executor_sovereign_id === sovereign && (key.role ?? 'executor') === role ? [key.public_key] : [];
+}
+
+/** Whether a Stage 2 record's signature covers it as received, under the key that may sign it. */
+function outOfBandSigned(
+  kind: string,
+  payload: Record<string, unknown>,
+  naPublicKeys: readonly string[],
+  executorKeys: Record<string, ExecutorKeyInfo>,
+): boolean {
+  return signedBy(outOfBandCanonical(payload), payload['signature'] as Signature | null | undefined,
+    outOfBandKeys(kind, payload, naPublicKeys, executorKeys))
+    && unknownFields(OUT_OF_BAND_MODELS[kind]!, payload).length === 0;
 }
 
 const PAYLOAD_MODELS: Record<string, string> = {
   justification: 'JustificationProof',
   execution: 'ExecutionEvidence',
   retention_checkpoint: 'RetentionCheckpoint',
+  ...OUT_OF_BAND_MODELS,
 };
 
 interface CheckedPayload {
@@ -478,6 +659,13 @@ function checkPayloadFields(
   } else if (kind === 'justification') {
     signedAsReceived = signedBy(justificationCanonical(payload as unknown as DecisionJustification),
       (payload as unknown as DecisionJustification).signature, naPublicKeys);
+  } else if (kind in OUT_OF_BAND_MODELS) {
+    // The key the signature names, whatever its role: an authentic record with a field this SDK
+    // does not know is refused by name first, as the reference refuses it.
+    const signature = payload['signature'] as Signature | null | undefined;
+    const named = signature && typeof signature.key_id === 'string' ? executorKeys[signature.key_id] : undefined;
+    const keys = KEY_ROLES[kind] === undefined ? naPublicKeys : named ? [named.public_key] : [];
+    signedAsReceived = signedBy(outOfBandCanonical(payload), signature, keys);
   } else {
     signedAsReceived = checkpointSigned(payload as unknown as RetentionCheckpoint, naPublicKeys);
   }
@@ -530,7 +718,7 @@ export function verifyAgreement(
   // v1.2.0: an authentic agreement with a signed field this SDK does not know.
   if (unknownFields('AgreementRecord', record).length > 0) return result(false, 'unknown_field');
   // v1.2.0: an agreement signed over a form the reference does not write.
-  if (nonCanonicalTimestamps('AgreementRecord', record).length > 0) return result(false, 'non_canonical_form');
+  if (nonCanonicalFields('AgreementRecord', record).length > 0) return result(false, 'non_canonical_form');
   return result(true, 'accepted');
 }
 
@@ -540,7 +728,7 @@ export function verifyAgreement(
 export function verifyDataLicensePolicySignature(policy: DataLicensePolicy, licensorPublicKeys: readonly string[]): boolean {
   return signedBy(dataLicensePolicyCanonical(policy), policy.signature, licensorPublicKeys)
     && unknownFields('DataLicensePolicy', policy).length === 0
-    && nonCanonicalTimestamps('DataLicensePolicy', policy).length === 0;
+    && nonCanonicalFields('DataLicensePolicy', policy).length === 0;
 }
 
 export type DataUsageViolationType =
@@ -581,19 +769,19 @@ export function verifyDataAccessIntent(
   // v1.2.0: fields this SDK does not know, and forms the reference does not
   // write, as the reference reports them.
   const intentUnknown = unknownFields('DataAccessIntent', intent);
-  const intentLoose = nonCanonicalTimestamps('DataAccessIntent', intent);
+  const intentLoose = nonCanonicalFields('DataAccessIntent', intent);
   if ((intentUnknown.length > 0 || intentLoose.length > 0)
     && !signedBy(dataAccessIntentCanonical(intent), intent.signature, agentPublicKeys)) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: 'Invalid intent signature' }]);
   }
-  const unknown = [...intentUnknown, ...unknownFields('DataLicensePolicy', policy, 'policy.')].sort();
+  const unknown = [...intentUnknown, ...unknownFields('DataLicensePolicy', policy, 'policy.')].sort(compareCodePoints);
   if (unknown.length > 0) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: `Unknown field: ${unknown.join(', ')}` }]);
   }
   if (intentLoose.length > 0) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: 'Not in canonical form: intent' }]);
   }
-  if (nonCanonicalTimestamps('DataLicensePolicy', policy).length > 0) {
+  if (nonCanonicalFields('DataLicensePolicy', policy).length > 0) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: 'Not in canonical form: policy' }]);
   }
   if (!intent.signature) return fail([{ violation_type: 'intent_exceeds_license', detail: 'Missing intent signature' }]);

@@ -6,7 +6,7 @@
 
 import { buildAdminHeadersWithSigner, canonicalJson, parseJson, seedSigner, type Signer } from './auth.js';
 import { fromHttpError, GenesisMeshError, NetworkError } from './errors.js';
-import type { EvidenceOutbox } from './outbox.js';
+import type { EvidenceOutbox, RecordOutbox } from './outbox.js';
 import { decodeUtf8, StrictJsonError } from './strict-json.js';
 
 /** JSON refused for its form (a duplicate key, ...): the reason is kept; a body that is not JSON stays a NetworkError. */
@@ -57,6 +57,13 @@ export interface ClientOptions {
    * `evidenceStore.flushPending`.
    */
   outbox?: EvidenceOutbox;
+  /**
+   * Durable storage for signed observations and break-glass records not yet
+   * admitted (v1.3.0), e.g. `new FileRecordOutbox('/var/lib/app/gm-records')`,
+   * in a directory of its own. `governedAction` with `breakGlass` needs one;
+   * see `evidenceStore.flushRecords`.
+   */
+  recordOutbox?: RecordOutbox;
 }
 
 export type Query = Record<string, string | number | boolean | undefined | null>;
@@ -239,7 +246,8 @@ export class HttpTransport {
       // The bytes, so a body that is not UTF-8 is refused rather than repaired.
       body = typeof res.arrayBuffer === 'function' ? await res.arrayBuffer() : await res.text();
     } catch {
-      throw new NetworkError(`Failed to read response body (${spec.method} ${spec.path})`);
+      // The NA answered: whatever it did is done. Named apart from a request that never arrived.
+      throw new NetworkError(`Failed to read response body (${spec.method} ${spec.path})`, 'response_body_unreadable');
     }
     return { ok: res.ok, status: res.status, text: async () => (typeof body === 'string' ? body : decodeUtf8(body)) };
   }
@@ -299,6 +307,7 @@ export class HttpTransport {
     } catch (err) {
       const error = new NetworkError(`${spec.method} ${spec.path} failed: ${(err as Error).message}`);
       error.connectFailed = isConnectFailure(err);
+      error.cause = err;
       throw error;
     }
   }
@@ -335,7 +344,7 @@ export class HttpTransport {
       if (!response.ok) {
         throw new GenesisMeshError(`HTTP ${response.status} with a non-JSON body`, 'unknown', response.status);
       }
-      throw new NetworkError(`Failed to parse response body (HTTP ${response.status})`);
+      throw new NetworkError(`Failed to parse response body (HTTP ${response.status})`, 'response_body_unreadable');
     }
     if (!response.ok) {
       throw fromHttpError(response.status, (data ?? {}) as Record<string, unknown>);

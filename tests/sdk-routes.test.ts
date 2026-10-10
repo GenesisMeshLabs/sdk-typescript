@@ -41,6 +41,16 @@ const routes: Route[] = [
   { name: 'executor register', method: 'POST', path: '/admin/evidence/executor-keys', admin: true, body: v.executor_keys[0], call: gm => gm.evidenceStore.registerExecutorKey(v.executor_keys[0]) },
   { name: 'executor retire', method: 'POST', path: '/admin/evidence/executor-keys/a%2Fb/retire', admin: true, body: {}, call: gm => gm.evidenceStore.retireExecutorKey('a/b') },
   { name: 'retention', method: 'POST', path: '/admin/evidence/retention/apply', admin: true, body: { older_than_days: 30 }, call: gm => gm.evidenceStore.applyRetention(30) },
+  // v1.3.0: changes outside the controlled path.
+  { name: 'submit observation', method: 'POST', path: '/evidence/observations', admin: false, body: { observation: { observation_id: 'o' } }, call: gm => gm.evidenceStore.submitObservation({ observation_id: 'o' } as never) },
+  { name: 'submit observations', method: 'POST', path: '/evidence/observations/batch', admin: false, body: { observations: [{ observation_id: 'o' }] }, response: { results: [{ index: 0, status: 'recorded' }] }, expected: [{ index: 0, status: 'recorded' }], call: gm => gm.evidenceStore.submitObservations([{ observation_id: 'o' } as never]) },
+  { name: 'submit break-glass', method: 'POST', path: '/evidence/break-glass', admin: false, body: { record: { break_glass_id: 'b' } }, call: gm => gm.evidenceStore.submitBreakGlass({ break_glass_id: 'b' } as never) },
+  { name: 'judge observation', method: 'POST', path: '/admin/evidence/observations/a%2Fb/judge', admin: true, body: {}, call: gm => gm.evidenceStore.judgeObservation('a/b') },
+  { name: 'judge break-glass', method: 'POST', path: '/admin/evidence/break-glass/a%2Fb/judge', admin: true, body: {}, call: gm => gm.evidenceStore.judgeBreakGlass('a/b') },
+  { name: 'resource changes', method: 'GET', path: '/admin/evidence/changes/kv%3Avault/name%20%23', admin: true, call: gm => gm.evidenceStore.resourceChanges('kv:vault/name #') },
+  { name: 'operator holders', method: 'GET', path: '/admin/evidence/operator-holders', admin: true, response: { holders: [{ key_id: 'k' }] }, expected: [{ key_id: 'k' }], call: gm => gm.evidenceStore.operatorHolders() },
+  { name: 'propose holder', method: 'POST', path: '/admin/operator-keys/a%2Fb/holder', admin: true, body: { holder: 'team-b' }, call: gm => gm.evidenceStore.proposeHolder('a/b', 'team-b') },
+  { name: 'approve holder', method: 'POST', path: '/admin/operator-keys/holder-changes/p%2F1/approve', admin: true, body: {}, call: gm => gm.evidenceStore.approveHolder('p/1') },
 ];
 
 describe.each(routes)('$name', route => {

@@ -82,6 +82,12 @@ describe('offline evidence export', () => {
   it.each(['null', '{}', '{"schema":"gm.evidence.event","schema_version":1}', '{"schema":"gm.evidence.event","schema_version":2}', 'invalid'])('rejects malformed export %s', text => {
     expect(() => parseExportLines(text)).toThrow();
   });
+  it('reports, rather than throws on, a decision entry without its context (1.3.0)', () => {
+    const [first, ...rest] = parseExportLines(v.export);
+    const payload = { decision: (first!.payload as Record<string, unknown>)['decision'], extra: 1 };
+    const result = verifyEvidenceEvents([{ ...first!, payload }, ...rest], { ...options, contiguous: false });
+    expect(result.failures.map(f => f.reason)).toContain('payload_digest_mismatch');
+  });
   it('returns a failure for a malformed event passed directly', () => {
     expect(verifyEvidenceEvents([{} as EvidenceEvent], options)).toMatchObject({ verified: false, failures: [{ reason: 'payload_invalid' }] });
   });

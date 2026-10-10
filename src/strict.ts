@@ -14,6 +14,7 @@
  * reference page "Canonical Form of Signed Records".
  */
 
+import { cloneJson, compareCodePoints } from './auth.js';
 import { CANONICAL_REGISTRY } from './canonical-registry.js';
 
 /**
@@ -83,7 +84,7 @@ function collect(model: string, data: unknown, path: Step[], projection: boolean
 export function unknownFields(model: string, record: unknown, path = ''): string[] {
   const found: Step[][] = [];
   collect(model, record, [], true, found);
-  return found.map(steps => path + steps.join('.')).sort();
+  return found.map(steps => path + steps.join('.')).sort(compareCodePoints);
 }
 
 /** True when this SDK knows the evidence entry kind. */
@@ -103,7 +104,8 @@ export function canonicalFieldsOf(model: string): readonly string[] {
 
 /** A copy of `record` without its unknown signed fields (used to verify what the signer did sign). */
 export function withoutUnknownFields<T>(model: string, record: T): T {
-  const copy = JSON.parse(JSON.stringify(record)) as T;
+  if (record === undefined || record === null) return record;
+  const copy = cloneJson(record);
   const found: Step[][] = [];
   collect(model, copy, [], true, found);
   for (const steps of found) {
@@ -162,5 +164,41 @@ export function nonCanonicalTimestamps(model: string, record: unknown, path = ''
     }
   };
   walk(model, record, path, true);
-  return found.sort();
+  return found.sort(compareCodePoints);
+}
+
+/**
+ * Dotted paths, sorted, where `record`'s signed projection differs from the
+ * form the reference writes (v1.3.0): timestamps not in canonical form
+ * (`nonCanonicalTimestamps`), and a field the reference always writes left
+ * out (a field it leaves out when absent reads the same as `null`). A record
+ * signed over such a form is refused as `non_canonical_form`, as the
+ * reference refuses it.
+ */
+export function nonCanonicalFields(model: string, record: unknown, path = ''): string[] {
+  const found = nonCanonicalTimestamps(model, record, path);
+  const walk = (name: string, data: unknown, prefix: string, projection: boolean) => {
+    const s = CANONICAL_REGISTRY.models[name];
+    if (!s || !isRecord(data)) return;
+    const omitted = new Set(s.omit_when_none ?? []);
+    for (const [key, kind] of Object.entries(s.fields)) {
+      if (projection && outsideProjection(s, key)) continue;
+      const present = Object.prototype.hasOwnProperty.call(data, key);
+      const value = present ? data[key] : undefined;
+      if (!present && !omitted.has(key)) {
+        found.push(prefix + key);
+        continue;
+      }
+      if (value === null || value === undefined || kind === null || typeof kind !== 'object') continue;
+      if ('object' in kind) {
+        walk(kind.object, value, `${prefix}${key}.`, false);
+      } else if ('list' in kind && Array.isArray(value)) {
+        value.forEach((item, i) => walk(kind.list, item, `${prefix}${key}.${i}.`, false));
+      } else if ('map' in kind && isRecord(value)) {
+        for (const [k, item] of Object.entries(value)) walk(kind.map, item, `${prefix}${key}.${k}.`, false);
+      }
+    }
+  };
+  walk(model, record, path, true);
+  return [...new Set(found)].sort(compareCodePoints);
 }

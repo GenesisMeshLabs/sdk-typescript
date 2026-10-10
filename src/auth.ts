@@ -99,6 +99,44 @@ export function parseJson(text: string): unknown {
   });
 }
 
+/**
+ * Set `key` on a copy without invoking a setter: a received `"__proto__"`
+ * key stays a key, as JSON.parse keeps it, rather than setting the prototype.
+ */
+export function defineMember(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
+/**
+ * Carry the float spellings `parseJson` recorded for `from` over to a copy
+ * holding some of its members (v1.3.0): `1000.0` stays `1000.0` in the
+ * copy's canonical JSON.
+ */
+export function copyPythonFloats(from: object, to: object): void {
+  const keys = PYTHON_FLOATS.get(from);
+  if (keys) PYTHON_FLOATS.set(to, new Set(keys));
+}
+
+/**
+ * A deep copy of parsed JSON that keeps what `parseJson` keeps: float
+ * spellings, `bigint` integers and `"__proto__"` keys (v1.3.0). `undefined`
+ * stays `undefined`.
+ */
+export function cloneJson<T>(value: T): T {
+  if (Array.isArray(value)) {
+    const copy = value.map(item => cloneJson(item));
+    copyPythonFloats(value, copy);
+    return copy as T;
+  }
+  if (typeof value === 'object' && value !== null) {
+    const copy: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) defineMember(copy, key, cloneJson(item));
+    copyPythonFloats(value, copy);
+    return copy as T;
+  }
+  return value;
+}
+
 function canonicalMember(holder: object, key: string, value: unknown): string {
   if (typeof value === 'number') return pythonNumber(value, PYTHON_FLOATS.get(holder)?.has(key) ?? false);
   return canonicalJson(value);
