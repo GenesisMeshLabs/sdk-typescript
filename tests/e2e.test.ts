@@ -271,7 +271,9 @@ suite('SDK against a live Python Network Authority', () => {
     await expect(gm.evidenceStore.submit(badHead)).rejects.toBeInstanceOf(ConflictError);
     await gm.evidenceStore.retireExecutorKey(id);
     const retired = await recorder.record({ decision: evaluation.decision, executed_capability: 'sdk.run', outcome: 'success' });
-    await expect(gm.evidenceStore.submit(retired)).rejects.toMatchObject({ code: 'evidence_unknown_executor' });
+    // 1.3.0 names a retired key (evidence_executor_key_retired); a 1.2 core does not.
+    const refusal = await gm.evidenceStore.submit(retired).then(() => null, (e: { code: string }) => e.code);
+    expect(['evidence_executor_key_retired', 'evidence_unknown_executor']).toContain(refusal);
     expect((await gm.policy.deactivate(id, first.version)).active).toBe(false);
     expect(verifyBoundaryDecision((await gm.boundary.evaluate(request)).decision, params.verify)).toMatchObject({ accepted: false, reason: 'policy_binding_mismatch' });
   }, 30_000);
