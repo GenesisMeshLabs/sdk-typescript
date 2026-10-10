@@ -251,12 +251,23 @@ export interface VerifyEvidenceOptions {
   checkpoint?: RetentionCheckpoint | null;
 }
 
+const JSON_SPACE = ' \t\r\n';
+
+/** `s` without JSON whitespace at either end, as every implementation trims a line (`trim()` also removes other spaces). */
+function trimJsonSpace(s: string): string {
+  let start = 0;
+  let end = s.length;
+  while (start < end && JSON_SPACE.includes(s[start]!)) start++;
+  while (end > start && JSON_SPACE.includes(s[end - 1]!)) end--;
+  return s.slice(start, end);
+}
+
 /** Parse `gm.evidence.event` JSON Lines (blank lines ignored). */
 export function parseExportLines(text: string | Iterable<string>): EvidenceEvent[] {
   const lines = typeof text === 'string' ? text.split('\n') : text;
   const events: EvidenceEvent[] = [];
   for (const raw of lines) {
-    const line = raw.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, ''); // JSON whitespace only, as every implementation
+    const line = trimJsonSpace(raw);
     if (!line) continue;
     const event = parseJson(line) as EvidenceEvent;
     if (!validEvent(event)) throw new Error('invalid evidence event envelope or unsupported schema');

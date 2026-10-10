@@ -91,4 +91,10 @@ describe('canonical conformance suite', () => {
     expect(() => parseExportLines('\u00a0{}')).toThrow(StrictJsonError);
     expect(() => parseExportLines('\ufeff{}')).toThrow(StrictJsonError);
   });
+
+  it('trims a long run of whitespace in linear time', () => {
+    const started = Date.now();
+    expect(() => parseExportLines('\t'.repeat(200_000) + 'x')).toThrow(StrictJsonError);
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
 });
