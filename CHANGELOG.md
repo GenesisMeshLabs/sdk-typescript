@@ -40,6 +40,32 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 - `unknownFields(model, record)` and `isKnownEntryKind(kind)`;
   `npm run sync:registry` regenerates the embedded registry from a new copy
   of the suite.
+- **An evidence outbox keeps signed evidence until the NA admits it.** With
+  `ClientOptions.outbox`, `governedAction` writes each signed record to the
+  outbox before submitting it and removes it once admitted. A failed
+  submission then does not throw: the result's `queued` is the outbox entry,
+  `pending` after a failure a later attempt can overcome (network, timeout,
+  `5xx`, `429`, an executor key not registered yet, a chain gap, a disabled
+  store, a proxy's error page) or `dead_letter` with the code after a refusal
+  no retry can overcome. Dead letters are kept, never dropped. A resource with
+  pending records chains from the newest of them, which the next action on it
+  submits first. Without an outbox, `governedAction` behaves as in 1.1.
+- `FileOutbox` (one file per record, synced and renamed into place, crash
+  leftovers recovered, private permissions on POSIX), `MemoryOutbox` for tests,
+  and the `EvidenceOutbox` interface for other storage.
+- `evidenceStore.flushPending()`: submits pending records in order, waits
+  behind pending predecessors, dead-letters records whose predecessor was
+  refused, and backs off from 5 s to 15 minutes. `evidenceStore.enqueue()` and
+  `evidenceStore.pendingHead()`.
+- With an outbox, a secret-guard refusal of the metadata an action reported
+  still records the outcome, with the accepted parameters and a note naming
+  the dropped ones, and throws `MetadataRefusedError`
+  (`governed_action_metadata_refused`) with the action's `value`, the
+  `evidence` and what became of it. `EvidenceNotKeptError`
+  (`governed_action_evidence_unkept`): the action ran but its evidence could
+  not be signed or kept; carries the `value` and the signed `evidence`.
+- `GovernedActionError` carries the signed failure record as `evidence` when
+  there is one.
 
 ## [1.1.1] - 2026-10-09
 

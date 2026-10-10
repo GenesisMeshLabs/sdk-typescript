@@ -30,7 +30,7 @@ export class GenesisMeshClient {
     this.boundary      = new BoundaryClient(http);
     this.policy        = new PolicyClient(http);
     this.evidence      = new EvidenceClient(http);
-    this.evidenceStore = new EvidenceStoreClient(http);
+    this.evidenceStore = new EvidenceStoreClient(http, options.outbox);
     this.health        = new HealthClient(http);
     this.attestation   = new AttestationClient(http);
     this.disclosure    = new DisclosureClient(http);
@@ -135,8 +135,29 @@ export {
   summarizeDecision,
   reconcileResources,
   GovernedActionError,
+  MetadataRefusedError,
+  EvidenceNotKeptError,
   DecisionVerificationError,
+  withoutRefusedMetadata,
 } from './governance.js';
+
+// Evidence outbox (v1.2.0)
+export {
+  FileOutbox,
+  MemoryOutbox,
+  classifySubmissionError,
+  retryDelayMs,
+  PREDECESSOR_DEAD_LETTERED,
+  PERMANENT_REFUSALS,
+} from './outbox.js';
+export type {
+  EvidenceOutbox,
+  OutboxEntry,
+  Delivery,
+  SubmissionFailure,
+  FlushResult,
+  FlushOptions,
+} from './outbox.js';
 export type {
   ActionReport,
   DecisionSummary,

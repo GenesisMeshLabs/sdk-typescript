@@ -6,6 +6,7 @@
 
 import { buildAdminHeadersWithSigner, canonicalJson, parseJson, seedSigner, type Signer } from './auth.js';
 import { fromHttpError, GenesisMeshError, NetworkError } from './errors.js';
+import type { EvidenceOutbox } from './outbox.js';
 
 export interface RetryOptions {
   /** Extra attempts after the first. 0 disables retries. */
@@ -45,6 +46,13 @@ export interface ClientOptions {
   headers?: Record<string, string>;
   /** Override fetch implementation for testing. */
   fetch?: typeof globalThis.fetch;
+  /**
+   * Durable storage for signed execution records not yet admitted (v1.2.0),
+   * e.g. `new FileOutbox('/var/lib/app/gm-outbox')`. With one,
+   * `governedAction` keeps every record until the NA admits it; see
+   * `evidenceStore.flushPending`.
+   */
+  outbox?: EvidenceOutbox;
 }
 
 export type Query = Record<string, string | number | boolean | undefined | null>;
