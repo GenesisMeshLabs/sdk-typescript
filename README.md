@@ -54,6 +54,12 @@ evidence outbox (`ClientOptions.outbox`, e.g. a `FileOutbox`), signed evidence
 the NA has not admitted is kept until `client.evidenceStore.flushPending()`
 submits it.
 
+An observer records each source event once: the `ObservationRecorder` derives
+`observation_id` from the observer, `source` and `source_event_id` (1.3.1), so
+recording an event again signs the same record and the NA answers `duplicate`.
+If you set your own IDs, derive them from the event the same way rather than
+generating new ones.
+
 ## Sub-clients
 
 ### agreement
@@ -282,7 +288,7 @@ try {
   await client.agreement.offer({ ... });
 } catch (err) {
   if (err instanceof UnauthorizedError) { /* bad signing key or stale timestamp */ }
-  if (err instanceof RateLimitError)    { /* back off and retry */ }
+  if (err instanceof RateLimitError)    { /* back off: err.retryAfterSeconds (1.3.1) says how long */ }
   if (err instanceof ValidationError)   { /* inspect err.message and err.code */ }
   if (err instanceof NetworkError)      { /* connection refused or timeout */ }
 }
@@ -303,7 +309,9 @@ The SDK handles all of this automatically when `signingKeyBase64` (or a `signer`
 is provided. Signature version 2 (1.0.2) binds each signature to the HTTP method,
 the decoded request path, the query parameters and the target NA's public key
 (`audience`). The client reads it (`network_authority.public_key`) once from the
-NA's public `/sovereign.json`, or uses the `audience` client option.
+NA's public `/sovereign.json`, or uses the `audience` client option. A lookup
+that gets no answer throws `NetworkError`; any answer without the key throws
+`na_public_key_unavailable` with that answer's HTTP status (1.3.1).
 
 ## Build
 

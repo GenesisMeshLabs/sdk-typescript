@@ -12,11 +12,11 @@ import {
 } from './out-of-band.js';
 import {
   classifySubmissionError,
+  nextAttemptAt,
   outboxEntry,
   PREDECESSOR_DEAD_LETTERED,
   RECORD_PERMANENT_REFUSALS,
   recordOutboxEntry,
-  retryDelayMs,
   type Delivery,
   type EvidenceOutbox,
   type FlushOptions,
@@ -24,7 +24,9 @@ import {
   type OutboxEntry,
   type RecordOutbox,
   type RecordOutboxEntry,
+  type SubmissionFailure,
 } from './outbox.js';
+import { timestampOrder } from './validation.js';
 import { parseExportLines } from './verify.js';
 import type {
   EntryKind,
@@ -193,17 +195,22 @@ export interface RecordFlushResult {
 /** Most observations one batch request carries. */
 const OBSERVATION_BATCH = 100;
 
-/** Latest successful state of one resource, from its execution history. */
+/** Latest state of one resource, from its execution history and (1.3.1) its break-glass records. */
 export interface ResourceState {
   resource_id: string;
+  /** The newest execution record's position on the resource chain; 0 when it has only break-glass records. */
   resource_sequence: number;
+  /** The newest execution record's digest; empty when it has only break-glass records. */
   record_digest: string;
   last_action: string | null;
   last_outcome: string;
   last_success_action: string | null;
   last_success_parameters: Record<string, unknown> | null;
   last_executed_at: string;
+  /** The newest execution record's decision; empty when it has only break-glass records. */
   last_decision_id: string;
+  /** The break-glass record of the latest change, when it was one (1.3.1). */
+  last_break_glass_id?: string;
 }
 
 const MAX_PAGE = 1000;
@@ -220,10 +227,52 @@ function predecessors(evidence: ExecutionEvidence): string[] {
 /** Most pending records an action submits before its own (older ones wait for `flushPending`). */
 const MAX_INLINE_DRAIN = 100;
 
+/** Refusals of a record whose predecessor is not stored: final once that predecessor is a dead letter (1.3.1). */
+const CHAIN_GAPS: ReadonlySet<string> = new Set(['evidence_chain_gap', 'resource_chain_gap']);
+
+/**
+ * The flush in progress of one outbox, and what it tries: every due entry
+ * (`full`, or only an action's own drain), and entries in backoff too.
+ */
+class FlushSlot<R> {
+  private run: { result: Promise<R>; full: boolean; ignoreBackoff: boolean } | null = null;
+
+  get busy(): boolean {
+    return this.run !== null;
+  }
+
+  /** Make `result` the flush in progress until it settles. */
+  track(result: Promise<R>, full: boolean, ignoreBackoff: boolean): Promise<R> {
+    const run = { result, full, ignoreBackoff };
+    this.run = run;
+    const done = () => { if (this.run === run) this.run = null; };
+    result.then(done, done);
+    return result;
+  }
+
+  /**
+   * Join the flush in progress when it tries everything `options` asks for;
+   * otherwise let it finish and start one that does (1.3.1: a caller never
+   * gets the result of an action's partial drain, nor of a run that kept the
+   * backoff it asked to ignore).
+   */
+  async join(options: FlushOptions, start: () => Promise<R>): Promise<R> {
+    for (let run = this.run; run; run = this.run) {
+      if (run.full && (run.ignoreBackoff || !options.ignoreBackoff)) return run.result;
+      await run.result.catch(() => undefined);
+    }
+    return this.track(start(), true, !!options.ignoreBackoff);
+  }
+}
+
 /** The NA evidence store (v0.59): controller submission, operator search, history, export. */
 export class EvidenceStoreClient {
-  private flushing: Promise<FlushResult> | null = null;
-  private flushingRecords: Promise<RecordFlushResult> | null = null;
+  private readonly flushing = new FlushSlot<FlushResult>();
+  private readonly flushingRecords = new FlushSlot<RecordFlushResult>();
+  /** Most observations a batch carries: halved each time the NA throttles one (`429`, 1.3.1). */
+  private observationBatch = OBSERVATION_BATCH;
+  /** Until when the NA asked for no more records (`Retry-After`, 1.3.1): `flushRecords` waits unless `ignoreBackoff`. */
+  private recordsPausedUntil = 0;
   /** Digests of outbox records by id: a record never changes once signed. */
   private readonly digests = new Map<string, string>();
   /** Records `enqueue` is submitting right now: a concurrent flush leaves them to it. */
@@ -259,7 +308,10 @@ export class EvidenceStoreClient {
    * older ones wait for `flushPending`). A failed submission does not throw:
    * a transient error leaves the record pending for `flushPending`, and a
    * refusal no retry can overcome keeps it as a dead letter with the NA's
-   * code, as does a predecessor's refusal. Throws only when the outbox
+   * code. A record whose predecessor was refused is still sent (1.3.1), so
+   * the NA can quarantine it when it refuses it for good too; refused only
+   * for the gap its predecessor left, it is a dead letter
+   * (`evidence_predecessor_dead_lettered`). Throws only when the outbox
    * cannot store the record. Passing a record already in the outbox submits
    * it again.
    */
@@ -276,9 +328,8 @@ export class EvidenceStoreClient {
       entries.push(entry);
     }
     if (entry.state === 'dead_letter') return { queued: entry };
-    const chain = this.chainOf(entries, entry);
-    if (chain.dead) return { queued: await this.deadLetter(outbox, entries, entry, PREDECESSOR_DEAD_LETTERED) };
-    if (!chain.pending.length) {
+    const pending = this.pendingBefore(entries, entry);
+    if (!pending.length) {
       this.inFlight.add(entry.id);
       try {
         return await this.attempt(outbox, entries, entry);
@@ -286,26 +337,27 @@ export class EvidenceStoreClient {
         this.inFlight.delete(entry.id);
       }
     }
-    if (this.flushing || chain.pending.length > MAX_INLINE_DRAIN) return { queued: entry };
-    const only = new Set([...chain.pending.map(e => e.id), entry.id]);
+    if (this.flushing.busy || pending.length > MAX_INLINE_DRAIN) return { queued: entry };
+    const only = new Set([...pending.map(e => e.id), entry.id]);
     const run = this.flush(outbox, { ignoreBackoff: true }, only);
-    this.flushing = run.then(r => r.result).finally(() => { this.flushing = null; });
+    this.flushing.track(run.then(r => r.result), false, true);
     const { outcomes } = await run;
     return outcomes.get(entry.id) ?? { queued: entry };
   }
 
   /**
    * Submit the outbox's pending records in the order they were added
-   * (v1.2.0). A record waits while one it chains from is pending, and is
-   * dead-lettered (`evidence_predecessor_dead_lettered`) when that one was
-   * refused. Records in backoff are skipped unless `ignoreBackoff`; a
-   * transient error ends the run, leaving the rest for the next one. Run it
-   * at startup and on a timer. Concurrent calls share one run.
+   * (v1.2.0). A record waits while one it chains from is pending. A record
+   * whose predecessor was refused is sent too (1.3.1), and is dead-lettered
+   * (`evidence_predecessor_dead_lettered`) when the NA refuses it for that
+   * gap. Records in backoff are skipped unless `ignoreBackoff`; a transient
+   * error ends the run, leaving the rest for the next one. Run it at startup
+   * and on a timer. A call joins the run in progress when that run tries
+   * everything it asks for, and otherwise starts one once it ends.
    */
   async flushPending(options: FlushOptions = {}): Promise<FlushResult> {
     const outbox = this.requireOutbox();
-    this.flushing ??= this.flush(outbox, options).then(r => r.result).finally(() => { this.flushing = null; });
-    return this.flushing;
+    return this.flushing.join(options, () => this.flush(outbox, options).then(r => r.result));
   }
 
   /**
@@ -346,10 +398,9 @@ export class EvidenceStoreClient {
     return dead;
   }
 
-  /** Whether `entry` chains from a dead letter, and the pending records it chains from, oldest first. */
-  private chainOf(entries: readonly OutboxEntry[], entry: OutboxEntry): { dead: boolean; pending: OutboxEntry[] } {
+  /** The pending records `entry` chains from, oldest first. */
+  private pendingBefore(entries: readonly OutboxEntry[], entry: OutboxEntry): OutboxEntry[] {
     const byDigest = new Map(entries.map(e => [this.digestOf(e), e]));
-    const dead = this.deadDigests(entries);
     const pending: OutboxEntry[] = [];
     const seen = new Set<string>();
     const visit = (e: OutboxEntry) => {
@@ -364,31 +415,20 @@ export class EvidenceStoreClient {
     visit(entry);
     const order = new Map(entries.map((e, i) => [e.id, i]));
     pending.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
-    return { dead: predecessors(entry.evidence).some(d => dead.has(d)), pending };
+    return pending;
   }
 
-  /** Dead-letter `entry` and every pending record that chains from it. */
+  /**
+   * Dead-letter `entry`. Records that chain from it stay pending (1.3.1):
+   * each is sent in turn, so the NA quarantines one it refuses for good, and
+   * one it refuses only for the gap is dead-lettered then.
+   */
   private async deadLetter(
-    outbox: EvidenceOutbox, entries: OutboxEntry[], entry: OutboxEntry, code: string, failure?: OutboxEntry['last_error'],
+    outbox: EvidenceOutbox, entries: OutboxEntry[], entry: OutboxEntry, failure: SubmissionFailure,
   ): Promise<OutboxEntry> {
-    const refused: OutboxEntry = {
-      ...entry, state: 'dead_letter', next_attempt_at: null,
-      last_error: failure ?? { status: 0, code, message: 'a record this one chains from was refused' },
-    };
+    const refused: OutboxEntry = { ...entry, state: 'dead_letter', next_attempt_at: null, last_error: failure };
     await this.keep(outbox, refused);
-    const index = entries.findIndex(e => e.id === entry.id);
-    entries[index] = refused;
-    const dead = new Set([this.digestOf(entry)]);
-    for (let i = index + 1; i < entries.length; i++) {
-      const later = entries[i]!;
-      if (later.state !== 'pending' || !predecessors(later.evidence).some(d => dead.has(d))) continue;
-      dead.add(this.digestOf(later));
-      entries[i] = {
-        ...later, state: 'dead_letter', next_attempt_at: null,
-        last_error: { status: 0, code: PREDECESSOR_DEAD_LETTERED, message: 'a record this one chains from was refused' },
-      };
-      await this.keep(outbox, entries[i]!);
-    }
+    entries[entries.findIndex(e => e.id === entry.id)] = refused;
     return refused;
   }
 
@@ -408,12 +448,17 @@ export class EvidenceStoreClient {
     } catch (err) {
       const { failure, transient } = classifySubmissionError(err);
       const attempts = entry.attempts + 1;
-      if (!transient) {
-        return { queued: await this.deadLetter(outbox, entries, { ...entry, attempts }, failure.code, failure) };
+      // A gap behind a record not admitted yet is retried; behind a dead letter it never closes.
+      if (CHAIN_GAPS.has(failure.code) && predecessors(entry.evidence).some(d => this.deadDigests(entries).has(d))) {
+        return {
+          queued: await this.deadLetter(outbox, entries, { ...entry, attempts }, {
+            status: failure.status, code: PREDECESSOR_DEAD_LETTERED,
+            message: `a record this one chains from was refused; the NA answered ${failure.code}: ${failure.message}`,
+          }),
+        };
       }
-      const failed: OutboxEntry = {
-        ...entry, attempts, last_error: failure, next_attempt_at: new Date(Date.now() + retryDelayMs(attempts)).toISOString(),
-      };
+      if (!transient) return { queued: await this.deadLetter(outbox, entries, { ...entry, attempts }, failure) };
+      const failed: OutboxEntry = { ...entry, attempts, last_error: failure, next_attempt_at: nextAttemptAt(attempts, err) };
       await this.keep(outbox, failed);
       entries[entries.findIndex(e => e.id === entry.id)] = failed;
       return { queued: failed };
@@ -464,15 +509,7 @@ export class EvidenceStoreClient {
       if (delivery.submission) {
         result.admitted.push(entry);
       } else if (delivery.queued!.state === 'dead_letter') {
-        // attempt() also dead-lettered the records chaining from it, later in `entries`.
         result.dead_lettered.push(delivery.queued!);
-        for (let j = i + 1; j < entries.length; j++) {
-          if (entries[j]!.state === 'dead_letter' && entries[j]!.last_error?.code === PREDECESSOR_DEAD_LETTERED
-            && !result.dead_lettered.some(e => e.id === entries[j]!.id)) {
-            result.dead_lettered.push(entries[j]!);
-            outcomes.set(entries[j]!.id, { queued: entries[j]! });
-          }
-        }
       } else {
         waiting.add(digest);
         result.pending.push(delivery.queued!);
@@ -528,15 +565,18 @@ export class EvidenceStoreClient {
   }
 
   /**
-   * Submit the record outbox's pending records in the order they were added,
-   * observations up to 100 at a time. Records in backoff are skipped unless
-   * `ignoreBackoff`; a transient error ends the run. Concurrent calls share
-   * one run.
+   * Submit the record outbox's pending records: break-glass records first
+   * (1.3.1), then observations up to 100 at a time, each in the order they
+   * were added. A batch the NA refuses as a whole is split until the record
+   * it refuses is found; a batch it throttles (`429`) halves the batches that
+   * follow, and the records wait as long as its `Retry-After` asks. Records
+   * in backoff are skipped unless `ignoreBackoff`; a transient error ends the
+   * run. A call joins the run in progress when that run tries everything it
+   * asks for, and otherwise starts one once it ends.
    */
   async flushRecords(options: FlushOptions = {}): Promise<RecordFlushResult> {
     const outbox = this.requireRecordOutbox();
-    this.flushingRecords ??= this.flushRecordRun(outbox, options).finally(() => { this.flushingRecords = null; });
-    return this.flushingRecords;
+    return this.flushingRecords.join(options, () => this.flushRecordRun(outbox, options));
   }
 
   /** Judge an observation once (admin); returns the existing judgement when it was judged before. */
@@ -599,8 +639,11 @@ export class EvidenceStoreClient {
   private async recordFailed(outbox: RecordOutbox, entry: RecordOutboxEntry, err: unknown): Promise<RecordOutboxEntry> {
     const { failure, transient } = classifySubmissionError(err, RECORD_PERMANENT_REFUSALS);
     const attempts = entry.attempts + 1;
+    if (transient && err instanceof GenesisMeshError && err.retryAfterSeconds !== null) {
+      this.recordsPausedUntil = Math.max(this.recordsPausedUntil, Date.parse(nextAttemptAt(0, err)));
+    }
     const next: RecordOutboxEntry = transient
-      ? { ...entry, attempts, last_error: failure, next_attempt_at: new Date(Date.now() + retryDelayMs(attempts)).toISOString() }
+      ? { ...entry, attempts, last_error: failure, next_attempt_at: nextAttemptAt(attempts, err) }
       : { ...entry, attempts, state: 'dead_letter', next_attempt_at: null, last_error: failure };
     try {
       await outbox.update(next);
@@ -620,8 +663,12 @@ export class EvidenceStoreClient {
 
   private async flushRecordRun(outbox: RecordOutbox, options: FlushOptions): Promise<RecordFlushResult> {
     const result: RecordFlushResult = { admitted: [], quarantined: [], pending: [], dead_lettered: [] };
-    const entries = (await outbox.list()).filter(e => e.state === 'pending');
-    const due = (e: RecordOutboxEntry) => options.ignoreBackoff || !(Date.parse(e.next_attempt_at ?? '') > Date.now());
+    const pending = (await outbox.list()).filter(e => e.state === 'pending');
+    // 1.3.1: break-glass records first. They share the NA's submission rate with observations, and
+    // an observation of the same change then finds its break-glass record.
+    const entries = [...pending.filter(e => e.kind === 'break_glass'), ...pending.filter(e => e.kind !== 'break_glass')];
+    const due = (e: RecordOutboxEntry) => options.ignoreBackoff
+      || (!(this.recordsPausedUntil > Date.now()) && !(Date.parse(e.next_attempt_at ?? '') > Date.now()));
     const settle = (entry: RecordOutboxEntry, delivery: RecordDelivery): boolean => {
       if (delivery.submission) {
         result.admitted.push(entry);
@@ -646,42 +693,67 @@ export class EvidenceStoreClient {
         continue;
       }
       const batch: RecordOutboxEntry[] = [];
-      while (i < entries.length && batch.length < OBSERVATION_BATCH && entries[i]!.kind === 'observation' && due(entries[i]!)) {
+      while (i < entries.length && batch.length < this.observationBatch && entries[i]!.kind === 'observation'
+        && due(entries[i]!)) {
         batch.push(entries[i]!);
         i += 1;
       }
-      let results: ObservationBatchResult[];
-      try {
-        results = await this.submitObservations(batch.map(e => e.record as ObservationRecord));
-      } catch (err) {
-        const tooLarge = err instanceof GenesisMeshError && err.status === 413;
-        if (!tooLarge && classifySubmissionError(err, RECORD_PERMANENT_REFUSALS).transient) {
-          for (const e of batch) settle(e, { queued: await this.recordFailed(outbox, e, err) });
-          stopped = true;
-          continue;
-        }
-        // The batch itself was refused, or is larger than the NA takes: each observation is tried alone.
-        for (const e of batch) {
-          if (stopped) result.pending.push(e);
-          else stopped = !settle(e, await this.attemptRecord(outbox, e));
-        }
-        continue;
-      }
-      for (const [index, e] of batch.entries()) {
-        const answer = results.find(r => r.index === index);
-        if (!answer) {
-          result.pending.push(e);
-        } else if (answer.status === 'refused') {
-          const code = answer.error?.code ?? 'unknown';
-          const refusal = new GenesisMeshError(answer.error?.message ?? code, code, code.endsWith('_conflict') ? 409 : 422);
-          settle(e, { queued: await this.recordFailed(outbox, e, refusal) });
-        } else {
-          await this.removeRecord(outbox, e.id);
-          settle(e, { submission: answer as RecordSubmission });
-        }
-      }
+      stopped = await this.submitBatch(outbox, batch, settle, result);
     }
     return result;
+  }
+
+  /**
+   * Submit a batch of observations and settle each; true when a transient
+   * failure ends the run. A batch the NA refuses as a whole (one record it
+   * cannot read, `invalid_json`), or larger than it takes (`413`), is split in
+   * halves until the record it refuses is tried alone (1.3.1); a batch it
+   * throttles (`429`) halves the batches that follow.
+   */
+  private async submitBatch(
+    outbox: RecordOutbox,
+    batch: RecordOutboxEntry[],
+    settle: (entry: RecordOutboxEntry, delivery: RecordDelivery) => boolean,
+    result: RecordFlushResult,
+  ): Promise<boolean> {
+    let results: ObservationBatchResult[];
+    try {
+      results = await this.submitObservations(batch.map(e => e.record as ObservationRecord));
+    } catch (err) {
+      const tooLarge = err instanceof GenesisMeshError && err.status === 413;
+      if (!tooLarge && classifySubmissionError(err, RECORD_PERMANENT_REFUSALS).transient) {
+        if (err instanceof GenesisMeshError && err.status === 429) {
+          this.observationBatch = Math.min(this.observationBatch, Math.max(1, Math.floor(batch.length / 2)));
+        }
+        for (const e of batch) settle(e, { queued: await this.recordFailed(outbox, e, err) });
+        return true;
+      }
+      // One observation alone goes by itself, so the NA's answer is about that record.
+      const part = async (records: RecordOutboxEntry[]) => (records.length === 1
+        ? !settle(records[0]!, await this.attemptRecord(outbox, records[0]!))
+        : this.submitBatch(outbox, records, settle, result));
+      if (batch.length === 1) return part(batch);
+      const half = Math.ceil(batch.length / 2);
+      if (await part(batch.slice(0, half))) {
+        result.pending.push(...batch.slice(half));
+        return true;
+      }
+      return part(batch.slice(half));
+    }
+    for (const [index, e] of batch.entries()) {
+      const answer = results.find(r => r.index === index);
+      if (!answer) {
+        result.pending.push(e);
+      } else if (answer.status === 'refused') {
+        const code = answer.error?.code ?? 'unknown';
+        const refusal = new GenesisMeshError(answer.error?.message ?? code, code, code.endsWith('_conflict') ? 409 : 422);
+        settle(e, { queued: await this.recordFailed(outbox, e, refusal) });
+      } else {
+        await this.removeRecord(outbox, e.id);
+        settle(e, { submission: answer as RecordSubmission });
+      }
+    }
+    return false;
   }
 
   /** Search stored entries (admin). Use `next_after_sequence` as the next `after_sequence`. */
@@ -829,28 +901,53 @@ export class EvidenceStoreClient {
   }
 
   /**
-   * Latest state of every resource with stored execution evidence, for
-   * reconciliation against a cloud inventory (admin).
+   * Latest state of every resource with stored execution evidence or (1.3.1)
+   * break-glass records, for reconciliation against a cloud inventory
+   * (admin). A break-glass change counts as the resource's change, in the
+   * order the changes were made (`executed_at`), so reconciling after one
+   * does not report it again as drift. The chain head (`resource_sequence`,
+   * `record_digest`) and `last_decision_id` stay the newest execution
+   * record's (0 and empty without one).
    */
   async resourceStates(): Promise<Map<string, ResourceState>> {
-    const states = new Map<string, ResourceState>();
+    const changes = new Map<string, { store: number; record: ExecutionEvidence | BreakGlassRecord }[]>();
+    const add = (resourceId: string, store: number, record: ExecutionEvidence | BreakGlassRecord) => {
+      const list = changes.get(resourceId) ?? [];
+      list.push({ store, record });
+      changes.set(resourceId, list);
+    };
     for await (const event of this.iterate({ entry_kind: 'execution' })) {
       const record = event.payload as unknown as ExecutionEvidence;
-      if (record.resource_id === undefined || record.resource_sequence === undefined) continue;
-      const previous = states.get(record.resource_id);
-      if (previous && previous.resource_sequence >= record.resource_sequence) continue;
-      const success = record.outcome === 'success';
-      states.set(record.resource_id, {
-        resource_id: record.resource_id,
-        resource_sequence: record.resource_sequence,
-        record_digest: executionDigest(record),
-        last_action: record.resource_action ?? null,
-        last_outcome: record.outcome,
-        last_success_action: success ? record.resource_action ?? null : previous?.last_success_action ?? null,
-        last_success_parameters: success ? record.execution_parameters : previous?.last_success_parameters ?? null,
-        last_executed_at: record.executed_at,
-        last_decision_id: record.decision_id,
-      });
+      if (record.resource_id == null || record.resource_sequence == null) continue;
+      add(record.resource_id, event.entry.store_sequence, record);
+    }
+    for await (const event of this.iterate({ entry_kind: 'break_glass' })) {
+      const record = event.payload as unknown as BreakGlassRecord;
+      add(record.resource_id, event.entry.store_sequence, record);
+    }
+    const states = new Map<string, ResourceState>();
+    for (const [resourceId, list] of changes) {
+      list.sort((a, b) => timestampOrder(a.record.executed_at, b.record.executed_at) || a.store - b.store);
+      let state: ResourceState | undefined;
+      for (const { record } of list) {
+        const execution = 'evidence_id' in record ? record : null;
+        if (execution && state && state.resource_sequence >= execution.resource_sequence!) continue;
+        const action = execution ? execution.resource_action ?? null : (record as BreakGlassRecord).resource_action;
+        const success = record.outcome === 'success';
+        state = {
+          resource_id: resourceId,
+          resource_sequence: execution ? execution.resource_sequence! : state?.resource_sequence ?? 0,
+          record_digest: execution ? executionDigest(execution) : state?.record_digest ?? '',
+          last_action: action,
+          last_outcome: record.outcome,
+          last_success_action: success ? action : state?.last_success_action ?? null,
+          last_success_parameters: success ? record.execution_parameters : state?.last_success_parameters ?? null,
+          last_executed_at: record.executed_at,
+          last_decision_id: execution ? execution.decision_id : state?.last_decision_id ?? '',
+          ...(execution ? {} : { last_break_glass_id: (record as BreakGlassRecord).break_glass_id }),
+        };
+      }
+      states.set(resourceId, state!);
     }
     return states;
   }

@@ -5,7 +5,7 @@
  */
 
 import { buildAdminHeadersWithSigner, canonicalJson, parseJson, seedSigner, type Signer } from './auth.js';
-import { fromHttpError, GenesisMeshError, NetworkError } from './errors.js';
+import { fromHttpError, GenesisMeshError, NetworkError, retryAfterSeconds } from './errors.js';
 import type { EvidenceOutbox, RecordOutbox } from './outbox.js';
 import { decodeUtf8, StrictJsonError } from './strict-json.js';
 
@@ -77,7 +77,7 @@ interface RequestSpec {
   idempotent: boolean;
 }
 
-type BufferedResponse = Pick<Response, 'ok' | 'status' | 'text'>;
+type BufferedResponse = Pick<Response, 'ok' | 'status' | 'text'> & { retryAfter?: string | null };
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
@@ -106,6 +106,11 @@ const FAILOVER_STATUS = new Set([502, 503, 504]);
 const CONNECT_FAILURE_CODES = new Set([
   'ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT',
 ]);
+
+/** The NA public key lookup answered as an instance that is down or busy: the request was never sent (1.3.1). */
+function lookupOutage(err: unknown): boolean {
+  return err instanceof GenesisMeshError && err.code === 'na_public_key_unavailable' && RETRYABLE_STATUS.has(err.status);
+}
 
 function isConnectFailure(err: unknown): boolean {
   const cause = (err as { cause?: { code?: unknown; errors?: { code?: unknown }[] } } | undefined)?.cause;
@@ -210,23 +215,25 @@ export class HttpTransport {
     let retriesUsed = 0;
     for (;;) {
       let response: BufferedResponse | undefined;
-      let error: unknown;
+      let error: GenesisMeshError | undefined;
       try {
         response = await this._attempt(spec);
       } catch (err) {
-        if (!(err instanceof NetworkError)) throw err;
-        error = err;
+        if (!(err instanceof NetworkError) && !lookupOutage(err)) throw err;
+        error = err as GenesisMeshError;
       }
-      const failoverWorthy = error !== undefined || (response !== undefined && FAILOVER_STATUS.has(response.status));
+      // The instance's status: the response's, or the key lookup's that kept the request unsent (1.3.1).
+      const status = response?.status ?? (error instanceof NetworkError ? undefined : error?.status);
+      const failoverWorthy = error instanceof NetworkError || (status !== undefined && FAILOVER_STATUS.has(status));
       if (failoverWorthy) this.failover();
       // A request that may have reached an instance is replayed elsewhere only
-      // if it is idempotent; one that never connected can always move on.
-      const mayMove = spec.idempotent || (error instanceof NetworkError && error.connectFailed);
+      // if it is idempotent; one that never connected (or was never sent) can always move on.
+      const mayMove = spec.idempotent || (error instanceof NetworkError ? error.connectFailed : error !== undefined);
       if (failoverWorthy && mayMove && failoversLeft > 0) {
         failoversLeft -= 1;
         continue;
       }
-      const retryable = error !== undefined || (response !== undefined && RETRYABLE_STATUS.has(response.status));
+      const retryable = error instanceof NetworkError || (status !== undefined && RETRYABLE_STATUS.has(status));
       if (retryable && retriesUsed < retries) {
         await this._backoff(retriesUsed);
         retriesUsed += 1;
@@ -249,7 +256,10 @@ export class HttpTransport {
       // The NA answered: whatever it did is done. Named apart from a request that never arrived.
       throw new NetworkError(`Failed to read response body (${spec.method} ${spec.path})`, 'response_body_unreadable');
     }
-    return { ok: res.ok, status: res.status, text: async () => (typeof body === 'string' ? body : decodeUtf8(body)) };
+    return {
+      ok: res.ok, status: res.status, retryAfter: res.headers?.get?.('retry-after') ?? null,
+      text: async () => (typeof body === 'string' ? body : decodeUtf8(body)),
+    };
   }
 
   /** Unauthenticated GET against one specific endpoint (no failover), e.g. per-instance readiness. */
@@ -280,12 +290,16 @@ export class HttpTransport {
       try {
         audience = await this._audience();
       } catch (err) {
+        // 1.3.1: an answer from the NA's side (a 403 from a firewall, a 404) keeps its status
+        // (`na_public_key_unavailable`); only a lookup that got no answer is a network error.
+        if (!(err instanceof NetworkError)) throw err;
         // The request itself was never sent, so it may move to another
         // instance like a refused connection, idempotent or not.
         const error = new NetworkError(
           `${spec.method} ${spec.path} not sent: ${(err as Error).message}`,
         );
         error.connectFailed = true;
+        error.cause = err.cause;
         throw error;
       }
       Object.assign(headers, await buildAdminHeadersWithSigner({
@@ -312,18 +326,38 @@ export class HttpTransport {
     }
   }
 
-  /** The NA's public key for admin signatures, read once from `/sovereign.json`. */
+  /**
+   * The NA's public key for admin signatures, read once from `/sovereign.json`.
+   * A lookup that gets no answer throws `NetworkError`; any answer without the
+   * key throws `na_public_key_unavailable` with the answer's HTTP status (1.3.1).
+   */
   private _audience(): Promise<string> {
     if (!this.audience) {
-      const pending = this.publicGetAt<{ network_authority?: { public_key?: unknown } }>(this.baseUrl, '/sovereign.json').then(({ status, body }) => {
-        const key = body?.network_authority?.public_key;
-        if (status !== 200 || typeof key !== 'string' || !key) {
+      const url = this.baseUrl + '/sovereign.json';
+      const pending = (async () => {
+        let response: Response;
+        try {
+          response = await this._fetch(url, { method: 'GET', headers: { ...this.headers }, signal: AbortSignal.timeout(this.timeout) });
+        } catch (err) {
+          const error = new NetworkError(`GET ${url} failed: ${(err as Error).message}`);
+          error.cause = err;
+          throw error;
+        }
+        let key: unknown;
+        try {
+          const text = typeof response.arrayBuffer === 'function' ? decodeUtf8(await response.arrayBuffer()) : await response.text();
+          key = (parseJson(text) as { network_authority?: { public_key?: unknown } } | null)?.network_authority?.public_key;
+        } catch {
+          key = undefined;
+        }
+        if (response.status !== 200 || typeof key !== 'string' || !key) {
           throw new GenesisMeshError(
-            `Could not read the NA public key from /sovereign.json (HTTP ${status})`, 'unknown', status,
+            `Could not read the NA public key from /sovereign.json (HTTP ${response.status})`, 'na_public_key_unavailable',
+            response.status,
           );
         }
         return key;
-      });
+      })();
       // A failed lookup is retried by the next admin request.
       this.audience = pending.catch(err => { this.audience = undefined; throw err; });
     }
@@ -336,18 +370,22 @@ export class HttpTransport {
   }
 
   private async _parse<T>(response: BufferedResponse): Promise<T> {
+    const refused = (error: GenesisMeshError): GenesisMeshError => {
+      error.retryAfterSeconds = retryAfterSeconds(response.retryAfter);
+      return error;
+    };
     let data: unknown;
     try {
       data = parseJson(await response.text());
     } catch (err) {
       if (response.ok && refusedForm(err)) throw err;
       if (!response.ok) {
-        throw new GenesisMeshError(`HTTP ${response.status} with a non-JSON body`, 'unknown', response.status);
+        throw refused(new GenesisMeshError(`HTTP ${response.status} with a non-JSON body`, 'unknown', response.status));
       }
       throw new NetworkError(`Failed to parse response body (HTTP ${response.status})`, 'response_body_unreadable');
     }
     if (!response.ok) {
-      throw fromHttpError(response.status, (data ?? {}) as Record<string, unknown>);
+      throw refused(fromHttpError(response.status, (data ?? {}) as Record<string, unknown>));
     }
     return data as T;
   }

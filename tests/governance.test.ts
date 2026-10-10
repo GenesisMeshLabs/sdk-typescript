@@ -186,33 +186,49 @@ describe('governedAction with the evidence outbox (1.2.0)', () => {
     expect(x.submit.mock.calls.map(c => c[0])).toEqual([first.evidence, first.evidence, second.evidence]);
     expect(await x.outbox.list()).toEqual([]);
   });
-  it('dead-letters a record whose predecessor is refused, without submitting it', async () => {
+  it('sends a record whose predecessor is refused, and dead-letters it when refused for the gap (1.3.1)', async () => {
     const x = await withOutbox();
     x.submit.mockRejectedValueOnce(new NetworkError('offline'));
-    const first = await governedAction(x.gm, x.recorder, x.params, x.action);
-    x.submit.mockRejectedValueOnce(new ConflictError('taken', 'evidence_conflict'));
+    await governedAction(x.gm, x.recorder, x.params, x.action);
+    x.submit.mockRejectedValueOnce(new ConflictError('taken', 'evidence_conflict'))
+      .mockRejectedValueOnce(new ValidationError('gap', 'resource_chain_gap'));
     const second = await governedAction(x.gm, x.recorder, x.params, x.action);
-    expect(second.queued).toMatchObject({ state: 'dead_letter', last_error: { code: PREDECESSOR_DEAD_LETTERED } });
-    expect(x.submit).toHaveBeenCalledTimes(2);
-    expect(x.submit).toHaveBeenLastCalledWith(first.evidence!);
+    expect(second.queued).toMatchObject({
+      state: 'dead_letter', last_error: { status: 422, code: PREDECESSOR_DEAD_LETTERED },
+    });
+    expect(second.queued!.last_error!.message).toContain('resource_chain_gap');
+    expect(x.submit).toHaveBeenCalledTimes(3);
+    expect(x.submit).toHaveBeenLastCalledWith(second.evidence!);
     expect((await x.outbox.list()).map(e => e.state)).toEqual(['dead_letter', 'dead_letter']);
     // A third action no longer chains from the dead records.
     x.head.mockResolvedValue({ resource_sequence: 9, record_digest: 'na-head' });
     const third = await governedAction(x.gm, x.recorder, x.params, x.action);
     expect(third.evidence).toMatchObject({ resource_sequence: 10, prev_resource_digest: 'na-head' });
   });
-  it('dead-letters a new record at once when its predecessor is already a dead letter', async () => {
+  it('sends a new record whose predecessor is a dead letter, so the NA can quarantine it (1.3.1)', async () => {
     const x = await withOutbox();
     const signed = (prior?: ExecutionEvidence) => x.recorder.record({
       decision: x.evaluation.decision, executed_capability: 'sp-secret.rotate', outcome: 'success',
       resource_id: 'kv:v/s', resource_action: 'rotate', prior_resource: prior ?? null,
     });
+    const retired = () => new ValidationError('signing key is retired', 'evidence_executor_key_retired');
     const a = await signed();
-    x.submit.mockRejectedValueOnce(new ConflictError('taken', 'evidence_conflict'));
+    x.submit.mockRejectedValueOnce(retired());
     expect((await x.gm.evidenceStore.enqueue(a)).queued).toMatchObject({ state: 'dead_letter' });
     const b = await signed(a);
-    expect((await x.gm.evidenceStore.enqueue(b)).queued).toMatchObject({ state: 'dead_letter', last_error: { code: PREDECESSOR_DEAD_LETTERED } });
-    expect(x.submit).toHaveBeenCalledTimes(1);
+    // The NA refuses it for its own reason (and quarantines it): that refusal is kept.
+    x.submit.mockRejectedValueOnce(retired());
+    expect((await x.gm.evidenceStore.enqueue(b)).queued)
+      .toMatchObject({ state: 'dead_letter', last_error: { code: 'evidence_executor_key_retired' } });
+    expect(x.submit).toHaveBeenCalledTimes(2);
+    expect(x.submit).toHaveBeenLastCalledWith(b);
+    // A record behind one that is merely pending still waits for it.
+    const c = await signed(b);
+    const d = await signed(c);
+    x.submit.mockRejectedValueOnce(new NetworkError('offline'));
+    await x.gm.evidenceStore.enqueue(c);
+    x.submit.mockRejectedValueOnce(new NetworkError('offline'));
+    expect((await x.gm.evidenceStore.enqueue(d)).queued).toMatchObject({ state: 'pending', attempts: 0 });
   });
   it('waits on the decision chain as on the resource chain', async () => {
     const x = await withOutbox();

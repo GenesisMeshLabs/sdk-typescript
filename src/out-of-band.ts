@@ -21,12 +21,15 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  canonicalJson, copyPythonFloats, defineMember, pythonTimestamp, signCanonical, verifyCanonical, type Signer,
+  canonicalJson, checkSignable, copyPythonFloats, defineMember, pythonTimestamp, signCanonical, verifyCanonical,
+  type Signer,
 } from './auth.js';
 import { GenesisMeshError } from './errors.js';
 import { nonCanonicalFields, unknownFields } from './strict.js';
-import { validBreakGlass, validJudgement, validObservation, validQuarantine, validRegistry } from './validation.js';
-import { checkMetadataOnly } from './execution.js';
+import {
+  timestampOrder, validBreakGlass, validJudgement, validObservation, validQuarantine, validRegistry,
+} from './validation.js';
+import { MAX_METADATA_BYTES, secretMaterial } from './execution.js';
 import type { ReconciliationFinding, ReconciliationStatus } from './governance.js';
 import type { GateResult, PolicyBinding, ResourceAction, Signature } from './types.js';
 
@@ -151,7 +154,12 @@ export interface RegistryRecord {
 
 export type OutOfBandRecord = ObservationRecord | BreakGlassRecord | JudgementRecord | QuarantineRecord | RegistryRecord;
 
-/** Thrown before signing when a record would be refused (secret material, an impossible change time). */
+/**
+ * Thrown before signing when the NA would refuse the record: `*_malformed`
+ * (a field it does not take, a timestamp it cannot read, an impossible change
+ * time) or `*_secret_material`. JSON the NA would refuse to read throws
+ * `StrictJsonError` instead (1.3.1).
+ */
 export class OutOfBandRecordError extends GenesisMeshError {
   constructor(message: string, code: string) {
     super(message, code, 0);
@@ -205,9 +213,41 @@ function wire<T extends object>(record: T, signature: Signature): T {
   return { ...signedFields(record), signature } as T;
 }
 
-function timeOf(value: Date | string | undefined): string | undefined {
+const ISO_TIME = /^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d+))?)?(?:([Zz])|([+-])(\d{2}):?(\d{2}))$/;
+
+/**
+ * A time as the reference writes it (1.3.1): UTC, microseconds (a finer
+ * fraction is cut, as the reference reads it), `Z`. A string the reference
+ * would read, with any UTC offset, is converted, so `toISOString()` output
+ * (`.573Z`), `+00:00` and a seven-digit fraction are signed in the form the
+ * NA re-serialises. A string without an offset or not a time is refused.
+ */
+function timeOf(value: Date | string | undefined, field: string, code: string): string | undefined {
   if (value === undefined) return undefined;
-  return typeof value === 'string' ? value : pythonTimestamp(value);
+  const refuse = (): never => {
+    throw new OutOfBandRecordError(`${field} is not an ISO 8601 time with a UTC offset: ${String(value)}`, code);
+  };
+  if (value instanceof Date) {
+    const year = value.getUTCFullYear();
+    return Number.isNaN(year) || year < 1 || year > 9999 ? refuse() : pythonTimestamp(value);
+  }
+  const m = typeof value === 'string' ? ISO_TIME.exec(value) : null;
+  if (!m) return refuse();
+  const [, y, mo, d, h, mi, s = '0', fraction = '', utc, sign, oh = '0', om = '0'] = m;
+  const [year, month, date, hour, minute, second, offsetHour, offsetMinute] = [y, mo, d, h, mi, s, oh, om].map(Number);
+  // The calendar date must exist (no 30 February); the time and the offset must be in range.
+  const day = new Date(0);
+  day.setUTCFullYear(year, month - 1, date);
+  if (day.getUTCFullYear() !== year || day.getUTCMonth() !== month - 1 || day.getUTCDate() !== date || year < 1
+    || hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59) {
+    return refuse();
+  }
+  const offset = utc ? 0 : (sign === '-' ? -1 : 1) * (offsetHour * 60 + offsetMinute);
+  const at = new Date(day.getTime() + ((hour * 60 + minute - offset) * 60 + second) * 1000);
+  if (at.getUTCFullYear() < 1 || at.getUTCFullYear() > 9999) return refuse();
+  const base = pythonTimestamp(at).slice(0, 19);
+  const micros = fraction.slice(0, 6).padEnd(6, '0');
+  return micros === '000000' ? `${base}Z` : `${base}.${micros}Z`;
 }
 
 // ── Observations ─────────────────────────────────────────────────────────────
@@ -228,8 +268,48 @@ export interface ObservationInput {
   version_id?: string;
   /** Identifiers, versions and times; never values. */
   metadata?: Record<string, unknown>;
-  /** Default: a new UUID. */
+  /**
+   * Default (1.3.1): `observationId(observer, source, source_event_id)`, the
+   * same for every record of one source event, so recording it again with
+   * the same fields is a `duplicate` at the NA. Before 1.3.1, a new UUID.
+   */
   observation_id?: string;
+}
+
+/**
+ * The default `observation_id` (1.3.1): the SHA-256, in hex, of what makes an
+ * observation one at the NA, its observer sovereign, source and source event
+ * ID, joined by NUL characters. One source event gives one ID.
+ */
+export function observationId(observerSovereignId: string, source: string, sourceEventId: string): string {
+  return createHash('sha256').update(`${observerSovereignId}\u0000${source}\u0000${sourceEventId}`, 'utf-8').digest('hex');
+}
+
+/**
+ * Why a record's values would be refused as secret material, or null (1.3.1):
+ * the reference's `metadata_problem`, which the NA applies to observations and
+ * break-glass records. Their canonical JSON, non-ASCII escaped as the
+ * reference counts it, is at most `MAX_METADATA_BYTES`; then, value by value
+ * in the order given, no field named like a secret and no PEM block, key or
+ * token.
+ */
+export function metadataProblem(values: Record<string, unknown>): string | null {
+  const size = canonicalJson(values).length;
+  if (size > MAX_METADATA_BYTES) return `metadata is ${size} bytes, over the ${MAX_METADATA_BYTES}-byte limit`;
+  for (const [name, value] of Object.entries(values)) {
+    const nested = typeof value === 'object' && value !== null;
+    const found = secretMaterial(nested ? value : { [name]: value }, nested ? `${name}.` : '');
+    if (found) return found;
+  }
+  return null;
+}
+
+/** The values of an observation the NA's guard checks: its metadata and the source's own strings. */
+function observationValues(record: ObservationRecord): Record<string, unknown> {
+  const values: Record<string, unknown> = {
+    metadata: record.metadata, actor: record.actor, source_event_id: record.source_event_id, version_id: record.version_id,
+  };
+  return Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined && v !== null));
 }
 
 export interface ObservationRecorderOptions {
@@ -263,25 +343,35 @@ export class ObservationRecorder {
       throw new OutOfBandRecordError('changed_at, or both changed_not_before and changed_not_after, is required',
         'observation_malformed');
     }
-    const metadata = input.metadata ?? {};
-    const secret = checkMetadataOnly(metadata);
-    if (secret) throw new OutOfBandRecordError(secret, 'observation_secret_material');
+    const time = (value: Date | string | undefined, field: string) => timeOf(value, field, 'observation_malformed');
     const record: ObservationRecord = {
-      observation_id: input.observation_id ?? randomUUID(),
+      observation_id: input.observation_id ?? observationId(this.observerSovereignId, input.source, input.source_event_id),
       observer_sovereign_id: this.observerSovereignId,
       resource_id: input.resource_id,
       action: input.action,
       capability: input.capability,
-      changed_at: timeOf(input.changed_at),
-      changed_not_before: timeOf(input.changed_not_before),
-      changed_not_after: timeOf(input.changed_not_after),
-      observed_at: timeOf(input.observed_at ?? new Date())!,
+      changed_at: time(input.changed_at, 'changed_at'),
+      changed_not_before: time(input.changed_not_before, 'changed_not_before'),
+      changed_not_after: time(input.changed_not_after, 'changed_not_after'),
+      observed_at: time(input.observed_at ?? new Date(), 'observed_at')!,
       actor: input.actor,
       source: input.source,
       source_event_id: input.source_event_id,
       version_id: input.version_id,
-      metadata,
+      metadata: input.metadata ?? {},
     };
+    // 1.3.1: refused before signing as the NA would refuse it, in its order: JSON it cannot read,
+    // a record its model does not take, then secret material.
+    checkSignable(record);
+    if (!validObservation(record)) {
+      const { changed_not_before: from, changed_not_after: to } = record;
+      throw new OutOfBandRecordError(from && to && timestampOrder(from, to) > 0
+        ? 'changed_not_before is after changed_not_after'
+        : 'the observation does not match the ObservationRecord model (a field missing, empty, too long or of another type)',
+      'observation_malformed');
+    }
+    const secret = metadataProblem(observationValues(record));
+    if (secret) throw new OutOfBandRecordError(secret, 'observation_secret_material');
     return wire(record, await signCanonical(outOfBandCanonical(record), this.signer));
   }
 }
@@ -309,7 +399,9 @@ export interface FindingObservationOptions {
  * A reconciliation finding as an observation input, or null for a resource in
  * sync. The change is known only within the window between the two scans, so
  * the NA judges it at both ends of the window. The source event is the scan
- * and the resource, so a repeated scan does not record the finding twice.
+ * and the resource, so a repeated scan does not record the finding twice:
+ * signed again, it is the same record (its `observation_id` is derived from
+ * the source event, 1.3.1), and the NA answers `duplicate`.
  */
 export function observationFromFinding(
   finding: ReconciliationFinding,
@@ -352,18 +444,13 @@ export interface BreakGlassInput {
   execution_parameters?: Record<string, unknown>;
 }
 
-/** Build and sign a break-glass record with the executor's signer. */
-export async function signBreakGlass(input: BreakGlassInput, signer: Signer): Promise<BreakGlassRecord> {
-  if (!input.justification || input.justification.length > 1024) {
-    throw new OutOfBandRecordError('a justification of 1 to 1024 characters is required', 'break_glass_malformed');
-  }
-  const secret = checkMetadataOnly({
-    execution_parameters: input.execution_parameters ?? {},
-    request_parameters: input.request_parameters ?? {},
-    attributes: input.attributes ?? {},
-  }, input.outcome_detail ?? null) ?? checkMetadataOnly({}, input.justification);
-  if (secret) throw new OutOfBandRecordError(secret, 'break_glass_secret_material');
-  const record: BreakGlassRecord = {
+/** The reference's limits on a break-glass record's justification and outcome detail, in characters (code points). */
+const MAX_JUSTIFICATION = 1024;
+const MAX_OUTCOME_DETAIL = 1024;
+
+/** The unsigned break-glass record for `input`. */
+export function breakGlassRecord(input: BreakGlassInput): BreakGlassRecord {
+  return {
     break_glass_id: randomUUID(),
     executor_sovereign_id: input.executor_sovereign_id,
     resource_id: input.resource_id,
@@ -375,10 +462,49 @@ export async function signBreakGlass(input: BreakGlassInput, signer: Signer): Pr
     justification: input.justification,
     evaluation_request_digest: createHash('sha256').update(canonicalJson(input.evaluation_request), 'utf-8').digest('hex'),
     evaluation_failure: input.evaluation_failure,
-    executed_at: timeOf(input.executed_at ?? new Date())!,
+    executed_at: timeOf(input.executed_at ?? new Date(), 'executed_at', 'break_glass_malformed')!,
     outcome: input.outcome,
     outcome_detail: input.outcome_detail,
     execution_parameters: input.execution_parameters ?? {},
   };
+}
+
+/**
+ * Throw what the NA would refuse an unsigned break-glass record for, in its
+ * order (1.3.1): JSON it cannot read (`StrictJsonError`), a record its model
+ * does not take (`break_glass_malformed`; lengths counted in characters, as
+ * the reference counts them), then secret material, sized and named as the
+ * reference's `metadata_problem` does (`break_glass_secret_material`).
+ */
+export function checkBreakGlassRecord(record: BreakGlassRecord): void {
+  checkSignable(record);
+  const characters = (text: unknown) => (typeof text === 'string' ? Array.from(text).length : -1);
+  const justification = characters(record.justification);
+  if (justification < 1 || justification > MAX_JUSTIFICATION) {
+    throw new OutOfBandRecordError(`a justification of 1 to ${MAX_JUSTIFICATION} characters is required`,
+      'break_glass_malformed');
+  }
+  if (record.outcome_detail != null && characters(record.outcome_detail) > MAX_OUTCOME_DETAIL) {
+    throw new OutOfBandRecordError(`outcome_detail is longer than ${MAX_OUTCOME_DETAIL} characters`, 'break_glass_malformed');
+  }
+  if (!validBreakGlass(record)) {
+    throw new OutOfBandRecordError(
+      'the record does not match the BreakGlassRecord model (a field missing, empty, too long or of another type)',
+      'break_glass_malformed');
+  }
+  const secret = metadataProblem({
+    execution_parameters: record.execution_parameters,
+    request_parameters: record.request_parameters,
+    attributes: record.attributes,
+    outcome_detail: record.outcome_detail ?? '',
+    justification: record.justification,
+  });
+  if (secret) throw new OutOfBandRecordError(secret, 'break_glass_secret_material');
+}
+
+/** Build and sign a break-glass record with the executor's signer; refused first as the NA would refuse it. */
+export async function signBreakGlass(input: BreakGlassInput, signer: Signer): Promise<BreakGlassRecord> {
+  const record = breakGlassRecord(input);
+  checkBreakGlassRecord(record);
   return wire(record, await signCanonical(outOfBandCanonical(record), signer));
 }

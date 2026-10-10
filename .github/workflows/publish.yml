@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Verify release train (Genesis Mesh core leads every version)
+      - name: Verify release train (the Genesis Mesh core is tagged first)
         shell: bash
         run: |
             set -euo pipefail
@@ -24,23 +24,25 @@ jobs:
             else
               version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
             fi
-            # The contents API is read fresh; raw.githubusercontent.com caches VERSION for minutes after a core merge.
-            core="$(curl -fsSL --retry 3 -H "Authorization: Bearer ${{ github.token }}" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/GenesisMeshLabs/genesismesh/contents/VERSION?ref=main" | tr -d '[:space:]')"
-            if [ "$(printf '%s\n%s\n' "$version" "$core" | sort -V | tail -n 1)" != "$core" ]; then
-              echo "::error::Version $version is ahead of the Genesis Mesh core ($core). The core leads every coordinated version; see genesismesh docs/development/versioning.md."
+            if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match version $version."
               exit 1
             fi
-            if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-              if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
-                echo "::error::Tag $GITHUB_REF_NAME does not match version $version."
-                exit 1
-              fi
-              if [ "$version" != "$core" ] && ! git ls-remote --exit-code --tags https://github.com/GenesisMeshLabs/genesismesh.git "refs/tags/v$version" > /dev/null; then
-                echo "::error::Release $version is not a Genesis Mesh core version (core is $core). Release the core first."
-                exit 1
-              fi
+            # The SDK publishes a version only once the core has released it: the core's tag
+            # v$version must exist and name the same version. The core's main is not enough:
+            # it says $version from the release merge on, before the core is tagged.
+            if ! git ls-remote --exit-code --tags https://github.com/GenesisMeshLabs/genesismesh.git "refs/tags/v$version" > /dev/null; then
+              echo "::error::The Genesis Mesh core is not tagged v$version. Release the core first; see genesismesh docs/development/versioning.md."
+              exit 1
             fi
-            echo "Release train verified: $version (core $core)"
+            # The contents API is read fresh; raw.githubusercontent.com caches files for minutes.
+            ref="$(jq -rn --arg ref "v$version" '$ref|@uri')"
+            core="$(curl -fsSL --retry 3 -H "Authorization: Bearer ${{ github.token }}" -H "Accept: application/vnd.github.raw" "https://api.github.com/repos/GenesisMeshLabs/genesismesh/contents/VERSION?ref=$ref" | tr -d '[:space:]')"
+            if [ "$core" != "$version" ]; then
+              echo "::error::The core's tag v$version holds version $core, not $version."
+              exit 1
+            fi
+            echo "Release train verified: $version (core tag v$version)"
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

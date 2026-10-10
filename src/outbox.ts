@@ -27,6 +27,7 @@ import type { EvidenceSubmission, ExecutionEvidence } from './types.js';
 export interface SubmissionFailure {
   /** HTTP status; 0 when no response arrived (network error, timeout) or the SDK refused it. */
   status: number;
+  /** The NA's code; `network_error` when it could not be reached; `local_error` (1.3.1) for an exception before any request. */
   code: string;
   message: string;
 }
@@ -114,12 +115,21 @@ export interface FlushOptions {
 export const PREDECESSOR_DEAD_LETTERED = 'evidence_predecessor_dead_lettered';
 
 /**
+ * Local failure code (1.3.1) for an exception in this process before any
+ * request was made: filed apart from network errors, which the transport
+ * names `network_error`, and retried like them.
+ */
+export const LOCAL_ERROR = 'local_error';
+
+/**
  * The NA's refusals that no retry of the same record can overcome. Every
  * other failure (network, timeout, `5xx`, `429`, an unknown or not yet
  * registered executor key, a chain gap behind a record not yet admitted, a
  * disabled store, a proxy's error page) is retried.
  */
 export const PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
+  // 1.3.1: the NA's strict JSON reader refused the record (a lone surrogate, an integer beyond 64 bits, ...).
+  'invalid_json',
   'invalid_evidence',
   'evidence_malformed',
   // v1.3.0: a retired key, and a key whose role or resource prefix does not cover the record.
@@ -142,6 +152,8 @@ export const PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
  * yet.
  */
 export const RECORD_PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
+  // 1.3.1: refused by the NA's strict JSON reader; a batch so refused is split until the record is found.
+  'invalid_json',
   'invalid_observation',
   'observation_malformed',
   'observation_invalid_signature',
@@ -171,13 +183,25 @@ export function classifySubmissionError(
     const refused = refusals.has(err.code) && (err.status === 0 || (err.status >= 400 && err.status < 500));
     return { failure, transient: !refused };
   }
+  // 1.3.1: the transport turns every failure to reach the NA into a `NetworkError`; anything else
+  // failed here, before a request was made, and is not named a network error.
   const message = err instanceof Error ? err.message : String(err);
-  return { failure: { status: 0, code: 'network_error', message }, transient: true };
+  return { failure: { status: 0, code: LOCAL_ERROR, message }, transient: true };
 }
 
 /** Delay before the next attempt after `attempts` failures: 5 s, doubling, at most 15 min. */
 export function retryDelayMs(attempts: number): number {
   return Math.min(FIRST_RETRY_MS * 2 ** Math.max(0, attempts - 1), MAX_RETRY_MS);
+}
+
+/**
+ * When to try a record again after `attempts` failures, the last one `err`:
+ * the backoff, or later when the NA said when (`Retry-After`, 1.3.1; at most
+ * 15 minutes).
+ */
+export function nextAttemptAt(attempts: number, err: unknown, now = Date.now()): string {
+  const asked = err instanceof GenesisMeshError && err.retryAfterSeconds !== null ? err.retryAfterSeconds * 1000 : 0;
+  return new Date(now + Math.max(retryDelayMs(attempts), Math.min(asked, MAX_RETRY_MS))).toISOString();
 }
 
 /** A new pending entry for a signed record. */
@@ -238,6 +262,10 @@ const ENTRY_FILE = /^(\d{12})-([A-Za-z0-9-]{1,64})\.json$/;
 const TEMP_FILE = /^\.(\d{12}-[A-Za-z0-9-]{1,64}\.json)\.[0-9a-f]+\.tmp$/;
 const FORMAT = 'gm.evidence.outbox.v1';
 const RECORD_FORMAT = 'gm.evidence.record-outbox.v1';
+/** A file of another outbox format: refused, never moved. */
+const OTHER_FORMAT = Symbol('other format');
+/** The suffix an unreadable entry file is renamed with (1.3.1). */
+const UNREADABLE = '.unreadable';
 
 interface StoredEntry<E> {
   file: string;
@@ -330,7 +358,8 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
       const temp = TEMP_FILE.exec(name);
       if (!temp) continue;
       const path = join(this.directory, name);
-      if (!names.includes(temp[1]!) && this.parse(await readFile(path, 'utf-8').catch(() => '')) !== null) {
+      const entry = names.includes(temp[1]!) ? null : this.parse(await readFile(path, 'utf-8').catch(() => ''));
+      if (entry !== null && entry !== OTHER_FORMAT) {
         await rename(path, join(this.directory, temp[1]!));
       } else {
         await rm(path, { force: true });
@@ -342,12 +371,27 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
       names = await readdir(this.directory);
     }
     const stored = new Map<string, StoredEntry<E>>();
+    const unreadable: string[] = [];
     for (const file of names) {
       const match = ENTRY_FILE.exec(file);
       if (!match) continue;
       const entry = this.parse(await readFile(join(this.directory, file), 'utf-8'));
-      if (entry === null) throw new Error(`outbox file ${file} is unreadable or not ${this.format}`);
+      if (entry === OTHER_FORMAT) throw new Error(`outbox file ${file} is not ${this.format}`);
+      if (entry === null) {
+        // 1.3.1: a file that cannot be read is moved aside, so it does not stop every action.
+        await rename(join(this.directory, file), join(this.directory, `${file}${UNREADABLE}`));
+        unreadable.push(file);
+        continue;
+      }
       stored.set(match[2]!, { file, sequence: Number(match[1]), entry });
+    }
+    if (unreadable.length) {
+      await syncDirectory(this.directory);
+      // Once: the next read finds the outbox without them.
+      throw new GenesisMeshError(`outbox file${unreadable.length > 1 ? 's' : ''} ${unreadable.join(', ')} in `
+        + `${this.directory} could not be read as ${this.format} and ${unreadable.length > 1 ? 'were' : 'was'} moved `
+        + `aside (*${UNREADABLE}); the record${unreadable.length > 1 ? 's' : ''} held there will not be submitted`,
+      'outbox_file_unreadable', 0);
     }
     return stored;
   }
@@ -367,16 +411,22 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
     await syncDirectory(this.directory);
   }
 
-  /** The entry in a file's text, or null when it is not a well-formed file of this outbox. */
-  private parse(text: string): E | null {
+  /**
+   * The entry in a file's text; `OTHER_FORMAT` for a well-formed file of
+   * another format (the other outbox, a later version); null when it cannot be read.
+   */
+  private parse(text: string): E | typeof OTHER_FORMAT | null {
+    let body: { format?: unknown; entry?: Record<string, unknown> } | null;
     try {
-      const body = parseJson(text) as { format?: unknown; entry?: Record<string, unknown> };
-      const entry = body.entry;
-      if (body.format !== this.format || !entry || typeof entry['id'] !== 'string' || !this.isEntry(entry)) return null;
-      return entry as unknown as E;
+      body = parseJson(text) as typeof body;
     } catch {
       return null;
     }
+    if (typeof body !== 'object' || body === null) return null;
+    if (body.format !== this.format) return typeof body.format === 'string' ? OTHER_FORMAT : null;
+    const entry = body.entry;
+    if (typeof entry !== 'object' || entry === null || typeof entry['id'] !== 'string' || !this.isEntry(entry)) return null;
+    return entry as unknown as E;
   }
 }
 
@@ -386,11 +436,15 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
  * entries were added. The Rust SDK reads and writes the same format.
  *
  * One process uses a directory at a time: the directory is read once, then
- * kept in memory. A temporary file left by a crash is recovered (an entry
- * that was being added) or removed (an update that did not finish) on that
- * first read. A directory the outbox creates is `0700` and its files `0600`
- * on POSIX; on Windows, and for a directory that already exists, restrict
- * access to it yourself.
+ * kept in memory, and nothing stops a second process from opening it too
+ * (each would keep its own view). A temporary file left by a crash is
+ * recovered (an entry that was being added) or removed (an update that did
+ * not finish) on that first read. A file that cannot be read is moved aside
+ * as `<name>.unreadable` (1.3.1): that read throws `outbox_file_unreadable`
+ * naming it, and the next read goes on without it. A file of another outbox
+ * format is refused and left in place. A directory the outbox creates is
+ * `0700` and its files `0600` on POSIX; on Windows, and for a directory that
+ * already exists, restrict access to it yourself.
  */
 export class FileOutbox extends JsonFileOutbox<OutboxEntry> {
   constructor(directory: string) {
