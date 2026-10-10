@@ -27,6 +27,7 @@ import {
   sign as cryptoSign,
   verify as cryptoVerify,
 } from 'node:crypto';
+import { checkStrictJson } from './strict-json.js';
 
 /** Escape every non-ASCII UTF-16 unit as \uXXXX, as Python's ensure_ascii does. */
 function asciiString(value: string): string {
@@ -79,8 +80,12 @@ const PYTHON_FLOATS = new WeakMap<object, Set<string>>();
  * beyond Number.MAX_SAFE_INTEGER become `bigint` so no digit is lost. Use it
  * for any NA JSON that will be verified or digested. Requires JSON.parse source
  * text access (Node.js 22+).
+ *
+ * v1.2.0: input every implementation would not read alike (a duplicate key, a
+ * lone surrogate, an integer beyond 64 bits, ...) throws `StrictJsonError`.
  */
 export function parseJson(text: string): unknown {
+  checkStrictJson(text);
   return JSON.parse(text, function (this: object, key: string, value: unknown, context?: { source?: string }) {
     if (typeof value === 'number' && !Number.isSafeInteger(value) && context?.source && /^-?\d+$/.test(context.source)) {
       return BigInt(context.source);

@@ -8,7 +8,7 @@ import { validDecision, validContext, validExecution, validJustification, validC
  */
 
 import { compareCodePoints, parseJson, verifyCanonical } from './auth.js';
-import { isKnownEntryKind, unknownFields, withoutUnknownFields } from './strict.js';
+import { isKnownEntryKind, nonCanonicalTimestamps, unknownFields, withoutUnknownFields } from './strict.js';
 import {
   agreementCanonical,
   attestationCanonical,
@@ -165,6 +165,8 @@ export function verifyBoundaryDecision(
   ) {
     return reject('unknown_field');
   }
+  // v1.2.0: a decision signed over a form the reference does not write.
+  if (nonCanonicalTimestamps('BoundaryDecision', decision).length > 0) return reject('non_canonical_form');
 
   const proof = decision.freshness_proof;
   if (proof && options.freshnessProofIssuerKeys && options.freshnessProofIssuerKeys.length > 0) {
@@ -249,12 +251,23 @@ export interface VerifyEvidenceOptions {
   checkpoint?: RetentionCheckpoint | null;
 }
 
+const JSON_SPACE = ' \t\r\n';
+
+/** `s` without JSON whitespace at either end, as every implementation trims a line (`trim()` also removes other spaces). */
+function trimJsonSpace(s: string): string {
+  let start = 0;
+  let end = s.length;
+  while (start < end && JSON_SPACE.includes(s[start]!)) start++;
+  while (end > start && JSON_SPACE.includes(s[end - 1]!)) end--;
+  return s.slice(start, end);
+}
+
 /** Parse `gm.evidence.event` JSON Lines (blank lines ignored). */
 export function parseExportLines(text: string | Iterable<string>): EvidenceEvent[] {
   const lines = typeof text === 'string' ? text.split('\n') : text;
   const events: EvidenceEvent[] = [];
   for (const raw of lines) {
-    const line = raw.trim();
+    const line = trimJsonSpace(raw);
     if (!line) continue;
     const event = parseJson(line) as EvidenceEvent;
     if (!validEvent(event)) throw new Error('invalid evidence event envelope or unsupported schema');
@@ -482,7 +495,8 @@ export type AgreementVerificationReason =
   | 'missing_responder_signature'
   | 'invalid_responder_signature'
   | 'graph_digest_mismatch'
-  | 'unknown_field';
+  | 'unknown_field'
+  | 'non_canonical_form';
 
 export interface AgreementVerification {
   accepted: boolean;
@@ -515,6 +529,8 @@ export function verifyAgreement(
   }
   // v1.2.0: an authentic agreement with a signed field this SDK does not know.
   if (unknownFields('AgreementRecord', record).length > 0) return result(false, 'unknown_field');
+  // v1.2.0: an agreement signed over a form the reference does not write.
+  if (nonCanonicalTimestamps('AgreementRecord', record).length > 0) return result(false, 'non_canonical_form');
   return result(true, 'accepted');
 }
 
@@ -523,7 +539,8 @@ export function verifyAgreement(
 /** True when the licensor signed the DataLicensePolicy. */
 export function verifyDataLicensePolicySignature(policy: DataLicensePolicy, licensorPublicKeys: readonly string[]): boolean {
   return signedBy(dataLicensePolicyCanonical(policy), policy.signature, licensorPublicKeys)
-    && unknownFields('DataLicensePolicy', policy).length === 0;
+    && unknownFields('DataLicensePolicy', policy).length === 0
+    && nonCanonicalTimestamps('DataLicensePolicy', policy).length === 0;
 }
 
 export type DataUsageViolationType =
@@ -561,14 +578,23 @@ export function verifyDataAccessIntent(
 ): DataIntentVerification {
   const fail = (violations: DataUsageViolationDetail[]): DataIntentVerification =>
     ({ valid: false, violation_reason: violations[0]!.violation_type, violations });
-  // v1.2.0: fields this SDK does not know, as the reference reports them.
+  // v1.2.0: fields this SDK does not know, and forms the reference does not
+  // write, as the reference reports them.
   const intentUnknown = unknownFields('DataAccessIntent', intent);
-  if (intentUnknown.length > 0 && !signedBy(dataAccessIntentCanonical(intent), intent.signature, agentPublicKeys)) {
+  const intentLoose = nonCanonicalTimestamps('DataAccessIntent', intent);
+  if ((intentUnknown.length > 0 || intentLoose.length > 0)
+    && !signedBy(dataAccessIntentCanonical(intent), intent.signature, agentPublicKeys)) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: 'Invalid intent signature' }]);
   }
   const unknown = [...intentUnknown, ...unknownFields('DataLicensePolicy', policy, 'policy.')].sort();
   if (unknown.length > 0) {
     return fail([{ violation_type: 'intent_exceeds_license', detail: `Unknown field: ${unknown.join(', ')}` }]);
+  }
+  if (intentLoose.length > 0) {
+    return fail([{ violation_type: 'intent_exceeds_license', detail: 'Not in canonical form: intent' }]);
+  }
+  if (nonCanonicalTimestamps('DataLicensePolicy', policy).length > 0) {
+    return fail([{ violation_type: 'intent_exceeds_license', detail: 'Not in canonical form: policy' }]);
   }
   if (!intent.signature) return fail([{ violation_type: 'intent_exceeds_license', detail: 'Missing intent signature' }]);
   if (!signedBy(dataAccessIntentCanonical(intent), intent.signature, agentPublicKeys)) {

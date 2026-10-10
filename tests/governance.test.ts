@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import {
-  GenesisMeshClient, ExecutionRecorder, seedSigner, signCanonical, decisionCanonical, executionDigest,
+  GenesisMeshClient, ExecutionRecorder, seedSigner, signCanonical, decisionCanonical, executionDigest, pythonTimestamp,
   governedAction, DecisionVerificationError, GovernedActionError, MetadataRefusedError, EvidenceNotKeptError,
   summarizeDecision, reconcileResources, parseExportLines, withoutRefusedMetadata,
   MemoryOutbox, NetworkError, ConflictError, RateLimitError, ServiceUnavailableError, SecretMaterialError,
@@ -20,8 +20,9 @@ const signer = seedSigner(TEST_KEY.seedBase64, 'test');
 afterEach(() => { jest.useRealTimers(); });
 async function setup(denied = false, outbox: EvidenceOutbox | null = null) {
   const evaluation = structuredClone(denied ? v.denied : v.allowed);
-  evaluation.decision.decision_made_at = new Date(Date.now() - 1000).toISOString();
-  evaluation.decision.decision_valid_until = new Date(Date.now() + 60_000).toISOString();
+  // Timestamps in canonical form, as the NA writes them (v1.2.0).
+  evaluation.decision.decision_made_at = pythonTimestamp(new Date(Date.now() - 1000));
+  evaluation.decision.decision_valid_until = pythonTimestamp(new Date(Date.now() + 60_000));
   evaluation.decision.signature = await signCanonical(decisionCanonical(evaluation.decision), signer);
   const gm = new GenesisMeshClient({
     audience: 'TEST', baseUrl: 'http://unused', fetch: mockFetch({ status: 500, body: {} }) as unknown as typeof fetch, outbox: outbox ?? undefined,

@@ -15,7 +15,7 @@ function freeze<T>(value: T): T {
 }
 
 export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
-  "version": 1,
+  "version": 2,
   "entry_kinds": [
     "decision",
     "execution",
@@ -29,8 +29,8 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
           "object": "AgreementTerms"
         },
         "agreement_id": null,
-        "established_at": null,
-        "expires_at": null,
+        "established_at": "timestamp",
+        "expires_at": "timestamp",
         "graph_digest": null,
         "offer_id": null,
         "offerer_evidence": "open",
@@ -58,8 +58,8 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "capabilities": null,
         "freshness_commitment": null,
         "scope": "open",
-        "valid_from": null,
-        "valid_until": null
+        "valid_from": "timestamp",
+        "valid_until": "timestamp"
       }
     },
     "AppliedPolicy": {
@@ -88,8 +88,8 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "authorized": null,
         "context_id": null,
         "decision_id": null,
-        "decision_made_at": null,
-        "decision_valid_until": null,
+        "decision_made_at": "timestamp",
+        "decision_valid_until": "timestamp",
         "denial_reason": null,
         "freshness_proof": {
           "object": "FreshnessProof"
@@ -118,7 +118,7 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "gates": {
           "list": "GateSpec"
         },
-        "issued_at": null,
+        "issued_at": "timestamp",
         "issued_by": null,
         "issuer_sovereign_id": null,
         "policy_id": null,
@@ -128,8 +128,8 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "signature": {
           "object": "Signature"
         },
-        "valid_from": null,
-        "valid_until": null,
+        "valid_from": "timestamp",
+        "valid_until": "timestamp",
         "version": null
       },
       "root": true,
@@ -145,7 +145,7 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "parent_kind": null,
         "provider_sovereign_id": null,
         "request_parameters": "open",
-        "requested_at": null,
+        "requested_at": "timestamp",
         "requested_capability": null,
         "requester_sovereign_id": null
       },
@@ -160,12 +160,12 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "agent_sovereign_id": null,
         "decision_id": null,
         "declared_access_types": null,
-        "declared_at": null,
+        "declared_at": "timestamp",
         "declared_sources": {
           "list": "DataSourceDescriptor"
         },
         "estimated_volume_bytes": null,
-        "expires_at": null,
+        "expires_at": "timestamp",
         "intent_id": null,
         "signature": {
           "object": "Signature"
@@ -186,8 +186,8 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "signature": {
           "object": "Signature"
         },
-        "valid_from": null,
-        "valid_until": null
+        "valid_from": "timestamp",
+        "valid_until": "timestamp"
       },
       "root": true,
       "signature_field": "signature"
@@ -213,7 +213,7 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "outcome": null,
         "payload_digest": null,
         "prev_entry_digest": null,
-        "recorded_at": null,
+        "recorded_at": "timestamp",
         "resource_action": null,
         "resource_id": null,
         "resource_sequence": null,
@@ -229,7 +229,7 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "context_id": null,
         "decision_id": null,
         "evidence_id": null,
-        "executed_at": null,
+        "executed_at": "timestamp",
         "executed_capability": null,
         "execution_parameters": "open",
         "executor_sovereign_id": null,
@@ -256,13 +256,13 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
     },
     "FreshnessProof": {
       "fields": {
-        "attested_at": null,
+        "attested_at": "timestamp",
         "feed_digest": null,
         "feed_sequence": null,
         "feed_sovereign_id": null,
         "issuer_sovereign_id": null,
         "proof_id": null,
-        "proof_valid_until": null,
+        "proof_valid_until": "timestamp",
         "signature": {
           "object": "Signature"
         }
@@ -296,12 +296,12 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "operator_sovereign_id": null,
         "short_circuited_at": null,
         "trace_id": null,
-        "traced_at": null
+        "traced_at": "timestamp"
       }
     },
     "GateTraceEntry": {
       "fields": {
-        "evaluated_at": null,
+        "evaluated_at": "timestamp",
         "gate_name": null,
         "gate_type": null,
         "inputs": "open",
@@ -315,7 +315,7 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "decision_id": null,
         "issuer_sovereign_id": null,
         "proof_id": null,
-        "proof_issued_at": null,
+        "proof_issued_at": "timestamp",
         "signature": {
           "object": "Signature"
         },
@@ -330,8 +330,8 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
       "fields": {
         "attestation_id": null,
         "claims": "open",
-        "expires_at": null,
-        "issued_at": null,
+        "expires_at": "timestamp",
+        "issued_at": "timestamp",
         "issued_by": null,
         "issuer_sovereign_id": null,
         "roles": null,
@@ -341,7 +341,7 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "status": null,
         "subject_id": null,
         "subject_public_key": null,
-        "valid_from": null
+        "valid_from": "timestamp"
       },
       "root": true,
       "signature_field": "signatures"
@@ -392,8 +392,8 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
     "RetentionCheckpoint": {
       "fields": {
         "checkpoint_id": null,
-        "created_at": null,
-        "cutoff": null,
+        "created_at": "timestamp",
+        "cutoff": "timestamp",
         "issued_by": null,
         "last_removed_entry_digest": null,
         "previous_checkpoint_id": null,
@@ -418,7 +418,7 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
     "SovereignRevocationFeed": {
       "fields": {
         "feed_id": null,
-        "issued_at": null,
+        "issued_at": "timestamp",
         "issued_by": null,
         "issuer_sovereign_id": null,
         "revocation_reasons": "open",
@@ -434,7 +434,7 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
     "StoreAnchor": {
       "fields": {
         "anchor_sequence": null,
-        "anchored_at": null,
+        "anchored_at": "timestamp",
         "entry_digest": null,
         "issued_by": null,
         "previous_anchor_digest": null,

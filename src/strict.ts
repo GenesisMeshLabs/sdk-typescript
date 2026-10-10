@@ -8,14 +8,19 @@
  * lists every field of every record this SDK verifies. Verifiers check the
  * signature over the record as received first; a signed field the registry
  * does not list is then refused as `unknown_field`, and an evidence export
- * entry of another kind as `unknown_entry_kind`. See the core's reference
- * page "Canonical Form of Signed Records".
+ * entry of another kind as `unknown_entry_kind`. A record signed over a form
+ * the reference does not write is refused as `non_canonical_form`; this SDK
+ * checks the form of the timestamps the registry marks. See the core's
+ * reference page "Canonical Form of Signed Records".
  */
 
 import { CANONICAL_REGISTRY } from './canonical-registry.js';
 
-/** A field is a value (null), free-form JSON ('open'), or one, a list or a map of a nested model. */
-export type FieldKind = null | 'open' | { object: string } | { list: string } | { map: string };
+/**
+ * A field is a value (null), a timestamp ('timestamp', v1.2.0), free-form JSON
+ * ('open'), or one, a list or a map of a nested model.
+ */
+export type FieldKind = null | 'open' | 'timestamp' | { object: string } | { list: string } | { map: string };
 
 export interface ModelSpec {
   fields: Record<string, FieldKind>;
@@ -58,7 +63,7 @@ function collect(model: string, data: unknown, path: Step[], projection: boolean
       continue;
     }
     const kind = s.fields[key];
-    if (value === null || value === undefined || kind === null || kind === 'open' || kind === undefined) continue;
+    if (value === null || value === undefined || kind === null || kind === undefined || typeof kind !== 'object') continue;
     if ('object' in kind) {
       collect(kind.object, value, [...path, key], false, found);
     } else if ('list' in kind && Array.isArray(value)) {
@@ -107,4 +112,55 @@ export function withoutUnknownFields<T>(model: string, record: T): T {
     if (isRecord(node)) delete node[steps[steps.length - 1] as string];
   }
   return copy;
+}
+
+const TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{6}))?(Z|[+-](\d{2}):(\d{2}))?$/;
+
+/**
+ * True when `value` is a timestamp in canonical form (v1.2.0): what the
+ * reference writes, `YYYY-MM-DDTHH:MM:SS`, six digits of microseconds when not
+ * all zero, then `Z` for UTC or `+HH:MM` / `-HH:MM` for another offset (none
+ * for a timestamp without one), naming an instant that exists.
+ */
+export function canonicalTimestamp(value: unknown): boolean {
+  const m = typeof value === 'string' ? TIMESTAMP.exec(value) : null;
+  if (!m) return false;
+  const [, year, month, day, hour, minute, second, fraction, zone, zoneHour, zoneMinute] = m;
+  if (fraction === '000000' || zone === '+00:00' || zone === '-00:00') return false;
+  if (zoneHour !== undefined && (Number(zoneHour) > 23 || Number(zoneMinute) > 59)) return false;
+  const y = Number(year), mo = Number(month), d = Number(day);
+  if (y < 1 || mo < 1 || mo > 12 || d < 1 || Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59) return false;
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1]!;
+  return d <= days;
+}
+
+/**
+ * Dotted paths, sorted, of the timestamps in `record`'s signed projection that
+ * are not in canonical form (v1.2.0). Values that are not strings are left to
+ * validation.
+ */
+export function nonCanonicalTimestamps(model: string, record: unknown, path = ''): string[] {
+  const found: string[] = [];
+  const walk = (name: string, data: unknown, prefix: string, projection: boolean) => {
+    const s = CANONICAL_REGISTRY.models[name];
+    if (!s || !isRecord(data)) return;
+    for (const [key, value] of Object.entries(data)) {
+      if (projection && outsideProjection(s, key)) continue;
+      const kind = Object.prototype.hasOwnProperty.call(s.fields, key) ? s.fields[key] : null;
+      if (value === null || value === undefined || kind === null || kind === undefined) continue;
+      if (kind === 'timestamp') {
+        const items = Array.isArray(value) ? value : [value];
+        if (items.some(item => typeof item === 'string' && !canonicalTimestamp(item))) found.push(prefix + key);
+      } else if (typeof kind === 'object' && 'object' in kind) {
+        walk(kind.object, value, `${prefix}${key}.`, false);
+      } else if (typeof kind === 'object' && 'list' in kind && Array.isArray(value)) {
+        value.forEach((item, i) => walk(kind.list, item, `${prefix}${key}.${i}.`, false));
+      } else if (typeof kind === 'object' && 'map' in kind && isRecord(value)) {
+        for (const [k, item] of Object.entries(value)) walk(kind.map, item, `${prefix}${key}.${k}.`, false);
+      }
+    }
+  };
+  walk(model, record, path, true);
+  return found.sort();
 }
