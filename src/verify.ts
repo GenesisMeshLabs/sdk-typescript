@@ -381,6 +381,12 @@ export function verifyEvidenceEvents(
       continue;
     }
     if (checked.unsigned.length > 0) warn(seq, 'unsigned_field', checked.unsigned.join(', '));
+    if (checked.unsigned.length > 0 && entry.entry_kind in OUT_OF_BAND_MODELS) {
+      // v1.3.0: the reference stores these records exactly as signed; a field outside the
+      // signature is no part of one (the reference refuses it as it reads the record).
+      fail(seq, 'payload_invalid', checked.unsigned.join(', '));
+      continue;
+    }
     const payload = checked.payload;
     // v1.3.0: a record whose signature covers it as received, in a form the reference
     // does not write, is refused by name, as the reference refuses it (checked when the
@@ -654,8 +660,12 @@ function checkPayloadFields(
     signedAsReceived = signedBy(justificationCanonical(payload as unknown as DecisionJustification),
       (payload as unknown as DecisionJustification).signature, naPublicKeys);
   } else if (kind in OUT_OF_BAND_MODELS) {
-    signedAsReceived = signedBy(outOfBandCanonical(payload), payload['signature'] as Signature | null | undefined,
-      outOfBandKeys(kind, payload, naPublicKeys, executorKeys));
+    // The key the signature names, whatever its role: an authentic record with a field this SDK
+    // does not know is refused by name first, as the reference refuses it.
+    const signature = payload['signature'] as Signature | null | undefined;
+    const named = signature && typeof signature.key_id === 'string' ? executorKeys[signature.key_id] : undefined;
+    const keys = KEY_ROLES[kind] === undefined ? naPublicKeys : named ? [named.public_key] : [];
+    signedAsReceived = signedBy(outOfBandCanonical(payload), signature, keys);
   } else {
     signedAsReceived = checkpointSigned(payload as unknown as RetentionCheckpoint, naPublicKeys);
   }

@@ -654,12 +654,13 @@ export class EvidenceStoreClient {
       try {
         results = await this.submitObservations(batch.map(e => e.record as ObservationRecord));
       } catch (err) {
-        if (classifySubmissionError(err, RECORD_PERMANENT_REFUSALS).transient) {
+        const tooLarge = err instanceof GenesisMeshError && err.status === 413;
+        if (!tooLarge && classifySubmissionError(err, RECORD_PERMANENT_REFUSALS).transient) {
           for (const e of batch) settle(e, { queued: await this.recordFailed(outbox, e, err) });
           stopped = true;
           continue;
         }
-        // The batch itself was refused: each observation is tried alone.
+        // The batch itself was refused, or is larger than the NA takes: each observation is tried alone.
         for (const e of batch) {
           if (stopped) result.pending.push(e);
           else stopped = !settle(e, await this.attemptRecord(outbox, e));

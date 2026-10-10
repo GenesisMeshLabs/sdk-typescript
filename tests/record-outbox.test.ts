@@ -250,3 +250,73 @@ describe('review fixes (1.3.0)', () => {
     expect(await new FileRecordOutbox(dir).list()).toEqual([]);
   });
 });
+
+describe('review fixes, second round (1.3.0)', () => {
+  const base = {
+    attestation_id: 'att', requested_capability: 'c', resource_id: 'kv:v/s', resource_action: 'rotate' as const,
+    verify: { operatorPublicKeys: [TEST_KEY.pubBase64], expectedPolicies: [] }, breakGlass: { justification: 'outage' },
+  };
+  it('never breaks the glass once the NA has answered', async () => {
+    const { gm, outbox } = client();
+    jest.spyOn(gm.boundary, 'evaluate').mockRejectedValue(new NetworkError('body lost', 'response_body_unreadable'));
+    const action = jest.fn(async () => ({}));
+    await expect(governedAction(gm, new ExecutionRecorder({ executorSovereignId: 'e', signer }), base, action))
+      .rejects.toMatchObject({ code: 'response_body_unreadable' });
+    expect(action).not.toHaveBeenCalled();
+    expect(await outbox.list()).toEqual([]);
+  });
+  it('checks the context before anything runs', async () => {
+    const { gm } = client();
+    const action = jest.fn(async () => ({}));
+    const params = { ...base, context: { request_parameters: 'billing' as unknown as Record<string, unknown> } };
+    await expect(governedAction(gm, new ExecutionRecorder({ executorSovereignId: 'e', signer }), params, action))
+      .rejects.toMatchObject({ code: 'break_glass_malformed' });
+    expect(action).not.toHaveBeenCalled();
+  });
+  it('always keeps a record once the action ran', async () => {
+    const { gm } = client();
+    jest.spyOn(gm.boundary, 'evaluate').mockRejectedValue(new NetworkError('down'));
+    jest.spyOn(gm.evidenceStore, 'submitBreakGlass').mockRejectedValue(new NetworkError('down'));
+    const big = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`k${i}`, `item ${i} of the report`]));
+    const result = await governedAction(gm, new ExecutionRecorder({ executorSovereignId: 'e', signer }),
+      { ...base, context: { attributes: { note: 'a short note, '.repeat(650) } } },
+      async () => ({ execution_parameters: big, outcome_detail: 'a long detail, '.repeat(100) })) as BreakGlassResult<unknown>;
+    expect(result.queued?.state).toBe('pending');
+    expect(result.record.execution_parameters).toEqual({});
+    expect(result.dropped).toContain('outcome_detail');
+  });
+  it('clips an outcome detail to what the NA admits', async () => {
+    const { gm } = client();
+    jest.spyOn(gm.boundary, 'evaluate').mockRejectedValue(new NetworkError('down'));
+    jest.spyOn(gm.evidenceStore, 'submitBreakGlass').mockResolvedValue(recorded());
+    const result = await governedAction(gm, new ExecutionRecorder({ executorSovereignId: 'e', signer }), base,
+      async () => ({ outcome_detail: 'one more detail, '.repeat(90) })) as BreakGlassResult<unknown>;
+    expect(Array.from(result.record.outcome_detail!).length).toBe(1024);
+  });
+  it('keeps float spellings in outbox files another SDK wrote', async () => {
+    const dir = await directory();
+    const record = await observer.record({
+      resource_id: 'kv:prod/f', action: 'rotate', capability: 'secret.rotate', changed_at: new Date(Date.now() - 60_000),
+      source: 'log', source_event_id: 'f-1', metadata: { ratio: 1.5 },
+    });
+    // Signed over 1.0, as a Rust or Python signer writes an integral float.
+    const text = JSON.stringify({ format: 'gm.evidence.record-outbox.v1', entry: recordOutboxEntry(record) });
+    const asFloat = text.replace('"ratio":1.5', '"ratio":1.0');
+    const signed = { ...JSON.parse(asFloat).entry.record };
+    expect(signed.metadata.ratio).toBe(1);
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, `000000000001-${record.observation_id}.json`), asFloat, 'utf-8');
+    const [entry] = await new FileRecordOutbox(dir).list();
+    const { outOfBandCanonical } = await import('../src/index.js');
+    expect(outOfBandCanonical(entry!.record)).toContain('"ratio":1.0');
+  });
+  it('sends a batch the NA will not take whole one observation at a time', async () => {
+    const { store } = client();
+    jest.spyOn(store, 'submitObservation').mockRejectedValueOnce(new NetworkError('down'));
+    await store.enqueueRecord(await observe(1));
+    jest.spyOn(store, 'submitObservations').mockRejectedValue(new GenesisMeshError('too large', 'request_entity_too_large', 413));
+    jest.spyOn(store, 'submitObservation').mockResolvedValue(recorded());
+    expect((await store.flushRecords({ ignoreBackoff: true })).admitted.length).toBe(1);
+  });
+});

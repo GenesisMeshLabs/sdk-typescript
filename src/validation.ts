@@ -103,42 +103,62 @@ const entry = shape({
 // v1.3.0: records of changes made outside the controlled path. An absent
 // optional field is left out of the signed form; a null reads as absent.
 const absent = (check: Check): Check => optional(nullable(check));
-const bounded = (max: number, min = 1): Check => v => string(v) && (v as string).length >= min && (v as string).length <= max;
+/** A string of `min` to `max` characters, counted as the reference counts them (code points). */
+const bounded = (max: number, min = 1): Check => v => {
+  if (!string(v)) return false;
+  const length = Array.from(v as string).length;
+  return length >= min && length <= max;
+};
+/** The reference keeps 1.3.0 records' timestamps in UTC. */
+const utc: Check = v => timestamp(v) && /(?:Z|[+-]00:00)$/.test(v as string);
+/** Fields the reference fills when absent: left out, the record is not in its form (`non_canonical_form`). */
+const filled = (check: Check): Check => optional(check);
 const sha256 = bounded(64, 64);
 const verdict = oneOf('allow', 'deny', 'indeterminate');
-export const validObservation = shape({
+const observationFields = shape({
   observation_id: bounded(128), observer_sovereign_id: bounded(256), resource_id: bounded(256), action,
-  capability: bounded(256), changed_at: absent(timestamp), changed_not_before: absent(timestamp),
-  changed_not_after: absent(timestamp), observed_at: timestamp, actor: absent(bounded(256)), source: bounded(128),
-  source_event_id: bounded(256), version_id: absent(bounded(256)), metadata: isObject, signature: optional(signature),
+  capability: bounded(256), changed_at: absent(utc), changed_not_before: absent(utc),
+  changed_not_after: absent(utc), observed_at: utc, actor: absent(bounded(256)), source: bounded(128),
+  source_event_id: bounded(256), version_id: absent(bounded(256)), metadata: filled(isObject),
+  signature: optional(signature),
 });
+/** An observation names its change time, or both ends of a window in order, never both. */
+export const validObservation: Check = v => {
+  if (!observationFields(v)) return false;
+  const r = v as Record<string, unknown>;
+  const given = (k: string) => r[k] !== undefined && r[k] !== null;
+  if (given('changed_at')) return !given('changed_not_before') && !given('changed_not_after');
+  if (!given('changed_not_before') || !given('changed_not_after')) return false;
+  return Date.parse(r['changed_not_before'] as string) <= Date.parse(r['changed_not_after'] as string);
+};
 export const validBreakGlass = shape({
   break_glass_id: bounded(128), executor_sovereign_id: bounded(256), resource_id: bounded(256), resource_action: action,
-  capability: bounded(256), attestation_id: absent(bounded(128)), request_parameters: isObject, attributes: isObject,
-  justification: bounded(1024), evaluation_request_digest: sha256,
-  evaluation_failure: oneOf('network_error', 'timeout', 'server_error', 'rate_limited'), executed_at: timestamp,
-  outcome: string, outcome_detail: absent(bounded(1024, 0)), execution_parameters: isObject, signature: optional(signature),
+  capability: bounded(256), attestation_id: absent(bounded(128)), request_parameters: filled(isObject),
+  attributes: filled(isObject), justification: bounded(1024), evaluation_request_digest: sha256,
+  evaluation_failure: oneOf('network_error', 'timeout', 'server_error', 'rate_limited'), executed_at: utc,
+  outcome: string, outcome_detail: absent(bounded(1024, 0)), execution_parameters: filled(isObject),
+  signature: optional(signature),
 });
 export const validJudgement = shape({
   judgement_id: bounded(128), subject_kind: oneOf('observation', 'break_glass'), subject_id: bounded(128),
   subject_digest: sha256, subject_store_sequence: positive, resource_id: bounded(256), action, capability: bounded(256),
   governed_by: oneOf('prior_decision', 'after_the_fact'), verdict, reason: absent(bounded(1024, 0)),
-  evaluated_as_of: timestamp, evaluated_from: absent(timestamp), policy_binding: absent(policyBinding),
-  gate_results: array(gateResult), current_verdict: absent(verdict), current_policy_set_digest: absent(string),
+  evaluated_as_of: utc, evaluated_from: absent(utc), policy_binding: absent(policyBinding),
+  gate_results: filled(array(gateResult)), current_verdict: absent(verdict), current_policy_set_digest: absent(string),
   flagged_for_review: absent(boolean), matched_evidence_id: absent(string), matched_decision_id: absent(string),
-  possible_match_evidence_id: absent(string), judged_at: timestamp, issuer_sovereign_id: string, issued_by: string,
+  possible_match_evidence_id: absent(string), judged_at: utc, issuer_sovereign_id: string, issued_by: string,
   signature: optional(signature),
 });
 export const validQuarantine = shape({
   quarantine_id: bounded(128), record_kind: oneOf('execution', 'observation', 'break_glass'), record: isObject,
-  record_digest: sha256, rejection_code: bounded(128), detail: bounded(1024, 0), resource_id: absent(bounded(256)),
-  quarantined_at: timestamp, issuer_sovereign_id: string, issued_by: string, signature: optional(signature),
+  record_digest: sha256, rejection_code: bounded(128), detail: filled(bounded(1024, 0)), resource_id: absent(bounded(256)),
+  quarantined_at: utc, issuer_sovereign_id: string, issued_by: string, signature: optional(signature),
 });
 export const validRegistry = shape({
   registry_record_id: bounded(128),
   event: oneOf('policy_history_started', 'policy_activated', 'policy_deactivated', 'executor_key_registered',
     'executor_key_retired', 'operator_key_holder'),
-  effective_at: timestamp, reconstructed: absent(boolean), policy_id: absent(string), policy_version: absent(positive),
+  effective_at: utc, reconstructed: absent(boolean), policy_id: absent(string), policy_version: absent(positive),
   policy_digest: absent(string), key_id: absent(string), public_key: absent(string), executor_sovereign_id: absent(string),
   key_role: absent(oneOf('executor', 'observer')), resource_prefix: absent(string), operator_tier: absent(string),
   holder: absent(string), approved_by: absent(string), recorded_by: absent(string), issuer_sovereign_id: string,

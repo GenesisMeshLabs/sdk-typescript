@@ -18,6 +18,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { canonicalJson, cloneJson, parseJson } from './auth.js';
 import { GenesisMeshError } from './errors.js';
 import type { BreakGlassRecord, ObservationRecord } from './out-of-band.js';
 import type { EvidenceSubmission, ExecutionEvidence } from './types.js';
@@ -217,11 +218,11 @@ export class MemoryOutbox<E extends { id: string } = OutboxEntry> implements Out
 
   async add(entry: E): Promise<void> {
     if (this.entries.has(entry.id)) throw new Error(`outbox entry ${entry.id} exists`);
-    this.entries.set(entry.id, structuredClone(entry));
+    this.entries.set(entry.id, cloneJson(entry));
   }
 
   async update(entry: E): Promise<void> {
-    if (this.entries.has(entry.id)) this.entries.set(entry.id, structuredClone(entry));
+    if (this.entries.has(entry.id)) this.entries.set(entry.id, cloneJson(entry));
   }
 
   async remove(id: string): Promise<void> {
@@ -229,7 +230,7 @@ export class MemoryOutbox<E extends { id: string } = OutboxEntry> implements Out
   }
 
   async list(): Promise<E[]> {
-    return [...this.entries.values()].map(e => structuredClone(e));
+    return [...this.entries.values()].map(e => cloneJson(e));
   }
 }
 
@@ -272,7 +273,7 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
       if (stored.has(stem)) throw new Error(`outbox entry ${entry.id} exists`);
       const sequence = ++this.lastSequence;
       const file = `${String(sequence).padStart(12, '0')}-${stem}.json`;
-      stored.set(stem, { file, sequence, entry: structuredClone(entry) });
+      stored.set(stem, { file, sequence, entry: cloneJson(entry) });
       try {
         await this.write(file, entry);
       } catch (err) {
@@ -287,7 +288,7 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
       const found = (await this.load()).get(fileStem(entry.id));
       if (!found) return;
       await this.write(found.file, entry);
-      found.entry = structuredClone(entry);
+      found.entry = cloneJson(entry);
     });
   }
 
@@ -305,7 +306,7 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
   async list(): Promise<E[]> {
     return [...(await this.load()).values()]
       .sort((a, b) => a.sequence - b.sequence || (a.file < b.file ? -1 : 1))
-      .map(s => structuredClone(s.entry));
+      .map(s => cloneJson(s.entry));
   }
 
   private load(): Promise<Map<string, StoredEntry<E>>> {
@@ -355,7 +356,9 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
     const temporary = join(this.directory, `.${file}.${randomBytes(6).toString('hex')}.tmp`);
     const handle = await open(temporary, 'wx', 0o600);
     try {
-      await handle.writeFile(`${JSON.stringify({ format: this.format, entry }, null, 2)}\n`, 'utf-8');
+      // Canonical JSON keeps what parseJson read (`1.0`, integers beyond 2^53), so a record another SDK
+      // wrote keeps the form it was signed over.
+      await handle.writeFile(`{"entry":${canonicalJson(entry)},"format":${JSON.stringify(this.format)}}\n`, 'utf-8');
       await handle.sync();
     } finally {
       await handle.close();
@@ -367,7 +370,7 @@ class JsonFileOutbox<E extends { id: string }> implements Outbox<E> {
   /** The entry in a file's text, or null when it is not a well-formed file of this outbox. */
   private parse(text: string): E | null {
     try {
-      const body = JSON.parse(text) as { format?: unknown; entry?: Record<string, unknown> };
+      const body = parseJson(text) as { format?: unknown; entry?: Record<string, unknown> };
       const entry = body.entry;
       if (body.format !== this.format || !entry || typeof entry['id'] !== 'string' || !this.isEntry(entry)) return null;
       return entry as unknown as E;

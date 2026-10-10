@@ -8,7 +8,9 @@ import { randomUUID } from 'node:crypto';
 import type { BoundaryClient, EvaluateParams } from './boundary.js';
 import type { EvidenceStoreClient, RecordSubmission, ResourceState } from './evidence_store.js';
 import { GenesisMeshError, NetworkError } from './errors.js';
-import { checkMetadataOnly, SecretMaterialError, type ExecutionRecorder, type PriorResource } from './execution.js';
+import {
+  checkMetadataOnly, MAX_METADATA_BYTES, SecretMaterialError, type ExecutionRecorder, type PriorResource,
+} from './execution.js';
 import { OutOfBandRecordError, type BreakGlassRecord, type EvaluationFailure } from './out-of-band.js';
 import type { Delivery, OutboxEntry, RecordOutboxEntry } from './outbox.js';
 import { verifyBoundaryDecision, type VerifyDecisionOptions } from './verify.js';
@@ -265,11 +267,16 @@ export interface GovernanceClients {
  * operator signatures keep failing, and an evaluation the NA computed (perhaps
  * a DENY) but could not store. Neither breaks the glass.
  */
-const NOT_BREAKABLE: ReadonlySet<string> = new Set(['admin_auth_throttled', 'evidence_store_unavailable']);
+const NOT_BREAKABLE: ReadonlySet<string> = new Set([
+  'admin_auth_throttled', 'evidence_store_unavailable',
+  // The NA answered (its decision may be a DENY) but the response could not be read.
+  'response_body_unreadable',
+]);
 
 /** The transient failure an evaluation error is, or null for any other error (a DENY is not an error). */
 export function evaluationFailure(err: unknown): EvaluationFailure | null {
   if (err instanceof NetworkError) {
+    if (NOT_BREAKABLE.has(err.code)) return null;
     return (err.cause as { name?: unknown } | undefined)?.name === 'TimeoutError' ? 'timeout' : 'network_error';
   }
   if (err instanceof GenesisMeshError && !NOT_BREAKABLE.has(err.code)) {
@@ -431,17 +438,46 @@ async function checkBreakGlass(
   if (params.resource_id === undefined) throw new Error('breakGlass needs resource_id and resource_action');
   // An agreement-based evaluation rests on the agreement, which a break-glass record does
   // not carry: the NA could not judge it after the fact.
-  if (params.attestation_id === undefined) {
+  if (typeof params.attestation_id !== 'string' || !params.attestation_id) {
     throw new OutOfBandRecordError('breakGlass needs an attestation-based evaluation (attestation_id)',
       'break_glass_malformed');
   }
+  if (typeof params.requested_capability !== 'string' || !params.requested_capability) {
+    throw new OutOfBandRecordError('breakGlass needs requested_capability', 'break_glass_malformed');
+  }
   const justification = options.justification;
-  if (typeof justification !== 'string' || justification.length < 1 || justification.length > 1024) {
+  const length = typeof justification === 'string' ? Array.from(justification).length : 0;
+  if (length < 1 || length > 1024) {
     throw new OutOfBandRecordError('a justification of 1 to 1024 characters is required', 'break_glass_malformed');
   }
-  const secret = checkMetadataOnly({ ...params.context }) ?? checkMetadataOnly({}, justification);
+  // Everything the record carries besides the action's report is checked now, with room left
+  // for the report, so a record can always be kept once the action has run.
+  const context = params.context ?? {};
+  for (const name of ['request_parameters', 'attributes'] as const) {
+    const value = context[name];
+    if (value !== undefined && (typeof value !== 'object' || value === null || Array.isArray(value))) {
+      throw new OutOfBandRecordError(`context.${name} must be an object`, 'break_glass_malformed');
+    }
+  }
+  const carried = { request_parameters: context.request_parameters ?? {}, attributes: context.attributes ?? {} };
+  const secret = checkMetadataOnly({ ...context }) ?? checkMetadataOnly({}, justification);
   if (secret) throw new OutOfBandRecordError(secret, 'break_glass_secret_material');
+  if (Buffer.byteLength(JSON.stringify({ ...carried, justification }), 'utf-8') > MAX_METADATA_BYTES - RECORD_RESERVE) {
+    throw new OutOfBandRecordError(`the context and justification leave no room for the record within `
+      + `${MAX_METADATA_BYTES} bytes`, 'break_glass_malformed');
+  }
   await store.recordOutbox.list();
+}
+
+/** Room kept for the action's report within the metadata limit of a break-glass record. */
+const RECORD_RESERVE = 2048;
+/** The longest outcome detail a break-glass record carries (the reference's limit). */
+const MAX_OUTCOME_DETAIL = 1024;
+
+function clip(text: string | null | undefined, max: number): string | undefined {
+  if (text === null || text === undefined) return undefined;
+  const chars = Array.from(text);
+  return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : text;
 }
 
 /** Run the action without a decision and keep its break-glass record. */
@@ -465,7 +501,7 @@ async function breakTheGlass<T>(
     evaluation_request: request,
     evaluation_failure: failure,
     outcome: report.outcome ?? 'success',
-    outcome_detail: report.outcome_detail ?? undefined,
+    outcome_detail: clip(report.outcome_detail, MAX_OUTCOME_DETAIL),
     execution_parameters: report.execution_parameters,
   });
 
@@ -491,8 +527,17 @@ async function breakTheGlass<T>(
     } catch (err) {
       if (!(err instanceof OutOfBandRecordError) || err.code !== 'break_glass_secret_material') throw err;
       const cleaned = withoutRefusedMetadata(report.execution_parameters ?? {}, report.outcome_detail ?? null);
-      record = await sign({ ...report, ...cleaned });
-      dropped = cleaned.dropped;
+      try {
+        record = await sign({ ...report, ...cleaned });
+        dropped = cleaned.dropped;
+      } catch (again) {
+        if (!(again instanceof OutOfBandRecordError) || again.code !== 'break_glass_secret_material') throw again;
+        // The report together with the context is still refused (its size): keep the outcome alone.
+        const all = [...Object.keys(report.execution_parameters ?? {}),
+          ...(report.outcome_detail != null ? ['outcome_detail'] : [])].sort();
+        record = await sign({ ...report, execution_parameters: {}, outcome_detail: '[secret guard dropped the report]' });
+        dropped = all;
+      }
     }
     delivery = await store.enqueueRecord(record);
   } catch (err) {

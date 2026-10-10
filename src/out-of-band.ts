@@ -24,6 +24,8 @@ import {
   canonicalJson, copyPythonFloats, defineMember, pythonTimestamp, signCanonical, verifyCanonical, type Signer,
 } from './auth.js';
 import { GenesisMeshError } from './errors.js';
+import { nonCanonicalFields, unknownFields } from './strict.js';
+import { validBreakGlass, validJudgement, validObservation, validQuarantine, validRegistry } from './validation.js';
 import { checkMetadataOnly } from './execution.js';
 import type { ReconciliationFinding, ReconciliationStatus } from './governance.js';
 import type { GateResult, PolicyBinding, ResourceAction, Signature } from './types.js';
@@ -177,10 +179,25 @@ export function outOfBandDigest(record: object): string {
   return createHash('sha256').update(outOfBandCanonical(record), 'utf-8').digest('hex');
 }
 
-/** True when the record's signature verifies under one of the keys. */
+const RECORD_KINDS: ReadonlyArray<[string, string, (v: unknown) => boolean]> = [
+  ['observation_id', 'ObservationRecord', validObservation],
+  ['break_glass_id', 'BreakGlassRecord', validBreakGlass],
+  ['judgement_id', 'JudgementRecord', validJudgement],
+  ['quarantine_id', 'QuarantineRecord', validQuarantine],
+  ['registry_record_id', 'RegistryRecord', validRegistry],
+];
+
+/**
+ * True when the record is well formed, its signature verifies under one of the
+ * keys over the record as received, and it is in the reference's form with no
+ * field this SDK does not know (as `verifyEvidenceEvents` checks it).
+ */
 export function verifyOutOfBandRecord(record: OutOfBandRecord, publicKeys: readonly string[]): boolean {
+  const kind = RECORD_KINDS.find(([id]) => id in record);
+  if (!kind || !kind[2](record)) return false;
   const sig = record.signature;
-  return !!sig && verifyCanonical(outOfBandCanonical(record), sig.sig, publicKeys);
+  return !!sig && verifyCanonical(outOfBandCanonical(record), sig.sig, publicKeys)
+    && unknownFields(kind[1], record).length === 0 && nonCanonicalFields(kind[1], record).length === 0;
 }
 
 /** The wire form: the signed fields plus the signature. */

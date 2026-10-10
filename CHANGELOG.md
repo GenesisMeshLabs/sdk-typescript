@@ -83,6 +83,25 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
   pending after a restart), an add no longer scans every entry (it threw
   past about 125,000 entries), and a flush during `enqueue` leaves the record
   being submitted to it.
+- Outbox files are read and written keeping a record's float spellings and
+  large integers, so a record another SDK wrote (`1.0`) still verifies and
+  is submitted as signed.
+- A response the NA sent but whose body could not be read or parsed is
+  `NetworkError` with code `response_body_unreadable`; it never breaks the
+  glass (the NA may have decided, even denied).
+- `governedAction` with `breakGlass` checks, before anything runs, that
+  `requested_capability` is named, that the context's `request_parameters`
+  and `attributes` are objects, and that they leave room for the record;
+  an outcome detail longer than the NA admits is cut to 1024 characters, and
+  a report the guard still refuses is left out, so a record is always kept
+  once the action ran.
+- 1.3.0 records verify as the reference reads them: an unsigned extra field
+  is `payload_invalid`, a field the reference fills when absent is
+  `non_canonical_form`, timestamps must be UTC, an observation names one
+  change time or an ordered window, and lengths count characters.
+  `verifyOutOfBandRecord` checks the record's form and fields too.
+- `flushRecords` sends a batch the NA refuses as too large (`413`) one
+  observation at a time.
 
 ## [1.2.0] - Unreleased
 
