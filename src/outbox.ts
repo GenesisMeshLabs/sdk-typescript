@@ -11,8 +11,9 @@
  * must be durable and private.
  *
  * The record outbox (v1.3.0, `ClientOptions.recordOutbox`) keeps signed
- * observations and break-glass records the same way, in a directory of its
- * own; `EvidenceStoreClient.flushRecords` submits them.
+ * observations and break-glass records (v1.4.0: and remediation records) the
+ * same way, in a directory of its own; `EvidenceStoreClient.flushRecords`
+ * submits them.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
@@ -22,6 +23,7 @@ import { canonicalJson, cloneJson, parseJson } from './auth.js';
 import { GenesisMeshError } from './errors.js';
 import { StrictJsonError } from './strict-json.js';
 import type { BreakGlassRecord, ObservationRecord } from './out-of-band.js';
+import type { RemediationRecord } from './remediation.js';
 import type { EvidenceSubmission, ExecutionEvidence } from './types.js';
 
 /** Why the NA, or the transport, refused a submission. */
@@ -49,13 +51,22 @@ export interface OutboxEntry {
   last_error: SubmissionFailure | null;
 }
 
-/** One signed observation or break-glass record in the record outbox (v1.3.0). The Rust SDK reads and writes the same JSON. */
+/** The kinds of record the record outbox keeps: observations and break-glass records (v1.3.0), remediation records (v1.4.0). */
+export type RecordOutboxKind = 'observation' | 'break_glass' | 'remediation';
+
+/** A signed record the record outbox keeps. */
+export type OutboxRecord = ObservationRecord | BreakGlassRecord | RemediationRecord;
+
+/**
+ * One signed observation, break-glass record or (v1.4.0) remediation record
+ * in the record outbox (v1.3.0). The Rust SDK reads and writes the same JSON.
+ */
 export interface RecordOutboxEntry {
-  /** The record's `observation_id` or `break_glass_id`. */
+  /** The record's `observation_id`, `break_glass_id` or `remediation_id`. */
   id: string;
-  kind: 'observation' | 'break_glass';
+  kind: RecordOutboxKind;
   /** The signed record, exactly as it will be submitted. */
-  record: ObservationRecord | BreakGlassRecord;
+  record: OutboxRecord;
   /** `pending`: to submit. `dead_letter`: refused; kept, never dropped. */
   state: 'pending' | 'dead_letter';
   attempts: number;
@@ -84,7 +95,7 @@ export interface Outbox<E extends { id: string }> {
 /** Storage for signed execution records (v1.2.0). */
 export type EvidenceOutbox = Outbox<OutboxEntry>;
 
-/** Storage for signed observations and break-glass records (v1.3.0). */
+/** Storage for signed observations and break-glass records (v1.3.0), and remediation records (v1.4.0). */
 export type RecordOutbox = Outbox<RecordOutboxEntry>;
 
 /**
@@ -148,9 +159,11 @@ export const PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The NA's refusals of an observation or break-glass record that no retry
- * can overcome (v1.3.0). An unknown key is retried: it may not be registered
- * yet.
+ * The NA's refusals of an observation, break-glass or (v1.4.0) remediation
+ * record that no retry can overcome (v1.3.0). An unknown key is retried: it
+ * may not be registered yet. So are a remediation's subject and forward
+ * rotation the NA does not hold yet (`remediation_subject_not_found`,
+ * `remediation_rotation_missing`), and `remediation_disabled`.
  */
 export const RECORD_PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
   // 1.3.1: refused by the NA's strict JSON reader; a batch so refused is split until the record is found.
@@ -169,6 +182,20 @@ export const RECORD_PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
   'break_glass_out_of_scope',
   'break_glass_secret_material',
   'break_glass_conflict',
+  // v1.4.0: remediation records. The NA keeps an authentic one it refuses for good as a
+  // quarantine entry (`error.details.quarantine_id`).
+  'invalid_remediation',
+  'remediation_malformed',
+  'remediation_invalid_signature',
+  'remediation_key_retired',
+  'remediation_out_of_scope',
+  'remediation_secret_material',
+  'remediation_subject_mismatch',
+  'remediation_steps_mismatch',
+  'remediation_rotation_mismatch',
+  'remediation_not_due',
+  'remediation_already_recorded',
+  'remediation_conflict',
 ]);
 
 const FIRST_RETRY_MS = 5_000;
@@ -221,12 +248,19 @@ export function outboxEntry(evidence: ExecutionEvidence, now = new Date()): Outb
   };
 }
 
-/** A new pending record outbox entry for a signed observation or break-glass record (v1.3.0). */
-export function recordOutboxEntry(record: ObservationRecord | BreakGlassRecord, now = new Date()): RecordOutboxEntry {
-  const observation = 'observation_id' in record;
+/** The kind and ID of a record the record outbox keeps. */
+function recordKind(record: OutboxRecord): { kind: RecordOutboxKind; id: string } {
+  if ('observation_id' in record) return { kind: 'observation', id: record.observation_id };
+  if ('remediation_id' in record) return { kind: 'remediation', id: record.remediation_id };
+  return { kind: 'break_glass', id: (record as BreakGlassRecord).break_glass_id };
+}
+
+/** A new pending record outbox entry for a signed observation, break-glass record (v1.3.0) or remediation record (v1.4.0). */
+export function recordOutboxEntry(record: OutboxRecord, now = new Date()): RecordOutboxEntry {
+  const { kind, id } = recordKind(record);
   return {
-    id: observation ? (record as ObservationRecord).observation_id : (record as BreakGlassRecord).break_glass_id,
-    kind: observation ? 'observation' : 'break_glass',
+    id,
+    kind,
     record,
     state: 'pending',
     attempts: 0,
@@ -458,15 +492,18 @@ export class FileOutbox extends JsonFileOutbox<OutboxEntry> {
 
 /**
  * The default record outbox (v1.3.0): signed observations and break-glass
- * records, stored as `FileOutbox` stores execution records, in a directory
- * of its own (`gm.evidence.record-outbox.v1`).
+ * records (v1.4.0: and remediation records), stored as `FileOutbox` stores
+ * execution records, in a directory of its own (`gm.evidence.record-outbox.v1`).
  */
 export class FileRecordOutbox extends JsonFileOutbox<RecordOutboxEntry> {
   constructor(directory: string) {
-    super(directory, RECORD_FORMAT, entry => (entry['kind'] === 'observation' || entry['kind'] === 'break_glass')
+    super(directory, RECORD_FORMAT, entry => RECORD_KINDS.has(entry['kind'])
       && typeof entry['record'] === 'object' && entry['record'] !== null);
   }
 }
+
+/** The record kinds a record outbox file may hold. */
+const RECORD_KINDS: ReadonlySet<unknown> = new Set(['observation', 'break_glass', 'remediation']);
 
 /** A file-name-safe stem for an entry id: the id itself when it is a plain identifier. */
 function fileStem(id: string): string {

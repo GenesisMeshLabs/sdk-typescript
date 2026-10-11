@@ -172,7 +172,8 @@ export const validJudgement = shape({
   signature: optional(signature),
 });
 export const validQuarantine = shape({
-  quarantine_id: bounded(128), record_kind: oneOf('execution', 'observation', 'break_glass'), record: isObject,
+  // v1.4.0: a refused remediation record is kept too.
+  quarantine_id: bounded(128), record_kind: oneOf('execution', 'observation', 'break_glass', 'remediation'), record: isObject,
   record_digest: sha256, rejection_code: bounded(128), detail: filled(bounded(1024, 0)), resource_id: absent(bounded(256)),
   quarantined_at: utc, issuer_sovereign_id: string, issued_by: string, signature: optional(signature),
 });
@@ -186,6 +187,102 @@ export const validRegistry = shape({
   holder: absent(string), approved_by: absent(string), recorded_by: absent(string), issuer_sovereign_id: string,
   issued_by: string, signature: optional(signature),
 });
+
+// v1.4.0: remediations and reviews of changes governed after the fact.
+/** An operator's signed admin request, kept whole (no other field). */
+export const validAdminApproval: Check = shape({
+  key_id: bounded(256), public_key: bounded(256), method: bounded(16), path: bounded(2048),
+  query: filled(dictionary(array(string))), audience: bounded(256), body: filled(isObject), timestamp: bounded(256),
+  nonce: bounded(256), admin_signature: bounded(256),
+}, true);
+const remediationFields = shape({
+  remediation_id: bounded(128), executor_sovereign_id: bounded(256), subject_kind: oneOf('judgement', 'decision'),
+  subject_id: bounded(128), change_kind: oneOf('observation', 'break_glass', 'execution'), change_id: bounded(128),
+  resource_id: bounded(256), outcome: oneOf('cancelled', 'alerted'),
+  steps: oneOf('rotate_forward_then_disable', 'disable', 'delete', 'none'), rotation_evidence_id: absent(bounded(128)),
+  version_id: absent(bounded(256)), disabled_version_id: absent(bounded(256)), remediated_at: utc,
+  detail: absent(bounded(1024)), signature: optional(signature),
+});
+
+/**
+ * Why a remediation record's steps do not match its outcome and versions, or
+ * null (the reference model's rule): it alerts exactly when nothing changed
+ * (`none`); a forward rotation names its evidence, the version it issued and
+ * the other one it disabled; nothing else names rotation evidence or a new
+ * version; an alert disables nothing.
+ */
+export function remediationStepsProblem(record: Record<string, unknown>): string | null {
+  const given = (k: string) => record[k] !== undefined && record[k] !== null;
+  if ((record['outcome'] === 'alerted') !== (record['steps'] === 'none')) {
+    return 'an alerted remediation changes nothing (steps none); a cancelled one does';
+  }
+  if (record['steps'] === 'rotate_forward_then_disable') {
+    if (!given('rotation_evidence_id') || !given('version_id') || !given('disabled_version_id')) {
+      return 'a forward rotation names its evidence, the version it issued and the one disabled';
+    }
+    if (record['version_id'] === record['disabled_version_id']) {
+      return 'the forward rotation issues another version than the one disabled';
+    }
+  } else if (given('rotation_evidence_id') || given('version_id')) {
+    return 'only a forward rotation names rotation evidence or a new version';
+  }
+  if (record['steps'] === 'none' && given('disabled_version_id')) return 'an alerted remediation disables nothing';
+  return null;
+}
+
+/** A remediation record in the shape the reference reads, its steps consistent. */
+export const validRemediation: Check = v => remediationFields(v) && remediationStepsProblem(v as Record<string, unknown>) === null;
+
+/** Longest a waiver may run, whatever the NA's configuration (90 days, in microseconds). */
+const MAX_WAIVER_MICROS = 90 * 24 * 3600 * 1_000_000;
+
+const reviewFields = shape({
+  review_id: bounded(128), subject_kind: oneOf('judgement', 'decision'), subject_id: bounded(128), subject_digest: sha256,
+  resource_id: absent(bounded(256)), capability: absent(bounded(256)),
+  opened_for: oneOf('requested', 'flagged_for_review', 'review_required'), requested_by: absent(bounded(256)),
+  requester_holder: absent(bounded(128)), justification: absent(bounded(1024)), request_approval: absent(validAdminApproval),
+  requested_at: utc, actor: absent(bounded(256)), actor_holder: absent(bounded(128)),
+  verdict: oneOf('uphold', 'deny', 'waive_until'), waive_until: absent(utc), note: absent(bounded(1024)),
+  decided_by: bounded(256), decider_holder: bounded(128), approval: validAdminApproval, decided_at: utc,
+  issuer_sovereign_id: string, issued_by: string, signature: optional(signature),
+});
+
+/**
+ * Why a review's fields do not fit together, or null (the reference model's
+ * rule): `waive_until` is given exactly for a waiver, after the decision and
+ * within 90 days of it; a requested review names its requester, holder,
+ * justification and request, and one the NA opened none of them.
+ */
+export function reviewConsistencyProblem(record: Record<string, unknown>): string | null {
+  const given = (k: string) => record[k] !== undefined && record[k] !== null;
+  if ((record['verdict'] === 'waive_until') !== given('waive_until')) return 'waive_until is given exactly for a waiver';
+  if (given('waive_until')) {
+    const decided = timestampMicros(record['decided_at'] as string);
+    const until = timestampMicros(record['waive_until'] as string);
+    if (!(decided < until && until <= decided + MAX_WAIVER_MICROS)) {
+      return 'a waiver ends after it is decided and within the longest waiver';
+    }
+  }
+  const requested = record['opened_for'] === 'requested';
+  const named = ['requested_by', 'requester_holder', 'justification', 'request_approval'].map(given);
+  if (requested && named.includes(false)) return 'a requested review names its requester, holder, justification and request';
+  if (!requested && named.includes(true)) return 'a review the NA opened has no requester';
+  return null;
+}
+
+/** A review record in the shape the reference reads, its fields consistent. */
+export const validReview: Check = v => reviewFields(v) && reviewConsistencyProblem(v as Record<string, unknown>) === null;
+
+/**
+ * Microseconds since the epoch of a timestamp `timestamp` accepts (a value
+ * without an offset is UTC), to the microsecond as the reference keeps it.
+ */
+export function timestampMicros(value: string): number {
+  const m = /^(.*T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})?$/.exec(value);
+  if (!m) return NaN;
+  const [, base, fraction = '', zone = 'Z'] = m;
+  return Date.parse(base + zone) * 1000 + Number(fraction.slice(0, 6).padEnd(6, '0'));
+}
 
 const eventShape = shape({
   schema: oneOf('gm.evidence.event'), schema_version: oneOf(1), entry,

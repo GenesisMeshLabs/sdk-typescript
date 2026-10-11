@@ -95,6 +95,7 @@ export {
   checkpointCanonical,
   entryDigest,
   payloadDigest,
+  POLICY_OMITTED_WHEN_ABSENT,
 } from './canonical.js';
 
 // Execution evidence
@@ -142,6 +143,9 @@ export {
   EvidenceNotKeptError,
   DecisionVerificationError,
   withoutRefusedMetadata,
+  cancelByRotatingForward,
+  urgentAction,
+  RemediationNotRecordedError,
 } from './governance.js';
 
 // Evidence outbox (v1.2.0) and record outbox (v1.3.0)
@@ -164,6 +168,8 @@ export type {
   OutboxEntry,
   RecordOutbox,
   RecordOutboxEntry,
+  RecordOutboxKind,
+  OutboxRecord,
   Delivery,
   SubmissionFailure,
   FlushResult,
@@ -211,7 +217,73 @@ export type {
   ReconcileOptions,
   ReconciliationFinding,
   ReconciliationStatus,
+  EmergencyOptions,
+  RotatedVersion,
+  RotateForwardOptions,
+  RotateForwardResult,
+  UrgentActionResult,
 } from './governance.js';
+
+// Remediation, reviews and emergency changes (v1.4.0)
+export {
+  DEFAULT_REMEDIATION,
+  OPEN_STATES,
+  REVIEW_REQUEST_PATH,
+  STAGE3_STATES,
+  TransitionRefusedError,
+  adminApprovalValid,
+  cancelSteps,
+  changeFacts,
+  checkRemediation,
+  checkRemediationRecord,
+  dueAfterDenial,
+  dueAfterWaiver,
+  judgementState,
+  nextState,
+  policySectionIssues,
+  remediationCanonical,
+  remediationDueAt,
+  remediationGuidance,
+  remediationPlan,
+  remediationRecord,
+  remediationSecretProblem,
+  remediationSubject,
+  reviewApprovalProblem,
+  reviewDecisionPath,
+  reviewHolderProblem,
+  reviewRecordProblem,
+  signRemediation,
+  stepsProblem,
+  verifyRemediationRecord,
+  verifyReviewRecord,
+} from './remediation.js';
+export type {
+  AdminApproval,
+  ChangeKind,
+  GuidanceSource,
+  PlannedSteps,
+  RemediationDefaults,
+  RemediationFallback,
+  RemediationInput,
+  RemediationKey,
+  RemediationMode,
+  RemediationOutcome,
+  RemediationPlan,
+  RemediationPlanInput,
+  RemediationRecord,
+  RemediationState,
+  RemediationStatus,
+  RemediationSteps,
+  RemediationSubject,
+  RemediationSubjectKind,
+  ReviewOpenedFor,
+  ReviewRecord,
+  ReviewSummary,
+  ReviewVerdict,
+  StoredRecord,
+  TransitionEvent,
+  TransitionRefusal,
+} from './remediation.js';
 
 // Errors
 export {

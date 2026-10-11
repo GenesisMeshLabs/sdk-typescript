@@ -260,8 +260,39 @@ export interface GateSpec {
   disclose_input?: boolean;
 }
 
+/** What a change judged DENY by a gate leads to (v1.4.0): see *Remediation and Reviews* in the SDK docs. */
+export interface GateRemediation {
+  /** `cancel`: the controller cancels the change once the grace has passed; `alert_only`: the denial is recorded and its author told. */
+  mode: 'cancel' | 'alert_only';
+  /** 0 to 2592000 (30 days). */
+  grace_seconds: number;
+}
+
+/** Marks a policy's one capability as the emergency form of an ordinary one (v1.4.0). */
+export interface EmergencyCapability {
+  /** The ordinary capability the emergency capability performs (an exact ID). */
+  stands_for: string;
+  /** The request parameter holding the justification; an enforce-mode `required_parameter.v1` gate must require it. */
+  justification_parameter: string;
+  /** 60 to 2592000: how long what the emergency capability creates may stand. */
+  max_lifetime_seconds: number;
+}
+
+/**
+ * The sections a policy may carry since 1.4.0, each left out when absent, so
+ * a policy without them keeps its 1.3 bytes and digest. The NA refuses them
+ * unless `EVIDENCE_REMEDIATION=on` (`policy_remediation_disabled`).
+ */
+export interface PolicyRemediationSections {
+  /** `gate_id` (or `"*"` for every other gate) to what a DENY by that gate leads to. */
+  remediation?: Record<string, GateRemediation>;
+  /** Present (true) when every change allowed under the policy is reviewed by a second holder. */
+  review_required?: true;
+  emergency?: EmergencyCapability;
+}
+
 /** Declared policy intent; the NA assigns version, issuer and signature. */
-export interface BoundaryPolicyIntent {
+export interface BoundaryPolicyIntent extends PolicyRemediationSections {
   policy_id: string;
   description?: string;
   valid_from: string;
@@ -271,7 +302,7 @@ export interface BoundaryPolicyIntent {
 }
 
 /** Signed, versioned declarative policy as stored by the NA. */
-export interface BoundaryPolicy {
+export interface BoundaryPolicy extends PolicyRemediationSections {
   policy_id: string;
   version: number;
   description: string;
@@ -699,7 +730,10 @@ export type EntryKind =
   | 'break_glass'
   | 'judgement'
   | 'quarantine'
-  | 'registry';
+  | 'registry'
+  // v1.4.0: remediations and reviews, written only with EVIDENCE_REMEDIATION=on.
+  | 'remediation'
+  | 'review';
 
 /** Store envelope; every entry commits to the previous one. */
 export interface EvidenceStoreEntry {
@@ -789,7 +823,19 @@ export type EvidenceVerificationFailureReason =
   | 'judgement_subject_missing'
   | 'match_reused'
   | 'quarantine_digest_mismatch'
-  | 'evidence_cites_judgement';
+  | 'evidence_cites_judgement'
+  // v1.4.0
+  | 'duplicate_remediation'
+  | 'remediation_subject_mismatch'
+  | 'remediation_subject_missing'
+  | 'remediation_rotation_missing'
+  | 'remediation_rotation_mismatch'
+  | 'review_approval_invalid'
+  | 'review_approval_key_mismatch'
+  | 'review_same_holder'
+  | 'review_subject_mismatch'
+  | 'review_subject_missing'
+  | 'review_waiver_after_remediation';
 
 export interface EvidenceVerificationFailure {
   store_sequence: number | null;
@@ -807,6 +853,9 @@ export interface EvidenceStoreVerification {
   break_glass?: number;
   judgements?: number;
   quarantined?: number;
+  /** v1.4.0, present when nonzero. */
+  remediations?: number;
+  reviews?: number;
   failures: EvidenceVerificationFailure[];
   /** Findings that do not fail verification (v1.2.0), such as `unsigned_field`. */
   warnings?: EvidenceVerificationFailure[];
@@ -843,6 +892,10 @@ export interface EvidenceStoreStatus {
   retention_checkpoint: number | null;
   /** v1.3.0: observations and break-glass records not judged yet (they hold retention back). */
   unjudged_records?: number;
+  /** v1.4.0: `on` when the NA records remediations and reviews. */
+  evidence_remediation?: string;
+  /** v1.4.0, with the records on: the number of remediation states by state. */
+  remediation?: Record<string, number>;
 }
 
 export interface ExecutorKeyRecord {

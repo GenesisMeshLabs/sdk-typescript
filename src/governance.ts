@@ -16,6 +16,10 @@ import {
   breakGlassRecord, checkBreakGlassRecord, OutOfBandRecordError, type BreakGlassRecord, type EvaluationFailure,
 } from './out-of-band.js';
 import { StrictJsonError } from './strict-json.js';
+import {
+  checkRemediationRecord, nextState, remediationRecord, remediationSecretProblem, remediationSubject, stepsProblem,
+  type RemediationInput, type RemediationRecord, type RemediationStatus,
+} from './remediation.js';
 import type { Delivery, OutboxEntry, RecordOutboxEntry } from './outbox.js';
 import { verifyBoundaryDecision, type VerifyDecisionOptions } from './verify.js';
 import type {
@@ -587,6 +591,246 @@ async function breakTheGlass<T>(
   }
   return {
     brokeGlass: true, failure, evaluationError, value: report.value, record, ...delivery, ...(dropped ? { dropped } : {}),
+  };
+}
+
+// ── Remediation: the cancel pair (v1.4.0) ─────────────────────────────────────
+
+/** The version a forward rotation issued. */
+export interface RotatedVersion<T = unknown> {
+  /** Recorded as the rotation evidence's `execution_parameters.version_id`, as the NA checks it. */
+  version_id: string;
+  /** Returned to the caller; never recorded. */
+  value?: T;
+  /** Other metadata for the rotation's evidence (identifiers and versions only). */
+  execution_parameters?: Record<string, unknown>;
+}
+
+export interface RotateForwardOptions<T = unknown> {
+  /**
+   * The remediation state from the due queue (`remediation_due` or
+   * `overdue`): its subject, change and resource name the record. When it
+   * carries `state`, `mode` and `steps`, they are checked before anything
+   * runs: the state must allow a remediation, and the plan must be
+   * `cancel` / `rotate_forward_then_disable`.
+   */
+  remediation: Pick<RemediationStatus, 'subject_kind' | 'subject_id' | 'change_kind' | 'change_id' | 'resource_id'>
+    & Partial<Pick<RemediationStatus, 'state' | 'mode' | 'steps'>>;
+  /** The denied version: disabled once readers have the new one. */
+  deniedVersionId: string;
+  /**
+   * The governed rotation's evaluation and verification (capability,
+   * attestation, context, `verify`), as for `governedAction`; the resource is
+   * the remediation's. Not break-glass: the rotation needs a decision.
+   */
+  rotation: Omit<GovernedActionParams, 'resource_id' | 'resource_action' | 'breakGlass'> & {
+    /** Default `rotate`. */
+    resource_action?: 'rotate' | 'update';
+  };
+  /** Issue a new version and move the resource's readers to it (make it current); return its version ID. */
+  rotate: (decision: BoundaryDecision) => Promise<RotatedVersion<T>>;
+  /** Disable the denied version, once the readers have the new one. */
+  disable: (deniedVersionId: string) => Promise<void>;
+  /** A note for the remediation record (no secret material). */
+  detail?: string;
+}
+
+export interface RotateForwardResult<T = unknown> {
+  /** The governed rotation. When it was denied (`authorized: false`), nothing was rotated, disabled or recorded. */
+  rotation: GovernedActionResult<T>;
+  /** The signed remediation record, once the denied version was disabled. */
+  remediation?: RemediationRecord;
+  /** The NA's acknowledgement, when it admitted the record. */
+  submission?: RecordSubmission;
+  /** With a record outbox: the entry holding the record otherwise (`pending` or `dead_letter`). */
+  queued?: RecordOutboxEntry;
+}
+
+/**
+ * The forward rotation ran, but the remediation was not recorded: the record
+ * could not be built (`remediation_malformed`, `remediation_secret_material`:
+ * nothing was disabled), the disable failed, or the record could not be
+ * signed, submitted or kept. `rotation` is the rotation's result; `record`
+ * the signed record when there is one (submit it once the cause is fixed;
+ * resubmission is idempotent). Do not rotate again.
+ */
+export class RemediationNotRecordedError<T = unknown> extends GenesisMeshError {
+  readonly rotation: GovernedActionResult<T>;
+  readonly record?: RemediationRecord;
+
+  constructor(cause: unknown, rotation: GovernedActionResult<T>, record?: RemediationRecord) {
+    super(`the forward rotation ran; the remediation was not recorded: ${String(cause)}`, 'remediation_not_recorded', 0);
+    this.name = 'RemediationNotRecordedError';
+    this.cause = cause;
+    this.rotation = rotation;
+    if (record) this.record = record;
+  }
+}
+
+/**
+ * Cancel a denied change to a versioned resource others read (v1.4.0), as
+ * the NA states it (`rotate_forward_then_disable`): the two linked records.
+ *
+ * 1. A governed rotation (`governedAction`) issues a new version under a
+ *    decision of its own; its execution evidence names the version
+ *    (`execution_parameters.version_id`), so observers match it instead of
+ *    judging it again. A DENY returns without changing anything.
+ * 2. `disable` then disables the denied version: the readers already have
+ *    the new one.
+ * 3. The remediation record names the rotation's evidence, the new version
+ *    and the disabled one, signed by the executor key and kept in the record
+ *    outbox (submitted directly without one).
+ *
+ * A credential is never rolled back. The record is checked before the
+ * denied version is disabled, so a record the NA would refuse never follows
+ * a disable. The NA admits the record once it holds the rotation's evidence
+ * (`remediation_rotation_missing` is retried); flush the evidence outbox
+ * before the record outbox.
+ */
+export async function cancelByRotatingForward<T>(
+  clients: GovernanceClients,
+  recorder: ExecutionRecorder,
+  options: RotateForwardOptions<T>,
+): Promise<RotateForwardResult<T>> {
+  const state = options.remediation;
+  const subject = remediationSubject(state);
+  if (state.mode !== undefined && state.steps !== undefined) {
+    const problem = stepsProblem(state.mode, state.steps, { outcome: 'cancelled', steps: 'rotate_forward_then_disable' });
+    if (problem) throw new OutOfBandRecordError(problem, 'remediation_steps_mismatch');
+  }
+  if (state.state !== undefined) nextState(state.state, 'record_remediation');
+  if (typeof options.deniedVersionId !== 'string' || !options.deniedVersionId) {
+    throw new OutOfBandRecordError('the denied version is required', 'remediation_malformed');
+  }
+  const secret = remediationSecretProblem({ disabled_version_id: options.deniedVersionId, detail: options.detail });
+  if (secret) throw new OutOfBandRecordError(secret, 'remediation_secret_material');
+  // A record outbox that cannot be read fails here, before anything runs.
+  if (clients.evidenceStore.recordOutbox) await clients.evidenceStore.recordOutbox.list();
+
+  let rotated: RotatedVersion<T> | undefined;
+  const { resource_action = 'rotate', ...rotation } = options.rotation;
+  const result = await governedAction(clients, recorder, {
+    ...rotation, resource_id: subject.resource_id, resource_action,
+  } as GovernedActionParams, async (decision: BoundaryDecision) => {
+    rotated = await options.rotate(decision);
+    return {
+      value: rotated.value,
+      execution_parameters: { ...rotated.execution_parameters, version_id: rotated.version_id },
+    };
+  });
+  if (!result.authorized) return { rotation: result };
+
+  const input: RemediationInput = {
+    ...subject, steps: 'rotate_forward_then_disable', rotation_evidence_id: result.evidence!.evidence_id,
+    version_id: rotated!.version_id, disabled_version_id: options.deniedVersionId,
+    ...(options.detail !== undefined ? { detail: options.detail } : {}),
+  };
+  try {
+    checkRemediationRecord(remediationRecord({ ...input, executor_sovereign_id: recorder.executorSovereignId }));
+  } catch (err) {
+    throw new RemediationNotRecordedError(err, result);
+  }
+  let record: RemediationRecord | undefined;
+  try {
+    await options.disable(options.deniedVersionId);
+    record = await recorder.signRemediation(input);
+    const store = clients.evidenceStore;
+    if (store.recordOutbox) return { rotation: result, remediation: record, ...await store.enqueueRecord(record) };
+    return { rotation: result, remediation: record, submission: await store.submitRemediation(record) };
+  } catch (err) {
+    throw new RemediationNotRecordedError(err, result, record);
+  }
+}
+
+// ── Urgent changes (v1.4.0) ───────────────────────────────────────────────────
+
+export interface EmergencyOptions {
+  /** The emergency capability: the one capability a policy with an `emergency` section selects. */
+  capability: string;
+  /**
+   * Why the change cannot wait (1 to 1024 characters; no secret values): the
+   * emergency policy's justification parameter, and a break-glass record's
+   * justification.
+   */
+  justification: string;
+  /** The emergency policy's `justification_parameter`. Default `justification`. */
+  justificationParameter?: string;
+  /** The policies the emergency capability's decision must bind (`verify.expectedPolicies` for it). */
+  expectedPolicies: readonly BoundaryPolicy[];
+}
+
+export interface UrgentActionResult<T> {
+  /**
+   * How the change went: under the ordinary capability's ALLOW (`ordinary`),
+   * under the emergency capability's decision (`emergency`; `authorized`
+   * false when that is a DENY too), or under break-glass naming the
+   * emergency capability, the NA not answering (`break_glass`).
+   */
+  path: 'ordinary' | 'emergency' | 'break_glass';
+  result: GovernedActionResult<T> | BreakGlassResult<T>;
+  /** The ordinary capability's DENY, when the emergency capability was requested after it. */
+  ordinaryDenial?: GovernedActionResult<T>;
+}
+
+/**
+ * An urgent change (v1.4.0): never blocked, always governed and judged.
+ *
+ * - The ordinary capability is evaluated first (`params`), as
+ *   `governedAction` does; an ALLOW runs the action under it.
+ * - On a DENY, the emergency capability is requested, with the justification
+ *   in its justification parameter; the NA decides under the emergency
+ *   policy before the change, and reviews it after.
+ * - When the NA cannot be reached, times out or answers `5xx` or `429`, the
+ *   action runs under break-glass naming the emergency capability (with the
+ *   justification parameter in its request parameters), and the NA judges it
+ *   under the emergency policy once it is back.
+ *
+ * Break-glass needs a record outbox, an attestation-based evaluation and
+ * `resource_id`; all of it is checked before anything is evaluated. The
+ * emergency capability's own decision is verified against
+ * `emergency.expectedPolicies`.
+ */
+export async function urgentAction<T>(
+  clients: GovernanceClients,
+  recorder: ExecutionRecorder,
+  params: GovernedActionParams & { emergency: EmergencyOptions },
+  action: BreakGlassAction<T>,
+): Promise<UrgentActionResult<T>> {
+  const { emergency, breakGlass: _ignored, ...ordinary } = params;
+  const parameter = emergency.justificationParameter ?? 'justification';
+  const urgent: GovernedActionParams & { breakGlass: BreakGlassOptions } = {
+    ...ordinary,
+    requested_capability: emergency.capability,
+    context: {
+      ...ordinary.context,
+      request_parameters: { ...ordinary.context?.request_parameters, [parameter]: emergency.justification },
+    },
+    verify: { ...ordinary.verify, expectedPolicies: emergency.expectedPolicies },
+    breakGlass: { justification: emergency.justification },
+  };
+  await checkBreakGlass(clients.evidenceStore, recorder, urgent, urgent.breakGlass);
+
+  // Only an evaluation that got no answer, or a 5xx or 429, goes to break-glass; any other error
+  // (after the action ran, or a decision that fails verification) is the caller's.
+  let evaluationError: unknown;
+  const boundary = {
+    evaluate: (request: EvaluateParams) => clients.boundary.evaluate(request).catch((err: unknown) => {
+      evaluationError = err;
+      throw err;
+    }),
+  } as unknown as BoundaryClient;
+  let ordinaryDenial: GovernedActionResult<T> | undefined;
+  try {
+    const result = await governedAction({ boundary, evidenceStore: clients.evidenceStore }, recorder, ordinary,
+      action as (decision: BoundaryDecision) => Promise<ActionReport<T> | void>);
+    if (result.authorized) return { path: 'ordinary', result };
+    ordinaryDenial = result;
+  } catch (err) {
+    if (err !== evaluationError || evaluationFailure(err) === null) throw err;
+  }
+  const result = await governedAction(clients, recorder, urgent, action);
+  return {
+    path: 'brokeGlass' in result ? 'break_glass' : 'emergency', result, ...(ordinaryDenial ? { ordinaryDenial } : {}),
   };
 }
 

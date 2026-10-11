@@ -11,6 +11,8 @@ import {
   validObservation,
   validQuarantine,
   validRegistry,
+  validRemediation,
+  validReview,
 } from './validation.js';
 /**
  * Offline verification of NA-signed artifacts and evidence exports.
@@ -27,7 +29,11 @@ import {
   type JudgementRecord,
   type ObservationRecord,
   type QuarantineRecord,
+  type RegistryRecord,
 } from './out-of-band.js';
+import {
+  reviewApprovalProblem, reviewHolderProblem, type RemediationRecord, type ReviewRecord,
+} from './remediation.js';
 import { isKnownEntryKind, nonCanonicalFields, unknownFields, withoutUnknownFields } from './strict.js';
 import {
   agreementCanonical,
@@ -350,7 +356,13 @@ export function verifyEvidenceEvents(
   const recordIds = new Map<string, Set<string>>();
   const matchable = new Set<string>();
   const checkpoints = new Map<string, RetentionCheckpoint>();
-  const counts = { observations: 0, break_glass: 0, judgements: 0, quarantined: 0 };
+  const counts = { observations: 0, break_glass: 0, judgements: 0, quarantined: 0, remediations: 0, reviews: 0 };
+  // v1.4.0: judgements and decisions by ID (payload digest, resource), execution evidence's resources,
+  // remediated subjects, and operator keys as the holder registry records them.
+  const judgedRecords = new Map<string, { digest: string; resource: string | null }>();
+  const executed = new Map<string, string | null>();
+  const remediated = new Set<string>();
+  const operatorKeys = new Map<string, OperatorKeyRecord[]>();
   let firstSequence: number | null = null;
   let fromStart = false;
   let prev: EvidenceEvent['entry'] | null = null;
@@ -436,6 +448,7 @@ export function verifyEvidenceEvents(
         signature(verifyDecisionSignature(model, options.naPublicKeys), 'BoundaryDecision');
         result.decisions += 1;
         decisions.set(model.decision_id, model);
+        judgedRecords.set(model.decision_id, { digest: entry.payload_digest, resource: null });
         const context = payload['context'];
         if (validContext(context)) {
           contexts.set(model.decision_id, context as unknown as ContextRecord);
@@ -478,6 +491,7 @@ export function verifyEvidenceEvents(
         }
         lastExec.set(ev.decision_id, ev);
         matchable.add(ev.evidence_id);
+        executed.set(ev.evidence_id, ev.resource_id ?? null);
         if (ev.resource_id !== undefined && ev.resource_id !== null) {
           const head = resourceHeads.get(ev.resource_id);
           // v1.3.1: a run that starts neither at entry 1 nor right after the checkpoint takes
@@ -534,6 +548,7 @@ export function verifyEvidenceEvents(
         const judgement = payload as unknown as JudgementRecord;
         counts.judgements += 1;
         notDecisions.add(judgement.judgement_id);
+        judgedRecords.set(judgement.judgement_id, { digest: entry.payload_digest, resource: judgement.resource_id });
         const key = subjectKey(judgement.subject_kind, judgement.subject_id);
         if (judged.has(key)) fail(seq, 'duplicate_judgement', judgement.subject_id);
         judged.add(key);
@@ -561,15 +576,126 @@ export function verifyEvidenceEvents(
         if (payloadDigest(quarantine.record) !== quarantine.record_digest) fail(seq, 'quarantine_digest_mismatch');
         break;
       }
-      case 'registry':
+      case 'registry': {
         signature(outOfBandSigned('registry', payload, options.naPublicKeys, executorKeys), 'RegistryRecord');
+        const registry = payload as unknown as RegistryRecord;
+        if (registry.event === 'operator_key_holder' && registry.key_id != null) {
+          const list = operatorKeys.get(registry.key_id) ?? [];
+          list.push({ at: micros(registry.effective_at), public_key: registry.public_key ?? null, holder: registry.holder ?? null });
+          operatorKeys.set(registry.key_id, list);
+        }
         break;
+      }
+      case 'remediation': {
+        // v1.4.0: signed by an executor key of the record's sovereign, as execution evidence is.
+        signature(outOfBandSigned('remediation', payload, options.naPublicKeys, executorKeys), 'RemediationRecord');
+        counts.remediations += 1;
+        const remediation = payload as unknown as RemediationRecord;
+        notDecisions.add(remediation.remediation_id);
+        checkRemediationEntry(seq, remediation, fail, judgedRecords, executed, remediated,
+          contiguous && firstSequence === 1);
+        break;
+      }
+      case 'review': {
+        signature(outOfBandSigned('review', payload, options.naPublicKeys, executorKeys), 'ReviewRecord');
+        counts.reviews += 1;
+        const review = payload as unknown as ReviewRecord;
+        notDecisions.add(review.review_id);
+        checkReviewEntry(seq, review, fail, judgedRecords, remediated, operatorKeys, options.naPublicKeys,
+          contiguous && firstSequence === 1);
+        break;
+      }
     }
   }
   for (const [name, count] of Object.entries(counts)) {
     if (count > 0) result[name as keyof typeof counts] = count;
   }
   return result;
+}
+
+type Fail = (storeSequence: number | null, reason: string, detail?: string) => void;
+type JudgedRecords = ReadonlyMap<string, { digest: string; resource: string | null }>;
+/** An `operator_key_holder` registry record: when it took effect (microseconds), the key and its holder. */
+interface OperatorKeyRecord { at: number; public_key: string | null; holder: string | null }
+
+/**
+ * v1.4.0: one remediation per judgement or decision (`duplicate_remediation`), of its judgement's
+ * resource (`remediation_subject_mismatch`), after its forward rotation, of the same resource
+ * (`remediation_rotation_mismatch`). In a run from entry 1 its subject and rotation are held before
+ * it (`remediation_subject_missing`, `remediation_rotation_missing`).
+ */
+function checkRemediationEntry(
+  seq: number,
+  record: RemediationRecord,
+  fail: Fail,
+  judged: JudgedRecords,
+  executed: ReadonlyMap<string, string | null>,
+  remediated: Set<string>,
+  heldFromStart: boolean,
+): void {
+  if (remediated.has(record.subject_id)) fail(seq, 'duplicate_remediation', record.subject_id);
+  remediated.add(record.subject_id);
+  const subject = judged.get(record.subject_id);
+  if (subject === undefined) {
+    if (heldFromStart) fail(seq, 'remediation_subject_missing', record.subject_id);
+  } else if (record.subject_kind === 'judgement' && subject.resource !== record.resource_id) {
+    fail(seq, 'remediation_subject_mismatch', record.subject_id);
+  }
+  const rotation = record.rotation_evidence_id;
+  if (rotation !== undefined && rotation !== null) {
+    if (executed.has(rotation)) {
+      if (executed.get(rotation) !== record.resource_id) fail(seq, 'remediation_rotation_mismatch', rotation);
+    } else if (heldFromStart) {
+      fail(seq, 'remediation_rotation_missing', rotation);
+    }
+  }
+}
+
+/**
+ * v1.4.0: a review's embedded admin requests verify offline (`review_approval_invalid`), with the
+ * public key and holder the holder registry last recorded for each operator key by then, when the
+ * run holds a record for that key (`review_approval_key_mismatch`); a second holder decided it
+ * (`review_same_holder`); it names its subject's digest (`review_subject_mismatch`;
+ * `review_subject_missing` in a run from entry 1); and no waiver follows a recorded remediation
+ * (`review_waiver_after_remediation`).
+ */
+function checkReviewEntry(
+  seq: number,
+  review: ReviewRecord,
+  fail: Fail,
+  judged: JudgedRecords,
+  remediated: ReadonlySet<string>,
+  operatorKeys: ReadonlyMap<string, OperatorKeyRecord[]>,
+  naPublicKeys: readonly string[],
+  heldFromStart: boolean,
+): void {
+  const problem = reviewApprovalProblem(review, naPublicKeys);
+  if (problem !== null) fail(seq, 'review_approval_invalid', problem);
+  const signers: [string | undefined, ReviewRecord['approval'] | undefined, string | undefined, string][] = [
+    [review.decided_by, review.approval, review.decider_holder, review.decided_at],
+    [review.requested_by, review.request_approval, review.requester_holder, review.requested_at],
+  ];
+  for (const [keyId, approval, holder, at] of signers) {
+    if (keyId == null || approval == null || !operatorKeys.has(keyId)) continue;
+    // The latest record at or before the time (the first of equal times, as the reference picks it).
+    let latest: OperatorKeyRecord | undefined;
+    for (const record of operatorKeys.get(keyId)!) {
+      if (record.at <= micros(at) && (latest === undefined || record.at > latest.at)) latest = record;
+    }
+    if (latest === undefined || latest.public_key !== approval.public_key || latest.holder !== (holder ?? null)) {
+      fail(seq, 'review_approval_key_mismatch', keyId);
+    }
+  }
+  if (reviewHolderProblem(review) !== null) fail(seq, 'review_same_holder', review.decided_by);
+  const subject = judged.get(review.subject_id);
+  if (subject === undefined) {
+    if (heldFromStart) fail(seq, 'review_subject_missing', review.subject_id);
+  } else if (subject.digest !== review.subject_digest) {
+    fail(seq, 'review_subject_mismatch', review.subject_id);
+  }
+  if (review.verdict === 'waive_until' && remediated.has(review.subject_id)) {
+    fail(seq, 'review_waiver_after_remediation', review.subject_id);
+  }
 }
 
 /** v1.3.1: judgement subjects are keyed by kind and ID: a break-glass record may share an observation's ID. */
@@ -588,6 +714,8 @@ const PAYLOAD_CHECKS: Record<string, (payload: Record<string, unknown>) => boole
   judgement: validJudgement,
   quarantine: validQuarantine,
   registry: validRegistry,
+  remediation: validRemediation,
+  review: validReview,
 };
 
 /** v1.3.1: the field holding each kind's record ID, which appears once per kind in a run (`duplicate_record`). */
@@ -601,6 +729,8 @@ const RECORD_ID: Record<string, string> = {
   judgement: 'judgement_id',
   quarantine: 'quarantine_id',
   registry: 'registry_record_id',
+  remediation: 'remediation_id',
+  review: 'review_id',
 };
 
 /**
@@ -623,19 +753,32 @@ const ENVELOPE_FIELDS: Record<string, Record<string, string>> = {
   },
   quarantine: { record_id: 'quarantine_id', resource_id: 'resource_id', outcome: 'rejection_code' },
   registry: { record_id: 'registry_record_id', outcome: 'event' },
+  // v1.4.0
+  remediation: {
+    record_id: 'remediation_id', subject_id: 'subject_id', resource_id: 'resource_id',
+    executor_sovereign_id: 'executor_sovereign_id', outcome: 'outcome',
+  },
+  review: {
+    record_id: 'review_id', subject_id: 'subject_id', resource_id: 'resource_id', capability: 'capability',
+    outcome: 'verdict',
+  },
 };
 
-/** v1.3.0: the model each Stage 2 entry kind holds. */
+/** v1.3.0: the model each Stage 2 entry kind holds (v1.4.0: and each Stage 3 kind, stored exactly as signed too). */
 const OUT_OF_BAND_MODELS: Record<string, string> = {
   observation: 'ObservationRecord',
   break_glass: 'BreakGlassRecord',
   judgement: 'JudgementRecord',
   quarantine: 'QuarantineRecord',
   registry: 'RegistryRecord',
+  remediation: 'RemediationRecord',
+  review: 'ReviewRecord',
 };
 
-/** Kinds signed by a registered key, and the role that key must have; the other Stage 2 kinds are signed by the NA. */
-const KEY_ROLES: Record<string, 'executor' | 'observer'> = { observation: 'observer', break_glass: 'executor' };
+/** Kinds signed by a registered key, and the role that key must have; the other Stage 2 and 3 kinds are signed by the NA. */
+const KEY_ROLES: Record<string, 'executor' | 'observer'> = {
+  observation: 'observer', break_glass: 'executor', remediation: 'executor',
+};
 
 /** The keys that may sign a Stage 2 record: the registered key it names (with the right sovereign and role), or the NA's. */
 function outOfBandKeys(
