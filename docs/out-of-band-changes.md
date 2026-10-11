@@ -37,7 +37,8 @@ kept by the NA as a quarantine entry and is listed in the run's
 `quarantined`.
 
 `flushRecords` submits pending break-glass records first, then observations
-up to 100 at a time, each in the order they were added. From 1.3.1:
+up to 100 at a time, then (1.4.0) remediation records, each in the order they
+were added. From 1.3.1:
 
 - a batch the NA refuses as a whole, such as one holding a record its JSON
   reader refuses (`invalid_json`, a dead letter from 1.3.1), is split in
@@ -181,6 +182,13 @@ operator judges the rest with `judgeObservation` and `judgeBreakGlass`.
 approval, and `verifyEvidenceEvents` refuses execution evidence that cites
 one (`evidence_cites_judgement`).
 
+From 1.4.0, with the NA's remediation records on, a denied, indeterminate or
+flagged judgement arms a remediation or opens a review: the judgement carries
+it (`judgement.remediation`), and the change's `state` in `resourceChanges`
+is its remediation state (`remediation_due`, `overdue`, `remediated`,
+`review_pending`, `upheld`, `waived`), with a `remediation` object. See
+[Remediation, reviews and urgent changes](remediation-and-reviews.md).
+
 ## Verifying exports
 
 `verifyEvidenceEvents` verifies the new entry kinds offline:
@@ -212,4 +220,5 @@ From 1.3.1 it checks, as the reference does:
   (`retention_count_mismatch`).
 
 The result counts them in `observations`, `break_glass`, `judgements` and
-`quarantined`.
+`quarantined`. For the 1.4.0 `remediation` and `review` kinds, see
+[Remediation, reviews and urgent changes](remediation-and-reviews.md#verifying-exports).
