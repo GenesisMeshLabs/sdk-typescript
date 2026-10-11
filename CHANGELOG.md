@@ -7,6 +7,158 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [1.3.1] - 2026-10-11
+
+### Changed
+
+- New error code `na_public_key_unavailable` (status of the `/sovereign.json`
+  answer) for a failed NA public key lookup; it was `network_error`.
+- The default `observation_id` is derived from the source event instead of a
+  random UUID. A second record of one source event with other fields (a later
+  `observed_at`) is refused as `observation_conflict`, as before; take
+  `observed_at` from your first record when you read an event again.
+- New exports: `metadataProblem`, `observationId`.
+- **A record whose predecessor was refused is now sent.** It was
+  dead-lettered unsent (`evidence_predecessor_dead_lettered`), so the NA
+  never quarantined it even when it would have refused it for its own reason,
+  such as a retired key, and the action it records was missing from the
+  store's history. It is now submitted in turn: the NA's own refusal is its
+  dead letter's code, and a refusal only for the gap its predecessor left
+  (`evidence_chain_gap`, `resource_chain_gap`) dead-letters it as
+  `evidence_predecessor_dead_lettered`.
+- New codes: `local_error` (a submission that failed in this process,
+  retried) and `outbox_file_unreadable`; `invalid_json` joins
+  `PERMANENT_REFUSALS` and `RECORD_PERMANENT_REFUSALS`. New export
+  `checkSignable`.
+- `GenesisMeshError.retryAfterSeconds` holds the response's `Retry-After`
+  (seconds; null without one). New export `nextAttemptAt`.
+- New export `recordMetadataProblem(kind, record)`: the NA's metadata guard
+  over an observation or a break-glass record, as the recorders apply it.
+- New reasons from `verifyEvidenceEvents`: `duplicate_record`,
+  `judgement_match_missing`, `retention_count_mismatch`.
+
+### Fixed
+
+- **A firewall's `403` or a `404` no longer breaks the glass.** When the NA's
+  public key could not be read from `/sovereign.json`, any failure, an HTTP
+  answer included, became a `NetworkError`, so `governedAction` with
+  `breakGlass` ran the action without ever calling evaluate. Now only a lookup
+  that gets no answer is a network error (or a timeout); an answer without the
+  key throws `na_public_key_unavailable` with that answer's HTTP status, and
+  breaks the glass only when it is a `5xx` or `429`. Another NA instance is
+  still tried after a `502`, `503` or `504`.
+- **Keys named like built-ins are fields like any other.** Validation of an
+  export envelope accepted an unknown field named `constructor` or
+  `toString`, and `verifyEvidenceEvents` threw instead of returning a verdict
+  for an unsigned field next to a signature whose `key_id` was `constructor`.
+  Both now look at own properties only.
+- **Observations and break-glass records pass the NA's own metadata guard
+  before they are signed.** The SDK sized their metadata as UTF-8, left the
+  justification out of the total, skipped `actor`, `source_event_id` and
+  `version_id`, and counted the justification in UTF-16 units. A record the NA
+  then refused was dead-lettered after its action had run: 3000 `é` in
+  metadata, a context near 16 KiB plus a justification, or a justification of
+  under 1024 characters ending in emoji (of which no record was kept at all).
+  `metadataProblem` is now the reference's `metadata_problem`: escaped JSON,
+  the same fields and order, characters counted as the NA counts them, and a
+  refused justification named as `justification` rather than
+  `outcome_detail`.
+- **String times are signed in the form the NA writes.** `changed_at`,
+  `changed_not_before`, `changed_not_after`, `observed_at` and `executed_at`
+  given as strings were signed exactly as passed, so the documented
+  `changed_at: event.time` with `toISOString()` output (`.573Z`), `+00:00` or a
+  seven-digit fraction was refused as `observation_malformed`, and the SDK's
+  own `verifyOutOfBandRecord` refused it too. Any ISO 8601 time with a UTC
+  offset is now converted to UTC microseconds (`...00.573000Z`); a string
+  without an offset, or that is not a time, is refused before signing.
+- **A repeated reconciliation scan is a duplicate, not a conflict.**
+  `observationFromFinding` records got a random `observation_id`, so signing a
+  finding again was refused as `observation_conflict` and dead-lettered. The
+  recorder now derives the default ID from the source event:
+  `observationId(observer, source, source_event_id)`, the SHA-256 in hex of
+  the three joined by NUL characters. Give your own IDs the same way.
+- `governedAction` with `breakGlass` checks the record as it will be signed
+  before evaluating or running anything, with room for the action's report as
+  the NA sizes it, so a record can always be kept once the action has run.
+- A change window is ordered to the microsecond, as the NA orders it.
+- **A record the NA cannot read no longer blocks the outboxes.** A value the
+  NA's strict JSON reader refuses (a lone surrogate, such as half an emoji cut
+  by `slice`, an integer beyond 64 bits, or nesting deeper than 64) was
+  signed, then retried forever as `invalid_json` with its whole batch, and
+  after a restart the outbox file could not be read, so every governed action
+  failed. Now:
+  - `ExecutionRecorder.record`, `ObservationRecorder.record` and
+    `signBreakGlass` refuse such a record before signing (`StrictJsonError`);
+    after an action has run, `governedAction` records the outcome without the
+    value and throws `MetadataRefusedError`, as it does for secret material;
+  - the NA's `invalid_json` is a permanent refusal for execution, observation
+    and break-glass records;
+  - a batch of observations the NA refuses as a whole is split until the
+    record it refuses is sent alone;
+  - a `FileOutbox` or `FileRecordOutbox` file that cannot be read is moved
+    aside as `<name>.unreadable`; the first read throws
+    `outbox_file_unreadable` naming it, and the outbox works again from the
+    next call.
+- **Records with integers beyond 2^53 are sent after a restart.** They were
+  read back as `bigint`, which the metadata guard's size check could not
+  serialise; the error was filed as `network_error` and retried forever. The
+  guard now sizes metadata without `JSON.stringify`, and an exception in this
+  process before any request is filed as `local_error`.
+- **The record outbox drains under the NA's rate limit.** `flushRecords` sent
+  observations 100 at a time and retried a `429` unchanged, so with
+  `NA_RATE_LIMIT_OBSERVATIONS_PER_MINUTE` below 100 the backlog never drained
+  and break-glass records waited behind it. Batches now halve after each
+  `429`, nothing is sent until the NA's `Retry-After` has passed (unless
+  `ignoreBackoff`), and break-glass records go first.
+- **`flushPending` never answers with a partial run.** A call made while a
+  governed action was draining the records its own record chains from got
+  that drain's result, and every other pending record was left untried; a
+  call asking for `ignoreBackoff` during a run that kept backoff got that
+  run's result too. A call now joins a run only when it tries everything the
+  call asks for, and otherwise starts its own once that one ends. The same
+  holds for `flushRecords`.
+- A record that failed with a `Retry-After` is retried no earlier than it
+  asks (at most 15 minutes), in both outboxes.
+- **Reconciliation counts break-glass changes.** `resourceStates` read
+  execution records only, so after a break-glass rotation reconciliation
+  reported the new version as `drifted`, and the change was recorded and
+  judged a second time. Break-glass records now count as the resource's
+  changes, in the order the changes were made; `last_break_glass_id` names
+  the record when the latest change was one. The chain head
+  (`resource_sequence`, `record_digest`) and `last_decision_id` stay the
+  newest execution record's, 0 and empty for a resource with only break-glass
+  records.
+- **Exports verify as the reference verifies them** (the 1.3.1 contract,
+  conformance suite `out_of_band`). `verifyEvidenceEvents` now:
+  - reports a record copied within a run once per kind as
+    `duplicate_record`, and still checks the copy like any record;
+  - checks every envelope field the NA derives from a Stage 2 record
+    (`envelope_mismatch`, at most once per entry);
+  - looks up judgement subjects by kind and ID, so a break-glass record and an
+    observation may share an ID;
+  - reports a judgement whose matched record a run from entry 1 does not hold
+    (`judgement_match_missing`), and a retention checkpoint that removed fewer
+    or more entries than positions (`retention_count_mismatch`);
+  - takes the first record it holds of each resource as that chain's start
+    when a run starts neither at entry 1 nor right after its checkpoint (a
+    later export page), instead of reporting `resource_chain_break`;
+  - checks the form of a record whose unsigned fields it set aside, and gives a
+    record that leaves out a field the reference always writes as null the
+    reference's reason (`non_canonical_form` or `invalid_signature`, not
+    `payload_invalid`).
+- **Numbers are read by the JSON grammar as whole tokens.** `parseJson` backed
+  off to the longest valid prefix, so `[-0.]` was refused as `negative_zero`;
+  it is `invalid_json`, as in every implementation (`[-01]` stays
+  `negative_zero`, `[1e400.]` is `non_finite_number`).
+- `parseExportLines` and `verifyEvidenceEvents` refuse `schema_version: 1.0`
+  and envelope integers written as floats, as the reference does.
+- `verifyAgreement` returns `missing_offerer_signature` for `signatures` that
+  is not a list; it threw a `TypeError`. Attestation and revocation feed
+  verification read such signatures as none too.
+- A JSON fault in a response the SDK read back is no longer a permanent
+  refusal: only the NA's own `invalid_json` dead-letters a record, since the NA
+  may have admitted it.
+
 ## [1.3.0] - 2026-10-10
 
 ### Added
