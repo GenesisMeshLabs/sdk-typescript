@@ -194,5 +194,22 @@ one (`evidence_cites_judgement`).
   (`judgement_subject_mismatch`, `judgement_subject_missing`), and execution
   evidence matched once (`match_reused`).
 
+From 1.3.1 it checks, as the reference does:
+
+- that each record appears once per kind (`duplicate_record`): a copied
+  entry is a replay, reported and still checked like any record;
+- that a Stage 2 entry's envelope names what its record says
+  (`envelope_mismatch`): its ID, resource, action, capability and signer, a
+  break-glass record's attestation and outcome, a judgement's subject,
+  verdict and matched record, a quarantine's refusal and a registry entry's
+  event;
+- judgements by the kind and ID of the record they judge, so a break-glass
+  record and an observation may share an ID;
+- that the record a judgement matched is in a run that starts at entry 1
+  (`judgement_match_missing`);
+- that a retention checkpoint removed as many entries as positions, after the
+  checkpoint before it when the run holds that one
+  (`retention_count_mismatch`).
+
 The result counts them in `observations`, `break_glass`, `judgements` and
 `quarantined`.

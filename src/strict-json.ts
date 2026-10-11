@@ -40,7 +40,6 @@ const MIN_INTEGER = -(2n ** 63n);
 const MAX_INTEGER = 2n ** 64n - 1n;
 /** Arrays and objects nested deeper are refused, as in every implementation. */
 export const MAX_DEPTH = 64;
-const NUMBER = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
 const ESCAPES: Readonly<Record<string, number>> = { '"': 0x22, '\\': 0x5c, '/': 0x2f, b: 8, f: 12, n: 10, r: 13, t: 9 };
 
 /** Throw `StrictJsonError` unless `text` is JSON every implementation reads alike. */
@@ -96,14 +95,35 @@ export function checkStrictJson(text: string): void {
     for (let k = 0; k < units.length; k += 4096) out += String.fromCharCode(...units.slice(k, k + 4096));
     return out;
   };
+  const digits = () => {
+    const start = i;
+    while (i < text.length && text[i]! >= '0' && text[i]! <= '9') i++;
+    return i - start;
+  };
+  // 1.3.1: the JSON number grammar, read without backing off: `-0.` is not
+  // `-0` followed by a stray `.`. The token is complete before its value is checked.
   const number = () => {
-    NUMBER.lastIndex = i;
-    const match = NUMBER.exec(text);
-    if (!match) return fail('invalid_json', 'a malformed number');
-    const literal = match[0];
-    i += literal.length;
-    if (/^-?\d+$/.test(literal)) {
+    const start = i;
+    if (text[i] === '-') i++;
+    if (text[i] === '0') i++;
+    else if (digits() === 0) fail('invalid_json', 'a malformed number');
+    let integral = true;
+    if (text[i] === '.') {
+      i++;
+      if (digits() === 0) fail('invalid_json', 'a malformed number: no digit after "."');
+      integral = false;
+    }
+    if (text[i] === 'e' || text[i] === 'E') {
+      i++;
+      if (text[i] === '+' || text[i] === '-') i++;
+      if (digits() === 0) fail('invalid_json', 'a malformed number: no digit in the exponent');
+      integral = false;
+    }
+    const literal = text.slice(start, i);
+    if (integral) {
       if (literal === '-0') fail('negative_zero', 'the integer -0');
+      // Before BigInt, which would convert a long literal only to refuse it.
+      if (literal.replace('-', '').length > 20) fail('integer_out_of_range', 'an integer longer than 20 digits');
       const value = BigInt(literal);
       if (value < MIN_INTEGER || value > MAX_INTEGER) fail('integer_out_of_range', `${literal} is outside the 64-bit range`);
     } else if (!Number.isFinite(Number(literal))) {

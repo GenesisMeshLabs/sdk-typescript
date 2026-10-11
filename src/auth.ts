@@ -108,6 +108,15 @@ export function defineMember(target: Record<string, unknown>, key: string, value
 }
 
 /**
+ * True when `parseJson` read `holder[key]` from a float literal (`1.0`,
+ * `1e0`): a float with an integral value, which is not an integer where one
+ * is required, as every implementation reads it (1.3.1).
+ */
+export function isParsedFloat(holder: object, key: string): boolean {
+  return PYTHON_FLOATS.get(holder)?.has(key) ?? false;
+}
+
+/**
  * Carry the float spellings `parseJson` recorded for `from` over to a copy
  * holding some of its members (v1.3.0): `1000.0` stays `1000.0` in the
  * copy's canonical JSON.

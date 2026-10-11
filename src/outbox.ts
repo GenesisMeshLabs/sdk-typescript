@@ -20,6 +20,7 @@ import { mkdir, open, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { canonicalJson, cloneJson, parseJson } from './auth.js';
 import { GenesisMeshError } from './errors.js';
+import { StrictJsonError } from './strict-json.js';
 import type { BreakGlassRecord, ObservationRecord } from './out-of-band.js';
 import type { EvidenceSubmission, ExecutionEvidence } from './types.js';
 
@@ -180,7 +181,10 @@ export function classifySubmissionError(
 ): { failure: SubmissionFailure; transient: boolean } {
   if (err instanceof GenesisMeshError) {
     const failure = { status: err.status, code: err.code, message: err.message };
-    const refused = refusals.has(err.code) && (err.status === 0 || (err.status >= 400 && err.status < 500));
+    // 1.3.1: JSON this SDK refused to read is no refusal: the NA may have answered that it
+    // admitted the record. Only the NA's own `invalid_json` (a 400) is final.
+    const refused = !(err instanceof StrictJsonError) && refusals.has(err.code)
+      && (err.status === 0 || (err.status >= 400 && err.status < 500));
     return { failure, transient: !refused };
   }
   // 1.3.1: the transport turns every failure to reach the NA into a `NetworkError`; anything else
