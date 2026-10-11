@@ -304,12 +304,33 @@ export function metadataProblem(values: Record<string, unknown>): string | null 
   return null;
 }
 
-/** The values of an observation the NA's guard checks: its metadata and the source's own strings. */
-function observationValues(record: ObservationRecord): Record<string, unknown> {
-  const values: Record<string, unknown> = {
-    metadata: record.metadata, actor: record.actor, source_event_id: record.source_event_id, version_id: record.version_id,
-  };
-  return Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined && v !== null));
+/**
+ * Why the NA would refuse an observation or a break-glass record as secret
+ * material, or null (1.3.1): `metadataProblem` over the values the reference's
+ * `check_observation` and `check_break_glass` guard, gathered as they gather
+ * them. An observation's metadata and the source's own strings (`actor`,
+ * `source_event_id`, `version_id`; absent ones left out); a break-glass
+ * record's parameters, attributes, outcome detail and justification.
+ */
+export function recordMetadataProblem(
+  kind: 'observation' | 'break_glass',
+  record: ObservationRecord | BreakGlassRecord,
+): string | null {
+  if (kind === 'observation') {
+    const r = record as ObservationRecord;
+    const values: Record<string, unknown> = {
+      metadata: r.metadata ?? {}, actor: r.actor, source_event_id: r.source_event_id, version_id: r.version_id,
+    };
+    return metadataProblem(Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined && v !== null)));
+  }
+  const r = record as BreakGlassRecord;
+  return metadataProblem({
+    execution_parameters: r.execution_parameters ?? {},
+    request_parameters: r.request_parameters ?? {},
+    attributes: r.attributes ?? {},
+    outcome_detail: r.outcome_detail ?? '',
+    justification: r.justification,
+  });
 }
 
 export interface ObservationRecorderOptions {
@@ -370,7 +391,7 @@ export class ObservationRecorder {
         : 'the observation does not match the ObservationRecord model (a field missing, empty, too long or of another type)',
       'observation_malformed');
     }
-    const secret = metadataProblem(observationValues(record));
+    const secret = recordMetadataProblem('observation', record);
     if (secret) throw new OutOfBandRecordError(secret, 'observation_secret_material');
     return wire(record, await signCanonical(outOfBandCanonical(record), this.signer));
   }
@@ -492,13 +513,7 @@ export function checkBreakGlassRecord(record: BreakGlassRecord): void {
       'the record does not match the BreakGlassRecord model (a field missing, empty, too long or of another type)',
       'break_glass_malformed');
   }
-  const secret = metadataProblem({
-    execution_parameters: record.execution_parameters,
-    request_parameters: record.request_parameters,
-    attributes: record.attributes,
-    outcome_detail: record.outcome_detail ?? '',
-    justification: record.justification,
-  });
+  const secret = recordMetadataProblem('break_glass', record);
   if (secret) throw new OutOfBandRecordError(secret, 'break_glass_secret_material');
 }
 

@@ -175,6 +175,7 @@ export {
   ObservationRecorder,
   OutOfBandRecordError,
   metadataProblem,
+  recordMetadataProblem,
   observationFromFinding,
   observationId,
   outOfBandCanonical,

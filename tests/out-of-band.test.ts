@@ -10,12 +10,15 @@ import {
   parseExportLines,
   parseJson,
   publicKeyFromSeed,
+  recordMetadataProblem,
   seedSigner,
   signBreakGlass,
   verifyEvidenceEvents,
   verifyOutOfBandRecord,
 } from '../src/index.js';
-import type { ExecutorKeyInfo, OutOfBandRecord, ReconciliationFinding } from '../src/index.js';
+import type {
+  BreakGlassRecord, ExecutorKeyInfo, ObservationRecord, OutOfBandRecord, ReconciliationFinding,
+} from '../src/index.js';
 import { generateTestKeyPair } from './helpers.js';
 
 /**
@@ -31,6 +34,7 @@ interface Vector {
   input?: Record<string, unknown>;
   model?: string;
   record?: Record<string, unknown>;
+  record_kind?: 'observation' | 'break_glass';
   public_key?: string;
   expected: Record<string, unknown>;
 }
@@ -61,6 +65,9 @@ function outcome(v: Vector): Record<string, unknown> {
     }
     case 'verify_record':
       return { valid: verifyOutOfBandRecord(v.record as unknown as OutOfBandRecord, [v.public_key!]) };
+    case 'metadata_problem':
+      // v1.3.1: the NA's guard over a signed record, as the recorders apply it before signing.
+      return { problem: recordMetadataProblem(v.record_kind!, v.record as unknown as ObservationRecord | BreakGlassRecord) };
     default:
       throw new Error(`unknown vector kind ${v.kind}`);
   }
@@ -70,6 +77,8 @@ describe('out_of_band conformance vectors (v1.3.0)', () => {
   it('is the out_of_band suite', () => {
     expect(suite.suite).toBe('out_of_band');
     expect(suite.vectors.some(v => v.kind === 'verify_export')).toBe(true);
+    // 1.3.1: the NA's metadata guard, run against `recordMetadataProblem`.
+    expect(suite.vectors.filter(v => v.kind === 'metadata_problem').length).toBeGreaterThanOrEqual(21);
   });
 
   for (const v of suite.vectors.filter(vector => !NA_RULES.has(vector.kind))) {

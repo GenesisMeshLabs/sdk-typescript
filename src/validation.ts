@@ -1,4 +1,6 @@
 /** Runtime checks for complete wire artifacts, without coercion or mutation of signed JSON. */
+import { isParsedFloat } from './auth.js';
+
 type Check = (value: unknown) => boolean;
 const string: Check = v => typeof v === 'string';
 const boolean: Check = v => typeof v === 'boolean';
@@ -9,6 +11,14 @@ export const isObject = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);
 const nullable = (check: Check): Check => v => v === null || check(v);
 const optional = (check: Check): Check => v => v === undefined || check(v);
+/**
+ * A field the reference always writes, as null when it has no value (1.3.1). Left out,
+ * the record still reads as the reference reads it (the field is null), so its signature
+ * decides the reason: `invalid_signature`, or `non_canonical_form` when it was signed
+ * without the field (`nonCanonicalFields`), as the reference refuses it; not
+ * `payload_invalid`.
+ */
+const written = (check: Check): Check => optional(nullable(check));
 const array = (check: Check): Check => v => Array.isArray(v) && v.every(check);
 const oneOf = (...values: unknown[]): Check => v => values.includes(v);
 const dictionary = (check: Check): Check => v => isObject(v) && Object.values(v).every(check);
@@ -39,11 +49,11 @@ const policyGate = shape({
 const policyBinding = shape({
   policies: array(appliedPolicy), policy_set_digest: string, gate_evaluations: array(policyGate),
   context_digest: string, registry_gate_types: array(string), resolution_status: oneOf('resolved', 'failed'),
-  resolution_failure: nullable(string),
+  resolution_failure: written(string),
 });
 const attestationBinding = shape({
-  attestation_id: string, subject_id: nullable(string), issuer_sovereign_id: nullable(string),
-  attestation_digest: nullable(string), revocation_seq_checked: nonnegative,
+  attestation_id: string, subject_id: written(string), issuer_sovereign_id: written(string),
+  attestation_digest: written(string), revocation_seq_checked: nonnegative,
 });
 const freshnessProof = shape({
   proof_id: string, feed_sovereign_id: string, feed_sequence: nonnegative, feed_digest: string,
@@ -68,7 +78,7 @@ const action = oneOf('create', 'rotate', 'revoke', 'update', 'delete');
 export const validExecution = shape({
   evidence_id: string, sequence_no: positive, decision_id: string, context_id: string, agreement_id: string,
   executor_sovereign_id: string, executed_capability: string, execution_parameters: isObject,
-  executed_at: timestamp, outcome: string, outcome_detail: nullable(string), prev_evidence_digest: nullable(string),
+  executed_at: timestamp, outcome: string, outcome_detail: written(string), prev_evidence_digest: written(string),
   resource_id: optional(nullable(v => string(v) && (v as string).length > 0 && Array.from(v as string).length <= 256)),
   resource_action: optional(nullable(action)), resource_sequence: optional(nullable(positive)),
   prev_resource_digest: optional(nullable(string)), signature: optional(signature),
@@ -81,12 +91,12 @@ export const validJustification = shape({
   proof_id: string, decision_id: string, proof_issued_at: timestamp, issuer_sovereign_id: string,
   signature: optional(signature), trace: shape({
     trace_id: string, decision_id: string, agreement_id: string, operator_sovereign_id: string,
-    traced_at: timestamp, entries: array(gateTraceEntry), short_circuited_at: nullable(string), final_authorized: boolean,
+    traced_at: timestamp, entries: array(gateTraceEntry), short_circuited_at: written(string), final_authorized: boolean,
   }),
 });
 export const validCheckpoint = shape({
   checkpoint_id: string, created_at: timestamp, cutoff: timestamp, removed_through_sequence: nonnegative,
-  last_removed_entry_digest: string, removed_count: nonnegative, previous_checkpoint_id: nullable(string),
+  last_removed_entry_digest: string, removed_count: nonnegative, previous_checkpoint_id: written(string),
   issued_by: string, signature: optional(signature),
   resource_heads: dictionary(shape({ resource_sequence: positive, record_digest: string }, true)),
   observation_heads: optional(nullable(dictionary(nonnegative))),
@@ -177,7 +187,13 @@ export const validRegistry = shape({
   issued_by: string, signature: optional(signature),
 });
 
-export const validEvent = shape({
+const eventShape = shape({
   schema: oneOf('gm.evidence.event'), schema_version: oneOf(1), entry,
   entry_digest: string, payload: isObject,
 }, true);
+/** The envelope's integers, which a float with the same value (`7.0`) does not stand for. */
+const ENVELOPE_INTEGERS = ['store_sequence', 'exec_sequence_no', 'resource_sequence', 'observation_sequence'];
+/** An export event; `schema_version: 1.0` or an envelope integer written as a float is refused (1.3.1), as the reference refuses it. */
+export const validEvent: Check = v => eventShape(v)
+  && !isParsedFloat(v as object, 'schema_version')
+  && !ENVELOPE_INTEGERS.some(k => isParsedFloat((v as { entry: object }).entry, k));

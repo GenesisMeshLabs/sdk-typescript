@@ -102,7 +102,10 @@ describe('evidence verifier negative paths', () => {
     expect(verifyEvidenceEvents(relink(events), opts).failures.filter(f => f.reason === 'payload_invalid')).toHaveLength(2);
   });
   it('verifies checkpoint events and their continuation links', async () => {
-    const checkpoint = { ...v.checkpoint, resource_heads: {}, removed_through_sequence: 0, last_removed_entry_digest: 'anchor' };
+    // Nothing removed yet: a checkpoint removes as many entries as positions (1.3.1, retention_count_mismatch).
+    const checkpoint = {
+      ...v.checkpoint, resource_heads: {}, removed_through_sequence: 0, removed_count: 0, last_removed_entry_digest: 'anchor',
+    };
     checkpoint.signature = await signCanonical(checkpointCanonical(checkpoint), signer);
     const event = parseExportLines(v.export)[0];
     event.entry.prev_entry_digest = 'anchor'; event.entry_digest = entryDigest(event.entry);
