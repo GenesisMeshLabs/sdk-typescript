@@ -58,16 +58,22 @@ shortest grace. Which steps a cancel takes depends on the change
 | `rotate` or `update` with a version | `rotate_forward_then_disable` | without a version (`not_versioned`), or `rotatable: false` (`not_rotatable`) |
 | `revoke` or `delete` | | `not_reversible` |
 | a judgement `indeterminate` | | `indeterminate` |
+| a decision never executed | | `not_executed`: nothing to cancel; an alert closes it |
+
+A decision's plan, once a review denies it or its lifetime ends, comes from
+its latest execution evidence (`decisionPlan`).
 
 ## The due queue and notices
 
 Each judged change (or reviewed decision) has a remediation state
-(`RemediationStatus`): its subject and change, `state`, the plan (`mode`,
-`steps`, `fallback`, `grace_seconds`, `guidance_source`), its times
-(`remediation_due_at`, `overdue_since`, `waived_until`, `lifetime_ends_at`)
-and links. The NA returns it with a judgement (`judgement.remediation`), in a
-resource's changes (`remediation`), and from these calls (operator key, read
-tier):
+(`RemediationStatus`): its subject and change (with `change_version_id`, the
+version the change made), its actor and the actor's holder, `state`,
+`review_pending`, the plan (`mode`, `steps`, `fallback`, `grace_seconds`,
+`guidance_source`), its times (`remediation_due_at`, `overdue_since`,
+`waived_until`, `lifetime_ends_at`) and links. For a decision, the actor is
+the operator key that asked for it. The NA returns the state with a judgement
+(`judgement.remediation`), in a resource's changes (`remediation`), and from
+these calls (operator key, read tier):
 
 ```ts
 for await (const due of gm.evidenceStore.allRemediations({ state: 'remediation_due' })) {
@@ -78,26 +84,39 @@ const one = await gm.evidenceStore.remediation(subjectId);     // with its revie
 ```
 
 `listRemediations({ state, limit, after })` reads one page (`limit` 1 to 500;
-`after` is the previous page's `next_after`); without `state` it lists the
-open states (`remediation_due`, `overdue`, `review_pending`, `waived`).
+`after` is the previous page's `next_after`). `state` is a stored state
+(`STORED_STATES`) or `review_pending`, every change with a pending review
+whatever its state; without it the queue lists the due, overdue and waived
+changes and those with a pending review. `remediation(subjectId)` returns
+the newest 100 reviews and stored records, with `reviews_truncated` and
+`records_truncated` when there are more.
 `markNotified` records that the controller told the actor: an audit event and,
 on the first notice, `notified_at`. The actor is what the source reported; it
 is not proof of who acted.
 
+A pending review is a flag beside the state (`review_pending`), not a state
+of its own: it stops no clock. The due time, a waiver's end and an emergency
+lifetime keep running while a review is pending, an overdue change stays
+overdue, and the verdict applies when it comes. An allowed change under
+review, or with a lifetime running, keeps its Stage 2 state (`judged_allowed`,
+`matched` or `recorded`).
+
 The states and the transitions between them are the NA's state table:
-`nextState(state, event)` returns the next state or throws
+`nextState(state, event, reviewPending)` returns the next state or throws
 `TransitionRefusedError` with the NA's code (`remediation_not_due`,
 `remediation_already_recorded`, `review_not_pending`,
 `review_already_pending`, `review_after_remediation`,
-`review_waiver_after_remediation`, `illegal_transition`). `dueAfterDenial`
-and `dueAfterWaiver` give the due time after a review denies a change or a
-waiver ends.
+`review_waiver_after_remediation`, `illegal_transition`). A review is decided
+only while one is pending, one at a time; a remediation is recorded only from
+`remediation_due` or `overdue`. `dueAfterDenial` and `dueAfterWaiver` give
+the due time after a review denies a change or a waiver ends.
 
 ## Carrying out a remediation
 
 A remediation record is signed by the controller's executor key, the one its
-`ExecutionRecorder` holds. Act on `remediation_due` and `overdue`; a pending
-review holds the remediation.
+`ExecutionRecorder` holds, and is recorded only for a change that is
+`remediation_due` or `overdue`. A pending review does not hold it: the due
+time runs, and you may remediate or wait for the verdict.
 
 ### Cancel by rotating forward
 
@@ -129,9 +148,13 @@ const result = await cancelByRotatingForward(gm, recorder, {
    (`ClientOptions.recordOutbox`), and submitted directly otherwise.
 
 Before anything runs it checks the state and the plan when the remediation
-carries them (`remediation_not_due`, `remediation_already_recorded`,
-`remediation_steps_mismatch`), the denied version against the secret guard,
-and that the record outbox can be read. Before the denied version is disabled
+carries them (`remediation_not_due` unless the state is `remediation_due` or
+`overdue`, `remediation_already_recorded`, `remediation_steps_mismatch`), the
+denied version against the secret guard, and that the record outbox can be
+read. The rotation must be made by the same executor sovereign as the record,
+after the change, and be cited by no other remediation: the NA refuses
+otherwise (`remediation_rotation_other_executor`,
+`remediation_rotation_before_change`, `remediation_rotation_reused`). Before the denied version is disabled
 it checks the record as it will be signed: a disable is never left without a
 record the NA would take. A failure after the rotation throws
 `RemediationNotRecordedError` (`remediation_not_recorded`) with the
@@ -151,7 +174,10 @@ await gm.evidenceStore.enqueueRecord(record); // or submitRemediation(record)
 ```
 
 The outcome follows from the steps (`alerted` for `none`, `cancelled`
-otherwise). The record carries versions and an optional `detail`, never a
+otherwise). A decision never executed (`fallback: not_executed`) is closed
+by an alert naming the decision itself as its change: `remediationSubject(due,
+resourceId)` gives `change_kind` `execution` and `change_id` the decision's
+ID. The record carries versions and an optional `detail`, never a
 value. The recorder refuses before signing what the NA would refuse: steps
 that do not fit the outcome and versions, or a field it does not take
 (`remediation_malformed`), secret material (`remediation_secret_material`),
@@ -171,9 +197,12 @@ a dead letter (`RECORD_PERMANENT_REFUSALS`); the NA keeps an authentic record
 it refuses for good as a quarantine entry (`details.quarantine_id`), since
 what it reports already happened.
 
-`checkRemediation(record, key)` decides, as the NA's admission does, whether
-a signed record is authentic, signed by an active executor key of its
-sovereign covering its resource, and free of secret material.
+`remediationRecordProblem(raw, key)` checks a record as received in the
+NA's order: first its exact serialized form (`remediation_malformed`:
+`remediationFormProblem`), then `checkRemediation(record, key)`, whether it
+is authentic, signed by an active executor key of its sovereign covering its
+resource, and free of secret material. The NA also refuses a key that does
+not cover the subject's resource (`remediation_out_of_scope`, not kept).
 
 ## Reviews
 
@@ -202,15 +231,22 @@ const decided = await bob.evidenceStore.decideReview(review_id, {
 | `waive_until` | stands until that time (after now, within the NA's longest waiver and an emergency change's lifetime), then remediation becomes due |
 
 Both operator keys need a named holder in the store
-(`review_needs_named_holder`). The decider's key and holder must differ from
-the requester's (`review_same_holder_as_requester`), and its holder from the
-holder the observed actor maps to (`review_same_holder_as_actor`);
-`reviewHolderProblem` applies the same rule. `review(review_id)` reads a
-review, with its stored record once decided.
+(`review_needs_named_holder`). The requester must not be the change's actor,
+by key or holder (`review_requested_by_actor`; `reviewRequestProblem`). The
+decider's key and holder must differ from the requester's
+(`review_same_holder_as_requester`), and its holder from the holder the
+actor maps to (`review_same_holder_as_actor`); `reviewHolderProblem` applies
+the same rule. `review(review_id)` reads a review, with its stored record
+once decided.
 
 The NA keeps each operator's signed request as received and embeds it in the
 `ReviewRecord` it signs, so sign exactly the body you send: `requestReview`
-and `decideReview` send only the fields above, without a query. Offline:
+and `decideReview` send only the fields above, without a query. The NA checks
+the request as the review would embed it before writing anything
+(`400 review_approval_invalid`). `waive_until` and the admin timestamp are
+RFC 3339 (`YYYY-MM-DDTHH:MM:SS`, a fraction of 1 to 6 digits, `Z` or
+`+HH:MM`; `400 invalid_review` otherwise); a `Date` is sent as
+`toISOString()`, which is. `rfc3339(value)` checks one. Offline:
 
 - `verifyReviewRecord(review, naPublicKeys)` checks the NA's signature;
 - `reviewApprovalProblem(review, naPublicKeys)` checks the embedded requests:
@@ -240,7 +276,7 @@ console.log(result.path);                      // 'ordinary', 'emergency' or 'br
 | Situation | Path |
 | --- | --- |
 | The ordinary capability is allowed | the action runs under that decision (`ordinary`) |
-| The NA answers with an ordinary DENY | the emergency capability is requested, with the justification in its justification parameter (default `justification`); the NA decides under the emergency policy before the change and reviews it after (`emergency`) |
+| The NA answers with an ordinary DENY | the emergency capability is requested, with the justification in its justification parameter (default `justification`); the NA decides under the emergency policy before the change and reviews it after (`emergency`; the decision's state is `recorded` with `review_pending`) |
 | The NA cannot be reached, times out or answers `5xx` or `429` | break-glass naming the emergency capability, with the justification parameter in its request parameters; the NA judges it under the emergency policy once it is back (`break_glass`) |
 
 A DENY is never broken through, and any other error is thrown as
@@ -259,18 +295,22 @@ entry's envelope (`envelope_mismatch`) and each record once
 (`duplicate_record`). It also checks, as the reference does:
 
 - **Remediations:** one per subject (`duplicate_remediation`), of its
-  judgement's resource (`remediation_subject_mismatch`), after its forward
-  rotation's evidence, of the same resource (`remediation_rotation_mismatch`);
-  in a run from entry 1, its subject and rotation are held
+  subject's change, resource and the version that change made
+  (`remediation_subject_mismatch`), after a forward rotation of the same
+  resource (`remediation_rotation_mismatch`), made by its own executor
+  sovereign (`remediation_rotation_other_executor`), after the change
+  (`remediation_rotation_before_change`) and cited once
+  (`remediation_rotation_reused`); in a run from its start (entry 1, or right
+  after the `checkpoint` passed), its subject and rotation are held
   (`remediation_subject_missing`, `remediation_rotation_missing`).
 - **Reviews:** the embedded requests prove it (`review_approval_invalid`),
   with the public key and holder the holder registry last recorded for each
-  operator key by then, when the run holds such a record
-  (`review_approval_key_mismatch`); a second holder decided it
-  (`review_same_holder`); it names its subject's digest
-  (`review_subject_mismatch`; `review_subject_missing` in a run from entry 1);
-  and no waiver follows a recorded remediation
-  (`review_waiver_after_remediation`).
+  operator key by then, in registry records the NA signed, when the run
+  holds such a record (`review_approval_key_mismatch`); a second holder
+  decided it (`review_same_holder`); it names its subject's digest
+  (`review_subject_mismatch`; `review_subject_missing` in a run from its
+  start); and no waiver follows a recorded remediation
+  (`review_waiver_after_remediation`). Its timestamps are strict RFC 3339.
 
 Remediation and review IDs are not decisions (`evidence_cites_judgement`).
 The result counts them in `remediations` and `reviews` when there are any.

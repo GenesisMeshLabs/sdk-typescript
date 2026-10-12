@@ -175,18 +175,23 @@ changes, with its justification; a policy can forbid it for a capability (a
 
 The NA judges each record at admission unless that is turned off; the
 operator judges the rest with `judgeObservation` and `judgeBreakGlass`.
-`resourceChanges` lists every change to a resource, with how it was governed
+`resourceChanges` lists the changes to a resource, with how it was governed
 (`prior_decision` or `after_the_fact`) and its state (`recorded`, `matched`,
 `judged_allowed`, `judged_denied`, `indeterminate`, `observed`,
 `quarantined`). A judgement has no `authorized` field: it is never an
 approval, and `verifyEvidenceEvents` refuses execution evidence that cites
-one (`evidence_cites_judgement`).
+one (`evidence_cites_judgement`). From 1.4.0 the NA pages the changes:
+`resourceChanges(resourceId, { limit, after_sequence })` reads one page
+(`limit` 1 to 10000, default 1000; `after_sequence` the previous page's
+`next_after_sequence`), and `allResourceChanges(resourceId)` follows the
+pages.
 
 From 1.4.0, with the NA's remediation records on, a denied, indeterminate or
 flagged judgement arms a remediation or opens a review: the judgement carries
 it (`judgement.remediation`), and the change's `state` in `resourceChanges`
 is its remediation state (`remediation_due`, `overdue`, `remediated`,
-`review_pending`, `upheld`, `waived`), with a `remediation` object. See
+`upheld`, `waived`, or its Stage 2 state for an allowed change), with a
+`remediation` object whose `review_pending` flag says a review is open. See
 [Remediation, reviews and urgent changes](remediation-and-reviews.md).
 
 ## Verifying exports
