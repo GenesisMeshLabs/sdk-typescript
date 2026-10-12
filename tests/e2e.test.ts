@@ -9,9 +9,10 @@ import {
   verifyBoundaryDecision, verifyAttestationSignature, verifyPolicySignature, verifyJustificationSignature,
   verifyRevocationFeedSignature, verifyEvidenceEvents, parseExportLines, ConflictError,
   MemoryOutbox, MetadataRefusedError, executionDigest, ObservationRecorder,
+  cancelByRotatingForward, urgentAction, reviewApprovalProblem, verifyReviewRecord, verifyRemediationRecord,
 } from '../src/index.js';
 import type {
-  BoundaryPolicyIntent, BreakGlassResult, EvidenceEvent, GovernedActionParams, RecordOutboxEntry,
+  BoundaryPolicy, BoundaryPolicyIntent, BreakGlassResult, EvidenceEvent, GovernedActionParams, RecordOutboxEntry,
 } from '../src/index.js';
 import { generateTestKeyPair } from './helpers.js';
 
@@ -21,7 +22,11 @@ const suite = enabled ? describe : describe.skip;
 suite('SDK against a live Python Network Authority', () => {
   let child: ChildProcessWithoutNullStreams | undefined;
   let gm: GenesisMeshClient;
-  let config: { baseUrl: string; signingKeyBase64: string; keyId: string; naPublicKey: string; outOfBand?: boolean };
+  let config: {
+    baseUrl: string; signingKeyBase64: string; keyId: string; naPublicKey: string; outOfBand?: boolean;
+    /** 1.4.0: the NA records remediations and reviews; `reviewer` is a privileged key of another holder. */
+    remediation?: boolean; reviewer?: { keyId: string; signingKeyBase64: string };
+  };
   let naPublicKey: string;
   let diagnostics = '';
   beforeAll(async () => {
@@ -249,9 +254,15 @@ suite('SDK against a live Python Network Authority', () => {
     expect(denyAction).not.toHaveBeenCalled();
 
     const changes = await gm.evidenceStore.resourceChanges(resource);
+    // 1.4.0: with the remediation records on, the denied change shows its remediation state, and the
+    // break-glass change, flagged for review, has a pending review beside its state.
     expect(changes.changes.map(c => [c.kind, c.state])).toEqual([
-      ['observation', 'judged_denied'], ['observation', 'judged_allowed'], ['break_glass', 'judged_allowed'],
+      ['observation', config.remediation ? 'remediation_due' : 'judged_denied'], ['observation', 'judged_allowed'],
+      ['break_glass', 'judged_allowed'],
     ]);
+    if (config.remediation) {
+      expect(changes.changes[2]!.remediation).toMatchObject({ review_pending: true, review: { opened_for: 'flagged_for_review' } });
+    }
     expect(changes.changes[2]!.justification).toBe('incident drill: NA unreachable');
     expect((await gm.evidenceStore.operatorHolders()).map(h => h.key_id)).toContain('ops');
 
@@ -263,6 +274,183 @@ suite('SDK against a live Python Network Authority', () => {
     expect(verification.break_glass).toBeGreaterThanOrEqual(1);
     expect(verification.judgements).toBeGreaterThanOrEqual(3);
   }, 30_000);
+
+  /** A capability, its policy, an attestation, and executor and observer keys, for the 1.4.0 tests. */
+  async function remediationSetup(policy: Partial<BoundaryPolicyIntent> = {}) {
+    const id = randomUUID();
+    const capability = `sdk.rem.${id}`;
+    const emergency = `${capability}.emergency`;
+    const attestation = await gm.attestation.issue({ subject_id: id, roles: ['role:client'], claims: { capabilities: [capability, emergency] } });
+    const window = { valid_from: new Date(Date.now() - 60_000).toISOString(), valid_until: new Date(Date.now() + 3600_000).toISOString() };
+    const ordinary = await gm.policy.publish({
+      policy_id: `rem-${id}`, ...window, selector: { capabilities: [capability] },
+      gates: [{ gate_id: 'lifetime', gate_type: 'max_value.v1', order: 0, config: { path: 'request_parameters.lifetime_days', max: 90 } }],
+      ...policy,
+    });
+    await gm.policy.activate(ordinary.policy_id, ordinary.version);
+    const executorKey = generateTestKeyPair();
+    await gm.evidenceStore.registerExecutorKey({ key_id: `executor-${id}`, public_key: executorKey.pubBase64, executor_sovereign_id: `executor-${id}` });
+    const recorder = new ExecutionRecorder({ executorSovereignId: `executor-${id}`, signer: seedSigner(executorKey.seedBase64, `executor-${id}`) });
+    const observerKey = generateTestKeyPair();
+    await gm.evidenceStore.registerExecutorKey({
+      key_id: `observer-${id}`, public_key: observerKey.pubBase64, executor_sovereign_id: `observer-${id}`, role: 'observer',
+    });
+    const observer = new ObservationRecorder({ observerSovereignId: `observer-${id}`, signer: seedSigner(observerKey.seedBase64, `observer-${id}`) });
+    const verify = { operatorPublicKeys: [naPublicKey], expectedPolicies: [ordinary], expectedAttestation: attestation };
+    return { id, capability, emergency, attestation, ordinary, recorder, observer, verify, window };
+  }
+
+  it('cancels a denied change by rotating forward, tells its actor, and verifies the export (1.4.0)', async () => {
+    if (!config.remediation) return; // a core before 1.4.0
+    const x = await remediationSetup({ remediation: { lifetime: { mode: 'cancel', grace_seconds: 3600 } } });
+    const resource = `kv:rem-${x.id}/secret`;
+    // Someone rotates the secret in the console to v2 with a 400-day lifetime.
+    const cloud = { current: 'v2', enabled: new Set(['v1', 'v2']) };
+    const read = () => { expect(cloud.enabled.has(cloud.current)).toBe(true); return cloud.current; };
+    const seen = await gm.evidenceStore.submitObservation(await x.observer.record({
+      resource_id: resource, action: 'rotate', capability: x.capability, changed_at: new Date(), source: 'activity-log',
+      source_event_id: `${x.id}-1`, actor: 'principal-7f3a', version_id: 'v2', metadata: { lifetime_days: 400 },
+    }));
+    const judgement = seen.judgement!;
+    expect(judgement.payload.verdict).toBe('deny');
+    expect(judgement.remediation).toMatchObject({
+      state: 'remediation_due', mode: 'cancel', steps: 'rotate_forward_then_disable', guidance_source: 'gate',
+      change_kind: 'observation', actor: 'principal-7f3a',
+    });
+    const subjectId = judgement.payload.judgement_id;
+
+    const due: string[] = [];
+    for await (const s of gm.evidenceStore.allRemediations({ state: 'remediation_due', limit: 1 })) due.push(s.subject_id);
+    expect(due).toContain(subjectId);
+    const noticed = await gm.evidenceStore.markNotified(subjectId, 'email');
+    expect(noticed.notified_at).not.toBeNull();
+
+    const state = (await gm.evidenceStore.remediation(subjectId));
+    const result = await cancelByRotatingForward(gm, x.recorder, {
+      remediation: state, deniedVersionId: 'v2',
+      rotation: {
+        attestation_id: x.attestation.attestation_id, requested_capability: x.capability,
+        context: { request_parameters: { lifetime_days: 30 } }, verify: x.verify,
+      },
+      rotate: async () => { cloud.enabled.add('v3'); cloud.current = 'v3'; read(); return { version_id: 'v3' }; },
+      disable: async version => { cloud.enabled.delete(version); read(); },
+    });
+    expect(result.submission).toMatchObject({ status: 'recorded', remediation: { state: 'remediated' } });
+    expect(read()).toBe('v3');
+    expect(verifyRemediationRecord(result.remediation!, [(await gm.evidenceStore.listExecutorKeys())
+      .find(k => k.key_id === x.recorder.keyId)!.public_key])).toBe(true);
+    expect((await gm.evidenceStore.submitRemediation(result.remediation!)).status).toBe('duplicate');
+    const detail = await gm.evidenceStore.remediation(subjectId);
+    expect(detail).toMatchObject({ state: 'remediated', remediation_id: result.remediation!.remediation_id });
+    expect(detail.records.map(r => r.entry.entry_kind)).toEqual(['remediation']);
+    expect((await gm.evidenceStore.status()).remediation?.['remediated']).toBeGreaterThanOrEqual(1);
+
+    const exported: EvidenceEvent[] = [];
+    for await (const event of gm.evidenceStore.exportAll()) exported.push(event);
+    const verification = verifyEvidenceEvents(exported, { naPublicKeys: [naPublicKey], executorKeys: await gm.evidenceStore.listExecutorKeys() });
+    expect(verification.failures).toEqual([]);
+    expect(verification.remediations).toBeGreaterThanOrEqual(1);
+  }, 30_000);
+
+  it('reviews a judged change with a second holder, whose approval verifies offline (1.4.0)', async () => {
+    if (!config.remediation) return; // a core before 1.4.0
+    const x = await remediationSetup();
+    const seen = await gm.evidenceStore.submitObservation(await x.observer.record({
+      resource_id: `kv:rev-${x.id}/secret`, action: 'rotate', capability: x.capability, changed_at: new Date(),
+      source: 'activity-log', source_event_id: `${x.id}-1`, actor: 'principal-7f3a', version_id: 'v2',
+      metadata: { lifetime_days: 400 },
+    }));
+    const subjectId = seen.judgement!.payload.judgement_id;
+    const requested = await gm.evidenceStore.requestReview({
+      subject_kind: 'judgement', subject_id: subjectId, justification: 'The change was planned with the vendor',
+    });
+    // A pending review is a flag beside the state: the denied change stays due.
+    expect(requested).toMatchObject({ state: 'remediation_due', review_pending: true });
+    expect(requested.review).toMatchObject({ opened_for: 'requested', requested_by: 'ops', requester_holder: 'alice' });
+    const pending: string[] = [];
+    for await (const s of gm.evidenceStore.allRemediations({ state: 'review_pending' })) pending.push(s.subject_id);
+    expect(pending).toContain(subjectId);
+    // The requester cannot decide its own request.
+    await expect(gm.evidenceStore.decideReview(requested.review_id, { verdict: 'uphold' }))
+      .rejects.toMatchObject({ code: 'review_same_holder_as_requester' });
+
+    const reviewer = new GenesisMeshClient({ ...config, ...config.reviewer! });
+    const until = new Date(Date.now() + 86_400_000);
+    const decided = await reviewer.evidenceStore.decideReview(requested.review_id, {
+      verdict: 'waive_until', waive_until: until, note: 'Vendor migration ends tomorrow',
+    });
+    expect(decided).toMatchObject({ state: 'waived', review_id: requested.review_id });
+    const review = decided.review.payload;
+    expect(review).toMatchObject({ verdict: 'waive_until', decided_by: 'ops-2', decider_holder: 'bob', requested_by: 'ops' });
+    expect(verifyReviewRecord(review, [naPublicKey])).toBe(true);
+    expect(reviewApprovalProblem(review, [naPublicKey])).toBeNull();
+    expect((await gm.evidenceStore.review(requested.review_id)).record?.payload.review_id).toBe(requested.review_id);
+
+    const exported: EvidenceEvent[] = [];
+    for await (const event of gm.evidenceStore.exportAll()) exported.push(event);
+    const verification = verifyEvidenceEvents(exported, { naPublicKeys: [naPublicKey], executorKeys: await gm.evidenceStore.listExecutorKeys() });
+    expect(verification.failures).toEqual([]);
+    expect(verification.reviews).toBeGreaterThanOrEqual(1);
+  }, 30_000);
+
+  describe('urgent changes are never blocked, and each is judged (1.4.0)', () => {
+    async function urgent() {
+      const x = await remediationSetup();
+      const policy: BoundaryPolicy = await gm.policy.publish({
+        policy_id: `rem-emergency-${x.id}`, ...x.window, selector: { capabilities: [x.emergency] },
+        gates: [{ gate_id: 'justified', gate_type: 'required_parameter.v1', order: 0, config: { path: 'request_parameters.justification' } }],
+        emergency: { stands_for: x.capability, justification_parameter: 'justification', max_lifetime_seconds: 86400 },
+      });
+      await gm.policy.activate(policy.policy_id, policy.version);
+      const params = {
+        attestation_id: x.attestation.attestation_id, requested_capability: x.capability,
+        resource_id: `kv:urgent-${x.id}/secret`, resource_action: 'rotate' as const,
+        context: { request_parameters: { lifetime_days: 400 } }, verify: x.verify,
+        emergency: { capability: x.emergency, justification: 'Key leaked in a public repo', expectedPolicies: [policy] },
+      };
+      const action = jest.fn(async (_decision: unknown) => ({ value: 'rotated', execution_parameters: { version_id: 'v5' } }));
+      return { ...x, policy, params, action };
+    }
+
+    it('NA up with an ordinary DENY: the emergency capability decides before the change, and it is reviewed', async () => {
+      if (!config.remediation) return;
+      const x = await urgent();
+      const result = await urgentAction(
+        new GenesisMeshClient({ ...config, recordOutbox: new MemoryOutbox<RecordOutboxEntry>() }), x.recorder, x.params, x.action);
+      expect(result).toMatchObject({ path: 'emergency', ordinaryDenial: { authorized: false }, result: { authorized: true } });
+      expect(x.action).toHaveBeenCalledTimes(1);
+      const decision = (result.result as { evaluation: { decision: { decision_id: string } } }).evaluation.decision;
+      const state = await gm.evidenceStore.remediation(decision.decision_id);
+      expect(state).toMatchObject({
+        subject_kind: 'decision', state: 'recorded', review_pending: true, review: { opened_for: 'review_required' },
+      });
+      expect(state.lifetime_ends_at).not.toBeNull();
+    }, 30_000);
+
+    it.each([
+      ['NA down', 'network_error', () => { throw new TypeError('fetch failed'); }],
+      ['NA answering 503', 'server_error', () => new Response(JSON.stringify({ error: { code: 'service_unavailable', message: 'down' } }), { status: 503 })],
+      ['NA answering 429', 'rate_limited', () => new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'slow down' } }), { status: 429 })],
+    ])('%s: break-glass names the emergency capability and is judged under its policy', async (_case, failure, answer) => {
+      if (!config.remediation) return;
+      const x = await urgent();
+      const outage: typeof fetch = async (input, init) =>
+        (String(input).endsWith('/admin/boundary/evaluate') ? answer() : fetch(input, init));
+      const client = new GenesisMeshClient({ ...config, fetch: outage, recordOutbox: new MemoryOutbox<RecordOutboxEntry>() });
+      const result = await urgentAction(client, x.recorder, x.params, x.action);
+      expect(result.path).toBe('break_glass');
+      expect(x.action).toHaveBeenCalledWith(null);
+      const broke = result.result as BreakGlassResult<string>;
+      expect(broke).toMatchObject({ failure, submission: { status: 'recorded' } });
+      expect(broke.record).toMatchObject({
+        capability: x.emergency, request_parameters: { lifetime_days: 400, justification: 'Key leaked in a public repo' },
+      });
+      const judgement = broke.submission!.judgement!;
+      expect(judgement.payload).toMatchObject({ verdict: 'allow', capability: x.emergency });
+      expect(judgement.payload.policy_binding?.policies.map(p => p.policy_id)).toContain(x.policy.policy_id);
+      expect(judgement.remediation).toMatchObject({ state: 'judged_allowed', review_pending: true });
+    }, 30_000);
+  });
 
   it('supports observe/enforce, rollback, failure evidence, chain conflicts and retired keys', async () => {
     const id = randomUUID();

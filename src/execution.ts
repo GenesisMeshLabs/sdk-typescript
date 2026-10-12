@@ -4,6 +4,7 @@
  */
 
 import { signBreakGlass, type BreakGlassInput, type BreakGlassRecord } from './out-of-band.js';
+import { signRemediation, type RemediationInput, type RemediationRecord } from './remediation.js';
 import { randomUUID } from 'node:crypto';
 import { checkSignable, jsonUtf8Size, pythonTimestamp, signCanonical, type Signer } from './auth.js';
 import { executionCanonical, executionDigest } from './canonical.js';
@@ -147,6 +148,16 @@ export class ExecutionRecorder {
    */
   signBreakGlass(input: Omit<BreakGlassInput, 'executor_sovereign_id'>): Promise<BreakGlassRecord> {
     return signBreakGlass({ ...input, executor_sovereign_id: this.executorSovereignId }, this.signer);
+  }
+
+  /**
+   * Sign a remediation record with this executor's key (v1.4.0): what the
+   * controller did about a judged change. Refused before signing as the NA
+   * would refuse it (`remediation_malformed`, `remediation_secret_material`,
+   * `StrictJsonError`). See `cancelByRotatingForward` for the cancel pair.
+   */
+  signRemediation(input: RemediationInput): Promise<RemediationRecord> {
+    return signRemediation({ ...input, executor_sovereign_id: this.executorSovereignId }, this.signer);
   }
 
   async record(params: RecordExecutionParams): Promise<ExecutionEvidence> {

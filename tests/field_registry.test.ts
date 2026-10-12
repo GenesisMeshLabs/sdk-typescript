@@ -12,6 +12,7 @@ import {
   CHECKPOINT_OMITTED_WHEN_ABSENT,
   DECISION_OMITTED_WHEN_ABSENT,
   ENVELOPE_OMITTED_WHEN_ABSENT,
+  POLICY_OMITTED_WHEN_ABSENT,
   RESOURCE_CHAIN_FIELDS,
 } from '../src/canonical.js';
 
@@ -40,6 +41,8 @@ describe('field_registry conformance suite', () => {
     expect([...DECISION_OMITTED_WHEN_ABSENT]).toEqual(models['BoundaryDecision']!.omit_when_none);
     expect([...ENVELOPE_OMITTED_WHEN_ABSENT]).toEqual(models['EvidenceStoreEntry']!.omit_when_none);
     expect([...CHECKPOINT_OMITTED_WHEN_ABSENT]).toEqual(models['RetentionCheckpoint']!.omit_when_none);
+    // v1.4.0: a policy's remediation, review and emergency sections.
+    expect([...POLICY_OMITTED_WHEN_ABSENT]).toEqual(models['BoundaryPolicy']!.omit_when_none);
     expect([...AGREEMENT_CANONICAL_FIELDS]).toEqual(models['AgreementRecord']!.canonical_fields);
   });
 

@@ -25,9 +25,25 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
     "observation",
     "quarantine",
     "registry",
-    "retention_checkpoint"
+    "remediation",
+    "retention_checkpoint",
+    "review"
   ],
   "models": {
+    "AdminApproval": {
+      "fields": {
+        "admin_signature": null,
+        "audience": null,
+        "body": "open",
+        "key_id": null,
+        "method": null,
+        "nonce": null,
+        "path": null,
+        "public_key": null,
+        "query": "open",
+        "timestamp": null
+      }
+    },
     "AgreementRecord": {
       "fields": {
         "agreed_terms": {
@@ -120,6 +136,9 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
     "BoundaryPolicy": {
       "fields": {
         "description": null,
+        "emergency": {
+          "object": "EmergencyCapability"
+        },
         "gates": {
           "list": "GateSpec"
         },
@@ -127,6 +146,10 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "issued_by": null,
         "issuer_sovereign_id": null,
         "policy_id": null,
+        "remediation": {
+          "map": "GateRemediation"
+        },
+        "review_required": null,
         "selector": {
           "object": "PolicySelector"
         },
@@ -138,7 +161,12 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "version": null
       },
       "root": true,
-      "signature_field": "signature"
+      "signature_field": "signature",
+      "omit_when_none": [
+        "remediation",
+        "review_required",
+        "emergency"
+      ]
     },
     "BreakGlassRecord": {
       "fields": {
@@ -233,6 +261,13 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "source_type": null
       }
     },
+    "EmergencyCapability": {
+      "fields": {
+        "justification_parameter": null,
+        "max_lifetime_seconds": null,
+        "stands_for": null
+      }
+    },
     "EvidenceStoreEntry": {
       "fields": {
         "attestation_id": null,
@@ -309,6 +344,12 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "signature": {
           "object": "Signature"
         }
+      }
+    },
+    "GateRemediation": {
+      "fields": {
+        "grace_seconds": null,
+        "mode": null
       }
     },
     "GateResult": {
@@ -568,6 +609,35 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "recorded_by"
       ]
     },
+    "RemediationRecord": {
+      "fields": {
+        "change_id": null,
+        "change_kind": null,
+        "detail": null,
+        "disabled_version_id": null,
+        "executor_sovereign_id": null,
+        "outcome": null,
+        "remediated_at": "timestamp",
+        "remediation_id": null,
+        "resource_id": null,
+        "rotation_evidence_id": null,
+        "signature": {
+          "object": "Signature"
+        },
+        "steps": null,
+        "subject_id": null,
+        "subject_kind": null,
+        "version_id": null
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "rotation_evidence_id",
+        "version_id",
+        "disabled_version_id",
+        "detail"
+      ]
+    },
     "ResourceHead": {
       "fields": {
         "record_digest": null,
@@ -596,6 +666,54 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
       "signature_field": "signature",
       "omit_when_none": [
         "observation_heads"
+      ]
+    },
+    "ReviewRecord": {
+      "fields": {
+        "actor": null,
+        "actor_holder": null,
+        "approval": {
+          "object": "AdminApproval"
+        },
+        "capability": null,
+        "decided_at": "timestamp",
+        "decided_by": null,
+        "decider_holder": null,
+        "issued_by": null,
+        "issuer_sovereign_id": null,
+        "justification": null,
+        "note": null,
+        "opened_for": null,
+        "request_approval": {
+          "object": "AdminApproval"
+        },
+        "requested_at": "timestamp",
+        "requested_by": null,
+        "requester_holder": null,
+        "resource_id": null,
+        "review_id": null,
+        "signature": {
+          "object": "Signature"
+        },
+        "subject_digest": null,
+        "subject_id": null,
+        "subject_kind": null,
+        "verdict": null,
+        "waive_until": "timestamp"
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "resource_id",
+        "capability",
+        "requested_by",
+        "requester_holder",
+        "justification",
+        "request_approval",
+        "actor",
+        "actor_holder",
+        "waive_until",
+        "note"
       ]
     },
     "Signature": {

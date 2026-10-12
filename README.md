@@ -46,6 +46,7 @@ execution recording, evidence-store queries and offline verification.
 - [Offline verification and integration tests](docs/offline-verification.md)
 - [High availability: failover, readiness and conflicts](docs/high-availability.md)
 - [Changes outside the controlled path: observations and break-glass](docs/out-of-band-changes.md) (1.3.0)
+- [Remediation, reviews and urgent changes](docs/remediation-and-reviews.md) (1.4.0)
 
 `governedAction` requires verification keys and explicit expected policies. It
 verifies the signed response and its request context before calling the supplied
@@ -59,6 +60,19 @@ An observer records each source event once: the `ObservationRecorder` derives
 recording an event again signs the same record and the NA answers `duplicate`.
 If you set your own IDs, derive them from the event the same way rather than
 generating new ones.
+
+From 1.4.0 a change the NA judged DENY after the fact is remediated by the
+controller, as the NA states it: read the due queue
+(`evidenceStore.allRemediations({ state: 'remediation_due' })`), tell the
+actor (`markNotified`), and cancel a denied version with
+`cancelByRotatingForward` (a governed rotation, then a disable, as two linked
+records) or sign a remediation record with `recorder.signRemediation`. A
+second holder reviews a change with `requestReview` and `decideReview`; the
+decider's signed request is embedded in the review and verifies offline
+(`reviewApprovalProblem`). `urgentAction` takes an urgent change through the
+ordinary capability, the emergency capability on a DENY, or break-glass
+naming the emergency capability when the NA does not answer: it is never
+blocked, and always judged.
 
 ## Sub-clients
 

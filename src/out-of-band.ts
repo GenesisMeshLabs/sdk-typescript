@@ -27,7 +27,8 @@ import {
 import { GenesisMeshError } from './errors.js';
 import { nonCanonicalFields, unknownFields } from './strict.js';
 import {
-  timestampOrder, validBreakGlass, validJudgement, validObservation, validQuarantine, validRegistry,
+  timestampOrder, validBreakGlass, validJudgement, validObservation, validQuarantine, validRegistry, validRemediation,
+  validReview,
 } from './validation.js';
 import { MAX_METADATA_BYTES, secretMaterial } from './execution.js';
 import type { ReconciliationFinding, ReconciliationStatus } from './governance.js';
@@ -116,7 +117,8 @@ export interface JudgementRecord {
 /** An authentic record the NA refused after its action happened, kept with the refusal. */
 export interface QuarantineRecord {
   quarantine_id: string;
-  record_kind: 'execution' | 'observation' | 'break_glass';
+  /** v1.4.0: also `remediation`, a refused remediation record. */
+  record_kind: 'execution' | 'observation' | 'break_glass' | 'remediation';
   record: Record<string, unknown>;
   record_digest: string;
   rejection_code: string;
@@ -193,6 +195,9 @@ const RECORD_KINDS: ReadonlyArray<[string, string, (v: unknown) => boolean]> = [
   ['judgement_id', 'JudgementRecord', validJudgement],
   ['quarantine_id', 'QuarantineRecord', validQuarantine],
   ['registry_record_id', 'RegistryRecord', validRegistry],
+  // v1.4.0
+  ['remediation_id', 'RemediationRecord', validRemediation],
+  ['review_id', 'ReviewRecord', validReview],
 ];
 
 /**
@@ -209,7 +214,7 @@ export function verifyOutOfBandRecord(record: OutOfBandRecord, publicKeys: reado
 }
 
 /** The wire form: the signed fields plus the signature. */
-function wire<T extends object>(record: T, signature: Signature): T {
+export function wire<T extends object>(record: T, signature: Signature): T {
   return { ...signedFields(record), signature } as T;
 }
 
@@ -222,7 +227,7 @@ const ISO_TIME = /^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2})(?::(\d{2})(?:[.,]
  * (`.573Z`), `+00:00` and a seven-digit fraction are signed in the form the
  * NA re-serialises. A string without an offset or not a time is refused.
  */
-function timeOf(value: Date | string | undefined, field: string, code: string): string | undefined {
+export function timeOf(value: Date | string | undefined, field: string, code: string): string | undefined {
   if (value === undefined) return undefined;
   const refuse = (): never => {
     throw new OutOfBandRecordError(`${field} is not an ISO 8601 time with a UTC offset: ${String(value)}`, code);

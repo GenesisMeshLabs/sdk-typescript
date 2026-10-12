@@ -19,6 +19,8 @@ from genesis_mesh.na_service.server import NetworkAuthorityService
 def main():
     root = generate_keypair()
     operator = generate_keypair()
+    # A second privileged operator key, of another holder: it decides reviews (1.4.0).
+    reviewer = generate_keypair()
     now = datetime.now(timezone.utc)
     genesis = GenesisBlock(
         network_name="sdk-e2e", network_version="v0.1", root_public_key=root.public_key_b64,
@@ -28,22 +30,36 @@ def main():
     genesis.signatures.append(sign_model(genesis, root.private_key, "root"))
     # Changes outside the controlled path, on a core that has them (1.3.0).
     options = {}
-    if "evidence_out_of_band" in inspect.signature(NetworkAuthorityService.__init__).parameters:
+    parameters = inspect.signature(NetworkAuthorityService.__init__).parameters
+    if "evidence_out_of_band" in parameters:
         options["evidence_out_of_band"] = "on"
+    # Remediation, reviews and emergency changes, on a core that has them (1.4.0;
+    # EVIDENCE_REMEDIATION=on): each operator key has a named holder of its own.
+    remediation = "evidence_remediation" in parameters
+    keys = {"ops": operator.public_key_b64}
+    tiers = {"ops": "privileged"}
+    if remediation:
+        options.update(evidence_remediation="on", operator_key_holders={"ops": "alice", "ops-2": "bob"})
+        keys["ops-2"] = reviewer.public_key_b64
+        tiers["ops-2"] = "privileged"
     with tempfile.TemporaryDirectory(prefix="gm-sdk-e2e-") as tmp:
         service = NetworkAuthorityService(
             genesis_block=genesis, na_private_key=root.private_key, key_id="na-e2e",
-            db_path=str(Path(tmp) / "na.db"), operator_public_keys={"ops": operator.public_key_b64},
-            operator_key_tiers={"ops": "privileged"}, boundary_policy_enforcement="required", evidence_store="on",
+            db_path=str(Path(tmp) / "na.db"), operator_public_keys=keys,
+            operator_key_tiers=tiers, boundary_policy_enforcement="required", evidence_store="on",
             **options,
         )
         # Do not spend a minute between pages in a local integration test.
         service.rate_limiter.allow = lambda *args, **kwargs: True
         server = make_server("127.0.0.1", 0, service.app)
         signal.signal(signal.SIGTERM, lambda *_: exit(0))
-        print(json.dumps({"baseUrl": f"http://127.0.0.1:{server.server_port}",
-                          "signingKeyBase64": operator.private_key_b64, "keyId": "ops",
-                          "naPublicKey": root.public_key_b64, "outOfBand": bool(options)}), flush=True)
+        config = {"baseUrl": f"http://127.0.0.1:{server.server_port}",
+                  "signingKeyBase64": operator.private_key_b64, "keyId": "ops",
+                  "naPublicKey": root.public_key_b64, "outOfBand": "evidence_out_of_band" in options,
+                  "remediation": remediation}
+        if remediation:
+            config["reviewer"] = {"keyId": "ops-2", "signingKeyBase64": reviewer.private_key_b64}
+        print(json.dumps(config), flush=True)
         try:
             server.serve_forever()
         finally:

@@ -70,13 +70,20 @@ export function revocationFeedCanonical(feed: SovereignRevocationFeed): string {
   return canonicalJson(without(feed, ['signatures']));
 }
 
+/**
+ * Policy sections added in 1.4.0, left out of the signed form when absent
+ * (checked against the field registry), so a policy without them keeps its
+ * 1.3 bytes and digest.
+ */
+export const POLICY_OMITTED_WHEN_ABSENT = ['remediation', 'review_required', 'emergency'] as const;
+
 export function policyCanonical(policy: BoundaryPolicy): string {
-  return canonicalJson(without(policy, ['signature']));
+  return canonicalJson(without(policy, ['signature'], POLICY_OMITTED_WHEN_ABSENT));
 }
 
 /** `BoundaryPolicy.digest()`. */
 export function policyDigest(policy: BoundaryPolicy): string {
-  return canonicalDigest(without(policy, ['signature']));
+  return canonicalDigest(without(policy, ['signature'], POLICY_OMITTED_WHEN_ABSENT));
 }
 
 /** Digest of the ordered applied-policy list carried in a PolicyBinding. */

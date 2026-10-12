@@ -19,6 +19,7 @@ import {
   recordOutboxEntry,
   type Delivery,
   type EvidenceOutbox,
+  type OutboxRecord,
   type FlushOptions,
   type FlushResult,
   type OutboxEntry,
@@ -26,6 +27,11 @@ import {
   type RecordOutboxEntry,
   type SubmissionFailure,
 } from './outbox.js';
+import type {
+  RemediationQueueFilter, RemediationRecord, RemediationState, RemediationStatus, RemediationSubjectKind, ReviewRecord,
+  ReviewSummary,
+  ReviewVerdict, StoredRecord,
+} from './remediation.js';
 import { timestampOrder } from './validation.js';
 import { parseExportLines } from './verify.js';
 import type {
@@ -85,7 +91,7 @@ export interface RegisterExecutorKeyParams {
 
 // ── Changes outside the controlled path (v1.3.0) ─────────────────────────────
 
-/** The NA's answer to an observation or break-glass record. */
+/** The NA's answer to an observation, break-glass record or (v1.4.0) remediation record. */
 export interface RecordSubmission {
   /** `quarantined`: authentic but outside its time bounds; kept, not judged. */
   status: 'recorded' | 'duplicate' | 'quarantined';
@@ -94,6 +100,8 @@ export interface RecordSubmission {
   payload: Record<string, unknown>;
   /** The judgement made at admission (`NA_JUDGE_ON_ADMISSION`); null when judging failed and waits for the judge route. */
   judgement?: JudgementSubmission | null;
+  /** v1.4.0, for a remediation record just recorded: the subject's remediation state, now `remediated`. */
+  remediation?: RemediationStatus;
 }
 
 /** One observation's result in a batch, at its index in the request. */
@@ -114,6 +122,13 @@ export interface JudgementSubmission {
   entry: EvidenceStoreEntry;
   entry_digest: string;
   payload: JudgementRecord;
+  /**
+   * v1.4.0, with the NA's remediation records on: the remediation state the
+   * judgement armed (`remediation_due`) or the review it opened
+   * (`review_pending: true`); absent when it led to neither, or when the
+   * change is already under review as a decision or a break-glass record.
+   */
+  remediation?: RemediationStatus;
 }
 
 /** How a change to a resource stands: see *Changes Outside the Controlled Path* in the NA runbooks. */
@@ -124,7 +139,9 @@ export type ChangeState =
   | 'judged_denied'
   | 'indeterminate'
   | 'observed'
-  | 'quarantined';
+  | 'quarantined'
+  // v1.4.0: the remediation state of a change a remediation or review concerns.
+  | RemediationState;
 
 /** One change to a resource, oldest first. */
 export interface ResourceChange {
@@ -146,13 +163,25 @@ export interface ResourceChange {
   justification?: string;
   record_kind?: string;
   rejection_code?: string;
+  /** v1.4.0: the remediation state, for a change a remediation or review concerns (its `state` too). */
+  remediation?: RemediationStatus;
 }
 
 export interface ResourceChanges {
   resource_id: string;
-  /** True when the resource has more changes than one response holds. */
+  /** True when the resource has more changes than this page holds. */
   truncated: boolean;
   changes: ResourceChange[];
+  /** v1.4.0: the next page's `after_sequence`; null on the last page (absent from an older NA). */
+  next_after_sequence?: number | null;
+}
+
+/** v1.4.0: one page of a resource's changes. */
+export interface ResourceChangesParams {
+  /** 1..10000, default 1000. */
+  limit?: number;
+  /** The previous page's `next_after_sequence`. */
+  after_sequence?: number;
 }
 
 /** An operator key's holder, as the store records it. */
@@ -190,6 +219,73 @@ export interface RecordFlushResult {
   quarantined: RecordOutboxEntry[];
   pending: RecordOutboxEntry[];
   dead_lettered: RecordOutboxEntry[];
+}
+
+// ── Remediation, reviews and notification (v1.4.0) ──────────────────────────
+
+/** One page of the due queue. */
+export interface RemediationQueue {
+  /** The filter asked for; null for the default (due, overdue and waived changes, and those with a pending review). */
+  state: RemediationQueueFilter | null;
+  count: number;
+  /** Oldest first. */
+  remediations: RemediationStatus[];
+  /** The next page's `after`; null on the last page. */
+  next_after: string | null;
+}
+
+export interface RemediationQueueParams {
+  /**
+   * A stored state (`STORED_STATES`), or `review_pending` for every change
+   * with a pending review whatever its state. Default: the due, overdue and
+   * waived changes, and those with a pending review.
+   */
+  state?: RemediationQueueFilter;
+  /** 1..500, default 100. */
+  limit?: number;
+  /** The previous page's `next_after`. */
+  after?: string;
+}
+
+/** One subject's remediation state, with its newest 100 reviews and its newest 100 stored remediation and review entries. */
+export interface RemediationDetail extends RemediationStatus {
+  reviews: ReviewSummary[];
+  /** True when the subject has more reviews than `reviews` holds. */
+  reviews_truncated: boolean;
+  records: StoredRecord[];
+  /** True when the subject has more stored records than `records` holds. */
+  records_truncated: boolean;
+}
+
+export interface ReviewRequest {
+  subject_kind: RemediationSubjectKind;
+  /** The judgement's (or decision's) ID. */
+  subject_id: string;
+  /** Why the change should be reviewed: 1 to 1024 characters, embedded in the review as signed. */
+  justification: string;
+}
+
+/** A requested review: its ID and the subject's state (`review_pending: true`). */
+export interface ReviewRequested extends RemediationStatus {
+  review_id: string;
+}
+
+/** A review, pending or decided; `record` once decided (the stored `ReviewRecord` entry). */
+export interface ReviewDetail extends ReviewSummary {
+  record?: StoredRecord<ReviewRecord>;
+}
+
+export interface ReviewDecision {
+  verdict: ReviewVerdict;
+  /** For `waive_until` only: when the waiver ends (after now; within the NA's longest waiver). */
+  waive_until?: Date | string;
+  /** 1 to 1024 characters. */
+  note?: string;
+}
+
+/** A decided review: the stored `ReviewRecord` entry (in place of a pending review) and the subject's state. */
+export interface ReviewDecided extends Omit<RemediationStatus, 'review'> {
+  review: StoredRecord<ReviewRecord>;
 }
 
 /** Most observations one batch request carries. */
@@ -544,12 +640,95 @@ export class EvidenceStoreClient {
   }
 
   /**
-   * Keep a signed observation or break-glass record in the record outbox and
-   * submit it. A failed submission does not throw: a transient error leaves
-   * it pending for `flushRecords`, and a refusal no retry can overcome keeps
-   * it as a dead letter. Throws only when the record outbox cannot store it.
+   * Submit one signed remediation record (v1.4.0). Authenticated by the
+   * executor key's signature: `201` `recorded` with the subject's state, or
+   * `200` `duplicate` for the same record again. A refusal no retry can
+   * overcome is in `RECORD_PERMANENT_REFUSALS`; the NA keeps an authentic
+   * record refused for good as a quarantine entry (`details.quarantine_id`).
    */
-  async enqueueRecord(record: ObservationRecord | BreakGlassRecord): Promise<RecordDelivery> {
+  submitRemediation(record: RemediationRecord): Promise<RecordSubmission> {
+    return this.http.publicPost<RecordSubmission>('/evidence/remediations', { record }, true);
+  }
+
+  /**
+   * One page of the due queue (admin, read tier; v1.4.0): the remediation
+   * states in `state` (default: the open ones), oldest first. Follow
+   * `next_after`, or use `allRemediations`.
+   */
+  listRemediations(params: RemediationQueueParams = {}): Promise<RemediationQueue> {
+    return this.http.adminGet<RemediationQueue>('/admin/evidence/remediations', { ...params });
+  }
+
+  /** Every remediation state in `state` (default: the open ones), following pages (admin, read tier; v1.4.0). */
+  async *allRemediations(params: Omit<RemediationQueueParams, 'after'> = {}): AsyncGenerator<RemediationStatus> {
+    let after: string | undefined;
+    for (;;) {
+      const page: RemediationQueue = await this.listRemediations({ ...params, ...(after !== undefined ? { after } : {}) });
+      yield* page.remediations;
+      if (page.next_after === null || page.next_after === undefined) return;
+      if (page.next_after === after) throw new Error('remediation queue cursor did not advance');
+      after = page.next_after;
+    }
+  }
+
+  /** One judgement's or decision's remediation state, its reviews and its stored records (admin, read tier; v1.4.0). */
+  remediation(subjectId: string): Promise<RemediationDetail> {
+    return this.http.adminGet<RemediationDetail>(`/admin/evidence/remediations/${encodeURIComponent(subjectId)}`);
+  }
+
+  /**
+   * Record that the controller told the actor (admin; v1.4.0): an audit event
+   * and, on the first notice, `notified_at`. Send the notice before
+   * `remediation_due_at`. `channel`: 1 to 64 characters, such as `email`.
+   */
+  markNotified(subjectId: string, channel?: string): Promise<RemediationStatus> {
+    return this.http.adminPost<RemediationStatus>(
+      `/admin/evidence/remediations/${encodeURIComponent(subjectId)}/notified`,
+      channel === undefined ? {} : { channel },
+    );
+  }
+
+  /**
+   * Ask a second holder to review a judged change or a decision (admin,
+   * standard tier; v1.4.0). The NA keeps this signed request and embeds it in
+   * the review, so the subject and justification verify offline. The
+   * operator key needs a named holder in the store (`review_needs_named_holder`).
+   */
+  requestReview(request: ReviewRequest): Promise<ReviewRequested> {
+    const body = { subject_kind: request.subject_kind, subject_id: request.subject_id, justification: request.justification };
+    return this.http.adminPost<ReviewRequested>('/admin/evidence/reviews', body);
+  }
+
+  /** A review: pending, or decided with its stored record (admin, read tier; v1.4.0). */
+  review(reviewId: string): Promise<ReviewDetail> {
+    return this.http.adminGet<ReviewDetail>(`/admin/evidence/reviews/${encodeURIComponent(reviewId)}`);
+  }
+
+  /**
+   * Decide a review (admin, privileged tier; v1.4.0): `uphold`, `deny` or
+   * `waive_until` a time. Use a client whose operator key is privileged and
+   * of another holder than the requester's and the observed actor's. The
+   * request is signed as sent, without a query, and the NA embeds it in the
+   * `ReviewRecord` it signs, so the approval verifies offline
+   * (`reviewApprovalProblem`).
+   */
+  decideReview(reviewId: string, decision: ReviewDecision): Promise<ReviewDecided> {
+    const body: Record<string, unknown> = { verdict: decision.verdict };
+    if (decision.waive_until !== undefined) {
+      body['waive_until'] = decision.waive_until instanceof Date ? decision.waive_until.toISOString() : decision.waive_until;
+    }
+    if (decision.note !== undefined) body['note'] = decision.note;
+    return this.http.adminPost<ReviewDecided>(`/admin/evidence/reviews/${encodeURIComponent(reviewId)}/decide`, body);
+  }
+
+  /**
+   * Keep a signed observation, break-glass record or (v1.4.0) remediation
+   * record in the record outbox and submit it. A failed submission does not
+   * throw: a transient error leaves it pending for `flushRecords`, and a
+   * refusal no retry can overcome keeps it as a dead letter. Throws only when
+   * the record outbox cannot store it.
+   */
+  async enqueueRecord(record: OutboxRecord): Promise<RecordDelivery> {
     const outbox = this.requireRecordOutbox();
     const fresh = recordOutboxEntry(record);
     let entry = (await outbox.list()).find(e => e.id === fresh.id);
@@ -566,8 +745,8 @@ export class EvidenceStoreClient {
 
   /**
    * Submit the record outbox's pending records: break-glass records first
-   * (1.3.1), then observations up to 100 at a time, each in the order they
-   * were added. A batch the NA refuses as a whole is split until the record
+   * (1.3.1), then observations up to 100 at a time, then (v1.4.0) remediation
+   * records, each in the order they were added. A batch the NA refuses as a whole is split until the record
    * it refuses is found; a batch it throttles (`429`) halves the batches that
    * follow, and the records wait as long as its `Retry-After` asks. Records
    * in backoff are skipped unless `ignoreBackoff`; a transient error ends the
@@ -593,9 +772,38 @@ export class EvidenceStoreClient {
     );
   }
 
-  /** Every change to a resource, with how it was governed and its state, oldest first (admin). */
-  resourceChanges(resourceId: string): Promise<ResourceChanges> {
-    return this.http.adminGet<ResourceChanges>(`/admin/evidence/changes/${resourcePath(resourceId)}`);
+  /**
+   * One page of a resource's changes, with how each was governed and its
+   * state, oldest first (admin). Since 1.4.0 the NA pages them (`limit`
+   * 1..10000, default 1000; `after_sequence` the previous page's
+   * `next_after_sequence`); `allResourceChanges` follows the pages.
+   */
+  resourceChanges(resourceId: string, params: ResourceChangesParams = {}): Promise<ResourceChanges> {
+    return this.http.adminGet<ResourceChanges>(`/admin/evidence/changes/${resourcePath(resourceId)}`, { ...params });
+  }
+
+  /**
+   * Every change to a resource, oldest first, following pages (admin; v1.4.0).
+   * Against an NA before 1.4.0, which does not page, it yields the one
+   * response's changes, and throws when that response was truncated.
+   */
+  async *allResourceChanges(resourceId: string, limit?: number): AsyncGenerator<ResourceChange> {
+    let after: number | undefined;
+    for (;;) {
+      const page: ResourceChanges = await this.resourceChanges(resourceId, {
+        ...(limit !== undefined ? { limit } : {}), ...(after !== undefined ? { after_sequence: after } : {}),
+      });
+      yield* page.changes;
+      const next = page.next_after_sequence;
+      if (next === null || next === undefined) {
+        if (page.truncated) throw new Error('the resource has more changes than the NA returns; upgrade the NA to page them');
+        return;
+      }
+      if (!Number.isSafeInteger(next) || (after !== undefined && next <= after)) {
+        throw new Error('resource changes cursor did not advance');
+      }
+      after = next;
+    }
   }
 
   /** Operator key holders, as the store records them (admin). */
@@ -627,7 +835,9 @@ export class EvidenceStoreClient {
     try {
       submission = entry.kind === 'observation'
         ? await this.submitObservation(entry.record as ObservationRecord)
-        : await this.submitBreakGlass(entry.record as BreakGlassRecord);
+        : entry.kind === 'remediation'
+          ? await this.submitRemediation(entry.record as RemediationRecord)
+          : await this.submitBreakGlass(entry.record as BreakGlassRecord);
     } catch (err) {
       return { queued: await this.recordFailed(outbox, entry, err) };
     }
@@ -665,8 +875,12 @@ export class EvidenceStoreClient {
     const result: RecordFlushResult = { admitted: [], quarantined: [], pending: [], dead_lettered: [] };
     const pending = (await outbox.list()).filter(e => e.state === 'pending');
     // 1.3.1: break-glass records first. They share the NA's submission rate with observations, and
-    // an observation of the same change then finds its break-glass record.
-    const entries = [...pending.filter(e => e.kind === 'break_glass'), ...pending.filter(e => e.kind !== 'break_glass')];
+    // an observation of the same change then finds its break-glass record. v1.4.0: remediation
+    // records last, once the changes they remediate are recorded and judged.
+    const entries = [
+      ...pending.filter(e => e.kind === 'break_glass'), ...pending.filter(e => e.kind === 'observation'),
+      ...pending.filter(e => e.kind !== 'break_glass' && e.kind !== 'observation'),
+    ];
     const due = (e: RecordOutboxEntry) => options.ignoreBackoff
       || (!(this.recordsPausedUntil > Date.now()) && !(Date.parse(e.next_attempt_at ?? '') > Date.now()));
     const settle = (entry: RecordOutboxEntry, delivery: RecordDelivery): boolean => {
@@ -687,7 +901,7 @@ export class EvidenceStoreClient {
         i += 1;
         continue;
       }
-      if (entry.kind === 'break_glass') {
+      if (entry.kind !== 'observation') {
         stopped = !settle(entry, await this.attemptRecord(outbox, entry));
         i += 1;
         continue;
