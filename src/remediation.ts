@@ -28,6 +28,7 @@ import { GenesisMeshError } from './errors.js';
 import {
   metadataProblem, OutOfBandRecordError, outOfBandCanonical, timeOf, verifyOutOfBandRecord, wire,
 } from './out-of-band.js';
+import { nonCanonicalFields, unknownFields } from './strict.js';
 import {
   remediationStepsProblem, reviewConsistencyProblem, timestampMicros, validRemediation,
 } from './validation.js';
@@ -53,7 +54,7 @@ export type PlannedSteps = 'rotate_forward_then_disable' | 'disable' | 'none';
 export type RemediationOutcome = 'cancelled' | 'alerted';
 export type RemediationMode = 'cancel' | 'alert_only';
 /** Why a `cancel` fell back to `alert_only`. */
-export type RemediationFallback = 'not_versioned' | 'not_rotatable' | 'not_reversible' | 'indeterminate';
+export type RemediationFallback = 'not_versioned' | 'not_rotatable' | 'not_reversible' | 'indeterminate' | 'not_executed';
 /** Where a plan's guidance came from: a failing gate, a policy's `"*"`, or the NA's defaults. */
 export type GuidanceSource = 'gate' | 'policy' | 'default';
 /** `uphold`: the change stands; `deny`: remediation becomes due; `waive_until`: it stands until a time. */
@@ -169,11 +170,16 @@ export function verifyReviewRecord(review: ReviewRecord, naPublicKeys: readonly 
 /**
  * States of a change. A change enters Stage 3 from its Stage 2 state
  * (`judged_denied`, `judged_allowed`, `indeterminate`, `matched`, or
- * `recorded` for a governed change under a policy that requires review).
+ * `recorded` for a governed change under a policy that requires review). A
+ * denied or indeterminate change is armed at once (`remediation_due`); an
+ * allowed one keeps its Stage 2 state while it is reviewed or its lifetime
+ * runs. `review_denied` is passed through at once, on the way to
+ * `remediation_due`. A pending review is not a state but a flag beside it
+ * (`review_pending`): it stops no clock.
  */
 export type RemediationState =
   | 'judged_denied' | 'judged_allowed' | 'indeterminate' | 'matched' | 'recorded'
-  | 'remediation_due' | 'overdue' | 'remediated' | 'review_pending' | 'upheld' | 'waived' | 'review_denied';
+  | 'remediation_due' | 'overdue' | 'remediated' | 'upheld' | 'waived' | 'review_denied';
 
 /** What moves a change from one state to the next. */
 export type TransitionEvent =
@@ -190,13 +196,24 @@ export type TransitionRefusal =
   | 'remediation_not_due'
   | 'illegal_transition';
 
-/** States in which something is still to happen: the due queue without `state`. */
-export const OPEN_STATES: readonly RemediationState[] = ['remediation_due', 'overdue', 'review_pending', 'waived'];
+/** An allowed change a remediation state concerns: under review, or with a lifetime running. */
+export const STANDING_STATES: readonly RemediationState[] = ['judged_allowed', 'matched', 'recorded'];
 
-/** The states a remediation state holds (the due queue's `state` values). */
-export const STAGE3_STATES: readonly RemediationState[] = [
-  'remediation_due', 'overdue', 'remediated', 'review_pending', 'upheld', 'waived', 'review_denied',
+/**
+ * States in which something is still to happen. The due queue without
+ * `state` lists these, and every change with a pending review but a
+ * remediated one.
+ */
+export const OPEN_STATES: readonly RemediationState[] = ['remediation_due', 'overdue', 'waived'];
+
+/** The states a remediation state holds. */
+export const STORED_STATES: readonly RemediationState[] = [
+  ...STANDING_STATES, 'remediation_due', 'overdue', 'remediated', 'upheld', 'waived',
 ];
+
+/** The due queue's `state` filter: a stored state, or `review_pending` (the flag, whatever the state). */
+export type RemediationQueueFilter = RemediationState | 'review_pending';
+export const QUEUE_FILTERS: readonly RemediationQueueFilter[] = [...STORED_STATES, 'review_pending'];
 
 /** A review as the NA summarises it (in the state while pending, and from `GET /admin/evidence/reviews/<id>`). */
 export interface ReviewSummary {
@@ -222,12 +239,21 @@ export interface RemediationStatus {
   change_kind: ChangeKind | null;
   /** Null for a decision before its execution evidence is known. */
   change_id: string | null;
+  /** The version the change made, as recorded when the state was armed. */
+  change_version_id: string | null;
   resource_id: string | null;
   capability: string | null;
-  /** As the source reported it; not proof of who acted. */
+  /**
+   * The change's actor: the observed actor as the source reported it (not
+   * proof of who acted), or, for a decision, the operator key that asked for it.
+   */
   actor: string | null;
+  /** The actor's holder: mapped when a review is decided, or the requesting key's holder for a decision. */
+  actor_holder: string | null;
   verdict: string | null;
   state: RemediationState;
+  /** True while a review is pending: a flag beside the state, which stops no clock. */
+  review_pending: boolean;
   mode: RemediationMode;
   steps: PlannedSteps;
   fallback: RemediationFallback | null;
@@ -246,7 +272,7 @@ export interface RemediationStatus {
   overdue_since: string | null;
   created_at: string;
   updated_at: string;
-  /** Only while a review is pending. */
+  /** With `review_pending`: the pending review's summary. */
   review?: ReviewSummary;
 }
 
@@ -259,34 +285,30 @@ export interface StoredRecord<P = Record<string, unknown>> {
 
 // ── The state table ─────────────────────────────────────────────────────────
 
+/** States a review may be opened, upheld or waived in. */
+const REVIEWABLE: readonly RemediationState[] = [...STANDING_STATES, 'remediation_due', 'overdue', 'upheld', 'waived'];
+
 const TRANSITIONS: ReadonlyMap<string, RemediationState> = new Map(([
   ['judged_denied', 'arm', 'remediation_due'],
   ['indeterminate', 'arm', 'remediation_due'],
   ['review_denied', 'arm', 'remediation_due'],
-  ['judged_denied', 'open_review', 'review_pending'],
-  ['indeterminate', 'open_review', 'review_pending'],
-  ['judged_allowed', 'open_review', 'review_pending'],
-  ['matched', 'open_review', 'review_pending'],
-  ['recorded', 'open_review', 'review_pending'],
-  ['remediation_due', 'open_review', 'review_pending'],
-  ['overdue', 'open_review', 'review_pending'],
-  ['upheld', 'open_review', 'review_pending'],
-  ['waived', 'open_review', 'review_pending'],
   ['remediation_due', 'due_passed', 'overdue'],
   ['remediation_due', 'record_remediation', 'remediated'],
   ['overdue', 'record_remediation', 'remediated'],
-  ['review_pending', 'record_remediation', 'remediated'],
-  ['waived', 'record_remediation', 'remediated'],
-  ['review_denied', 'record_remediation', 'remediated'],
-  ['review_pending', 'uphold', 'upheld'],
-  ['review_pending', 'deny', 'review_denied'],
-  ['review_pending', 'waive', 'waived'],
+  ['waived', 'waiver_expired', 'remediation_due'],
+  ...[...STANDING_STATES, 'upheld'].map(s => [s, 'lifetime_ended', 'remediation_due']),
+  // Opening a review sets the flag; the state stays.
+  ...REVIEWABLE.map(s => [s, 'open_review', s]),
+  ...REVIEWABLE.map(s => [s, 'uphold', 'upheld']),
+  ...REVIEWABLE.map(s => [s, 'waive', 'waived']),
+  ...[...STANDING_STATES, 'upheld', 'waived'].map(s => [s, 'deny', 'review_denied']),
+  // A denial of a change already due changes nothing but, perhaps, its due time.
+  ['remediation_due', 'deny', 'remediation_due'],
+  ['overdue', 'deny', 'overdue'],
   // A review pending when the remediation was recorded is still decided; it changes nothing.
   ['remediated', 'uphold', 'remediated'],
   ['remediated', 'deny', 'remediated'],
-  ['waived', 'waiver_expired', 'remediation_due'],
-  ['upheld', 'lifetime_ended', 'remediation_due'],
-] as const).map(([state, event, next]) => [`${state}\u0000${event}`, next]));
+] as [string, string, RemediationState][]).map(([state, event, next]) => [`${state}\u0000${event}`, next]));
 
 /** A transition the state table does not allow; `code` is a `TransitionRefusal`. */
 export class TransitionRefusedError extends GenesisMeshError {
@@ -302,14 +324,26 @@ function refusal(state: string, event: string): TransitionRefusal {
     if (event === 'open_review') return 'review_after_remediation';
     if (event === 'record_remediation') return 'remediation_already_recorded';
   }
-  if (event === 'uphold' || event === 'deny' || event === 'waive') return 'review_not_pending';
-  if (event === 'open_review' && state === 'review_pending') return 'review_already_pending';
   if (event === 'record_remediation') return 'remediation_not_due';
   return 'illegal_transition';
 }
 
-/** The state after `event`, as the NA's state table has it; throws `TransitionRefusedError` (with the NA's code) otherwise. */
-export function nextState(state: string, event: string): RemediationState {
+/**
+ * The state after `event`, given whether a review is pending, as the NA's
+ * state table has it; throws `TransitionRefusedError` (with the NA's code)
+ * otherwise. A review is decided only while one is pending
+ * (`review_not_pending`), and only one is pending at a time
+ * (`review_already_pending`). Every other event applies whether a review is
+ * pending or not: a pending review never stops a clock. A remediation is
+ * recorded only from `remediation_due` or `overdue`.
+ */
+export function nextState(state: string, event: string, reviewPending = false): RemediationState {
+  if ((event === 'uphold' || event === 'deny' || event === 'waive') && !reviewPending) {
+    throw new TransitionRefusedError('review_not_pending', `${event}: no review of this change is pending`);
+  }
+  if (event === 'open_review' && reviewPending && state !== 'remediated') {
+    throw new TransitionRefusedError('review_already_pending', 'a review of this change is already pending');
+  }
   const next = TRANSITIONS.get(`${state}\u0000${event}`);
   if (next !== undefined) return next;
   throw new TransitionRefusedError(refusal(state, event), `${event} is not allowed in state ${state}`);
@@ -439,6 +473,28 @@ export function remediationPlan(input: RemediationPlanInput): RemediationPlan {
 }
 
 /**
+ * A decision's plan, once a review denies it or its lifetime ends: from its
+ * latest execution evidence (`changeFacts`), as for a denied change; for a
+ * decision never executed (`executed` null), an alert (`fallback`
+ * `not_executed`) with the guidance's grace. Its remediation record then
+ * names the decision itself as its change (`remediationSubject`).
+ */
+export function decisionPlan(
+  policies: readonly GuidedPolicy[],
+  executed: { action: string; version_id: string | null; rotatable: boolean } | null,
+  defaults: RemediationDefaults = DEFAULT_REMEDIATION,
+): RemediationPlan {
+  if (executed === null) {
+    const { grace_seconds, source } = remediationGuidance(policies, [], defaults);
+    return { mode: 'alert_only', steps: 'none', fallback: 'not_executed', grace_seconds, source };
+  }
+  return remediationPlan({
+    verdict: 'deny', policies, evaluations: [], action: executed.action, version_id: executed.version_id,
+    rotatable: executed.rotatable, defaults,
+  });
+}
+
+/**
  * The action, version and rotatability of the record of a change: an
  * observation's `action`, `version_id` and `metadata.rotatable`; otherwise
  * (execution evidence, a break-glass record) `resource_action`,
@@ -561,6 +617,74 @@ export function checkRemediation(
   return { code: null, detail: 'accepted' };
 }
 
+/**
+ * Why a remediation record as received is not in its exact form, or null:
+ * not an object, not a `RemediationRecord` (a field missing, of another type
+ * or not its own, steps that do not fit), or not in the serialized form it is
+ * signed in (an absent field sent as `null`, a time not in UTC `Z` form, a
+ * signature with other fields).
+ */
+export function remediationFormProblem(raw: unknown): string | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return 'record is not an object';
+  const record = raw as Record<string, unknown>;
+  if (!validRemediation(record) || unknownFields('RemediationRecord', record).length > 0) {
+    return remediationStepsProblem(record) ?? 'record does not match the RemediationRecord model';
+  }
+  const signature = record['signature'];
+  if (Object.values(record).some(v => v === null) || nonCanonicalFields('RemediationRecord', record).length > 0
+    || (signature !== undefined && Object.keys(signature as object).some(k => k !== 'key_id' && k !== 'sig'))) {
+    return 'record is not in its exact serialized form';
+  }
+  return null;
+}
+
+/**
+ * A remediation record as received, checked in the NA's order: first its
+ * exact form (`remediation_malformed`), then `checkRemediation` (signature,
+ * key, scope and secret material).
+ */
+export function remediationRecordProblem(
+  raw: unknown, key: RemediationKey | null | undefined,
+): { code: string | null; detail: string } {
+  const form = remediationFormProblem(raw);
+  if (form !== null) return { code: 'remediation_malformed', detail: form };
+  return checkRemediation(raw as RemediationRecord, key);
+}
+
+/**
+ * `(code, detail)` when a forward rotation cannot be the one that replaces a
+ * change, or null: it is execution evidence of the remediation's own executor
+ * sovereign (`remediation_rotation_other_executor`), stored after the record
+ * of the change and executed no earlier than the change, when they are known
+ * (`remediation_rotation_before_change`: an older version is a roll back),
+ * and cited by no other remediation (`remediation_rotation_reused`). Times
+ * are microseconds since the epoch.
+ */
+export function rotationProblem(rotation: {
+  rotation_executor: string;
+  rotation_sequence: number;
+  rotation_executed_at: number;
+  record_executor: string;
+  change_sequence: number | null;
+  changed_at: number | null;
+  already_cited: boolean;
+}): { code: string; detail: string } | null {
+  if (rotation.rotation_executor !== rotation.record_executor) {
+    return {
+      code: 'remediation_rotation_other_executor',
+      detail: `the rotation was executed by ${rotation.rotation_executor}, not by ${rotation.record_executor}`,
+    };
+  }
+  if ((rotation.change_sequence !== null && rotation.rotation_sequence <= rotation.change_sequence)
+    || (rotation.changed_at !== null && rotation.rotation_executed_at < rotation.changed_at)) {
+    return { code: 'remediation_rotation_before_change', detail: 'the rotation was made before the change it replaces' };
+  }
+  if (rotation.already_cited) {
+    return { code: 'remediation_rotation_reused', detail: 'another remediation already cites this rotation' };
+  }
+  return null;
+}
+
 /** The subject, change and resource a remediation names: from the remediation state in the due queue. */
 export interface RemediationSubject {
   subject_kind: RemediationSubjectKind;
@@ -637,9 +761,25 @@ export async function signRemediation(
   return wire(record, await signCanonical(remediationCanonical(record), signer));
 }
 
-/** The subject, change and resource of a remediation state, for a remediation record; throws when the state names no change yet. */
-export function remediationSubject(state: Pick<RemediationStatus,
-  'subject_kind' | 'subject_id' | 'change_kind' | 'change_id' | 'resource_id'>): RemediationSubject {
+/**
+ * The subject, change and resource of a remediation state, for a remediation
+ * record. A decision never executed (`fallback` `not_executed`) names itself
+ * as its change (`change_kind` `execution`, `change_id` its ID); give its
+ * resource as `resourceId` when the state has none. Throws when the state
+ * names no change yet.
+ */
+export function remediationSubject(
+  state: Pick<RemediationStatus, 'subject_kind' | 'subject_id' | 'change_kind' | 'change_id' | 'resource_id'>
+    & Partial<Pick<RemediationStatus, 'fallback'>>,
+  resourceId?: string,
+): RemediationSubject {
+  const resource = state.resource_id ?? resourceId;
+  if (state.subject_kind === 'decision' && state.fallback === 'not_executed' && resource) {
+    return {
+      subject_kind: 'decision', subject_id: state.subject_id, change_kind: 'execution', change_id: state.subject_id,
+      resource_id: resource,
+    };
+  }
   if (!state.change_kind || !state.change_id || !state.resource_id) {
     throw new OutOfBandRecordError(`the remediation of ${state.subject_id} names no change yet (its execution `
       + 'evidence is not stored)', 'remediation_subject_not_found');
@@ -712,17 +852,20 @@ export function adminApprovalValid(approval: AdminApproval): boolean {
   }
 }
 
-const ISO_INSTANT = /^(\d{4})-(\d{2})-(\d{2})(?:[Tt ](\d{2})(?::(\d{2})(?::(\d{2})(?:[.,](\d+))?)?)?)?(?:([Zz])|([+-])(\d{2})(?::?(\d{2}))?)?$/;
-
 /**
- * Microseconds since the epoch of an ISO 8601 time in its extended form, as
- * the reference reads an operator's timestamp or waiver end (a time without
- * an offset is UTC); NaN for anything else.
+ * The one timestamp grammar of `waive_until` and the admin timestamps a review
+ * embeds: RFC 3339 with an upper-case `T`, seconds, an optional fraction of 1
+ * to 6 digits and `Z` or `+HH:MM`/`-HH:MM`. Not ISO 8601's basic format, week
+ * or ordinal dates, `24:00`, a leap second, an offset with seconds, or a time
+ * without an offset.
  */
+const RFC3339 = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,6}))?(?:Z|([+-])([0-9]{2}):([0-9]{2}))$/;
+
+/** Microseconds since the epoch of an RFC 3339 timestamp in the grammar above; NaN for anything else. */
 function instant(value: unknown): number {
-  const m = typeof value === 'string' ? ISO_INSTANT.exec(value) : null;
+  const m = typeof value === 'string' ? RFC3339.exec(value) : null;
   if (!m) return NaN;
-  const [, y, mo, d, h = '0', mi = '0', s = '0', fraction = '', , sign, oh = '0', om = '0'] = m;
+  const [, y, mo, d, h, mi, s, fraction = '', sign, oh = '0', om = '0'] = m;
   const [year, month, date, hour, minute, second, offsetHour, offsetMinute] = [y, mo, d, h, mi, s, oh, om].map(Number);
   const day = new Date(0);
   day.setUTCFullYear(year!, month! - 1, date);
@@ -732,7 +875,17 @@ function instant(value: unknown): number {
   }
   const offset = sign ? (sign === '-' ? -1 : 1) * (offsetHour! * 60 + offsetMinute!) : 0;
   const ms = day.getTime() + ((hour! * 60 + minute! - offset) * 60 + second!) * 1000;
-  return ms * 1000 + Number(fraction.slice(0, 6).padEnd(6, '0'));
+  return ms * 1000 + Number(fraction.padEnd(6, '0'));
+}
+
+/**
+ * `value` in UTC as the reference prints it (`2026-10-12T09:00:00.500000Z`)
+ * when it is an RFC 3339 timestamp in the grammar `waive_until` and the
+ * admin timestamps a review embeds must follow; null otherwise.
+ */
+export function rfc3339(value: unknown): string | null {
+  const at = instant(value);
+  return Number.isNaN(at) ? null : isoMicros(at);
 }
 
 function approvalProblem(
@@ -776,20 +929,63 @@ export function reviewApprovalProblem(review: ReviewRecord, naPublicKeys: readon
   const recorded = review.waive_until ?? null;
   if ((waiver === null) !== (recorded === null)
     || (waiver !== null && recorded !== null && instant(waiver) !== timestampMicros(recorded))) {
-    return "the decider's request gives another waiver time";
+    return "the decider's request gives another waiver time (an RFC 3339 timestamp)";
   }
   const request = review.request_approval;
   if (request !== undefined && request !== null) {
-    const requested = approvalProblem(request, 'requester', review.requested_by ?? '', REVIEW_REQUEST_PATH, naPublicKeys,
-      review.requested_at);
-    if (requested) return requested;
-    const expected: Record<string, unknown> = {
-      subject_kind: review.subject_kind, subject_id: review.subject_id, justification: review.justification,
+    return requestApprovalProblem(request, {
+      requested_by: review.requested_by ?? '', subject_kind: review.subject_kind, subject_id: review.subject_id,
+      justification: review.justification ?? '', requested_at: review.requested_at,
+    }, naPublicKeys);
+  }
+  return null;
+}
+
+/**
+ * Why a requester's embedded request does not prove a review request, or
+ * null: signed by `requested_by` as `POST /admin/evidence/reviews` for this
+ * NA, without a query, with exactly the subject and justification, within
+ * 300 seconds of `requested_at`.
+ */
+export function requestApprovalProblem(
+  approval: AdminApproval,
+  request: {
+    requested_by: string; subject_kind: string; subject_id: string; justification: string; requested_at: string;
+  },
+  naPublicKeys: readonly string[],
+): string | null {
+  const problem = approvalProblem(approval, 'requester', request.requested_by, REVIEW_REQUEST_PATH, naPublicKeys,
+    request.requested_at);
+  if (problem) return problem;
+  const expected: Record<string, unknown> = {
+    subject_kind: request.subject_kind, subject_id: request.subject_id, justification: request.justification,
+  };
+  const keys = Object.keys(approval.body);
+  if (keys.length !== 3 || keys.some(k => !Object.hasOwn(expected, k) || approval.body[k] !== expected[k])) {
+    return "the requester's request names another subject or justification";
+  }
+  return null;
+}
+
+/**
+ * `(code, detail)` when the requester is the change's actor (its key, or its
+ * holder), or null: the person who made a change does not ask for its review
+ * (`review_requested_by_actor`). An actor that maps to no holder cannot be
+ * excluded by holder.
+ */
+export function reviewRequestProblem(request: {
+  requested_by: string;
+  requester_holder: string;
+  actor?: string | null;
+  actor_holder?: string | null;
+}): { code: 'review_requested_by_actor'; detail: string } | null {
+  const actor = request.actor ?? null;
+  if (actor !== null && (request.requester_holder === (request.actor_holder ?? null)
+    || actor === request.requested_by || actor === request.requester_holder)) {
+    return {
+      code: 'review_requested_by_actor',
+      detail: `holder ${request.requester_holder} is the change's actor (${actor}); another holder requests its review`,
     };
-    const keys = Object.keys(request.body);
-    if (keys.length !== 3 || keys.some(k => !Object.hasOwn(expected, k) || request.body[k] !== expected[k])) {
-      return "the requester's request names another subject or justification";
-    }
   }
   return null;
 }
@@ -852,4 +1048,35 @@ export function policySectionIssues(policy: BoundaryPolicy | BoundaryPolicyInten
     });
   }
   return issues;
+}
+
+/** Whether a policy's selector names `capability`, exactly or by a `prefix.*` pattern. */
+function selects(policy: Pick<BoundaryPolicy, 'selector'>, capability: string): boolean {
+  return (policy.selector?.capabilities ?? []).some(pattern => pattern === capability
+    || (pattern.endsWith('.*') && capability.startsWith(pattern.slice(0, -1))));
+}
+
+/**
+ * Emergency capability to the ordinary capability it stands for, from the
+ * policies given (those active at `at`) whose validity covers `at`. A
+ * capability a policy without an emergency section also names is no
+ * emergency capability. The NA matches an observer's report of the ordinary
+ * capability to a change made under the emergency one with this map.
+ */
+export function emergencyMap(
+  policies: readonly Pick<BoundaryPolicy, 'selector' | 'emergency' | 'valid_from' | 'valid_until'>[],
+  at: string,
+): Record<string, string> {
+  const when = timestampMicros(at);
+  const out: Record<string, string> = {};
+  for (const policy of policies) {
+    const emergency = policy.emergency;
+    const capabilities = policy.selector?.capabilities ?? [];
+    if (!emergency || capabilities.length !== 1
+      || !(timestampMicros(policy.valid_from) <= when && when <= timestampMicros(policy.valid_until))) continue;
+    const capability = capabilities[0]!;
+    if (policies.some(other => !other.emergency && selects(other, capability))) continue;
+    out[capability] = emergency.stands_for;
+  }
+  return out;
 }

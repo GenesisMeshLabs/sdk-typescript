@@ -255,12 +255,14 @@ suite('SDK against a live Python Network Authority', () => {
 
     const changes = await gm.evidenceStore.resourceChanges(resource);
     // 1.4.0: with the remediation records on, the denied change shows its remediation state, and the
-    // break-glass change, flagged for review, is in the review queue.
+    // break-glass change, flagged for review, has a pending review beside its state.
     expect(changes.changes.map(c => [c.kind, c.state])).toEqual([
       ['observation', config.remediation ? 'remediation_due' : 'judged_denied'], ['observation', 'judged_allowed'],
-      ['break_glass', config.remediation ? 'review_pending' : 'judged_allowed'],
+      ['break_glass', 'judged_allowed'],
     ]);
-    if (config.remediation) expect(changes.changes[2]!.remediation?.review?.opened_for).toBe('flagged_for_review');
+    if (config.remediation) {
+      expect(changes.changes[2]!.remediation).toMatchObject({ review_pending: true, review: { opened_for: 'flagged_for_review' } });
+    }
     expect(changes.changes[2]!.justification).toBe('incident drill: NA unreachable');
     expect((await gm.evidenceStore.operatorHolders()).map(h => h.key_id)).toContain('ops');
 
@@ -362,8 +364,12 @@ suite('SDK against a live Python Network Authority', () => {
     const requested = await gm.evidenceStore.requestReview({
       subject_kind: 'judgement', subject_id: subjectId, justification: 'The change was planned with the vendor',
     });
-    expect(requested.state).toBe('review_pending');
+    // A pending review is a flag beside the state: the denied change stays due.
+    expect(requested).toMatchObject({ state: 'remediation_due', review_pending: true });
     expect(requested.review).toMatchObject({ opened_for: 'requested', requested_by: 'ops', requester_holder: 'alice' });
+    const pending: string[] = [];
+    for await (const s of gm.evidenceStore.allRemediations({ state: 'review_pending' })) pending.push(s.subject_id);
+    expect(pending).toContain(subjectId);
     // The requester cannot decide its own request.
     await expect(gm.evidenceStore.decideReview(requested.review_id, { verdict: 'uphold' }))
       .rejects.toMatchObject({ code: 'review_same_holder_as_requester' });
@@ -415,7 +421,9 @@ suite('SDK against a live Python Network Authority', () => {
       expect(x.action).toHaveBeenCalledTimes(1);
       const decision = (result.result as { evaluation: { decision: { decision_id: string } } }).evaluation.decision;
       const state = await gm.evidenceStore.remediation(decision.decision_id);
-      expect(state).toMatchObject({ subject_kind: 'decision', state: 'review_pending', review: { opened_for: 'review_required' } });
+      expect(state).toMatchObject({
+        subject_kind: 'decision', state: 'recorded', review_pending: true, review: { opened_for: 'review_required' },
+      });
       expect(state.lifetime_ends_at).not.toBeNull();
     }, 30_000);
 
@@ -440,7 +448,7 @@ suite('SDK against a live Python Network Authority', () => {
       const judgement = broke.submission!.judgement!;
       expect(judgement.payload).toMatchObject({ verdict: 'allow', capability: x.emergency });
       expect(judgement.payload.policy_binding?.policies.map(p => p.policy_id)).toContain(x.policy.policy_id);
-      expect(judgement.remediation).toMatchObject({ state: 'review_pending' });
+      expect(judgement.remediation).toMatchObject({ state: 'judged_allowed', review_pending: true });
     }, 30_000);
   });
 

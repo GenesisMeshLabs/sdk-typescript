@@ -611,11 +611,12 @@ export interface RotateForwardOptions<T = unknown> {
    * The remediation state from the due queue (`remediation_due` or
    * `overdue`): its subject, change and resource name the record. When it
    * carries `state`, `mode` and `steps`, they are checked before anything
-   * runs: the state must allow a remediation, and the plan must be
-   * `cancel` / `rotate_forward_then_disable`.
+   * runs: a remediation is recorded only from `remediation_due` or `overdue`
+   * (a pending review does not stop it), and the plan must be `cancel` /
+   * `rotate_forward_then_disable`.
    */
   remediation: Pick<RemediationStatus, 'subject_kind' | 'subject_id' | 'change_kind' | 'change_id' | 'resource_id'>
-    & Partial<Pick<RemediationStatus, 'state' | 'mode' | 'steps'>>;
+    & Partial<Pick<RemediationStatus, 'state' | 'review_pending' | 'mode' | 'steps' | 'fallback'>>;
   /** The denied version: disabled once readers have the new one. */
   deniedVersionId: string;
   /**
@@ -698,7 +699,7 @@ export async function cancelByRotatingForward<T>(
     const problem = stepsProblem(state.mode, state.steps, { outcome: 'cancelled', steps: 'rotate_forward_then_disable' });
     if (problem) throw new OutOfBandRecordError(problem, 'remediation_steps_mismatch');
   }
-  if (state.state !== undefined) nextState(state.state, 'record_remediation');
+  if (state.state !== undefined) nextState(state.state, 'record_remediation', state.review_pending ?? false);
   if (typeof options.deniedVersionId !== 'string' || !options.deniedVersionId) {
     throw new OutOfBandRecordError('the denied version is required', 'remediation_malformed');
   }

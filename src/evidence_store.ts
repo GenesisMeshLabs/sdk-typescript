@@ -28,7 +28,8 @@ import {
   type SubmissionFailure,
 } from './outbox.js';
 import type {
-  RemediationRecord, RemediationState, RemediationStatus, RemediationSubjectKind, ReviewRecord, ReviewSummary,
+  RemediationQueueFilter, RemediationRecord, RemediationState, RemediationStatus, RemediationSubjectKind, ReviewRecord,
+  ReviewSummary,
   ReviewVerdict, StoredRecord,
 } from './remediation.js';
 import { timestampOrder } from './validation.js';
@@ -124,7 +125,8 @@ export interface JudgementSubmission {
   /**
    * v1.4.0, with the NA's remediation records on: the remediation state the
    * judgement armed (`remediation_due`) or the review it opened
-   * (`review_pending`); absent when it led to neither.
+   * (`review_pending: true`); absent when it led to neither, or when the
+   * change is already under review as a decision or a break-glass record.
    */
   remediation?: RemediationStatus;
 }
@@ -167,9 +169,19 @@ export interface ResourceChange {
 
 export interface ResourceChanges {
   resource_id: string;
-  /** True when the resource has more changes than one response holds. */
+  /** True when the resource has more changes than this page holds. */
   truncated: boolean;
   changes: ResourceChange[];
+  /** v1.4.0: the next page's `after_sequence`; null on the last page (absent from an older NA). */
+  next_after_sequence?: number | null;
+}
+
+/** v1.4.0: one page of a resource's changes. */
+export interface ResourceChangesParams {
+  /** 1..10000, default 1000. */
+  limit?: number;
+  /** The previous page's `next_after_sequence`. */
+  after_sequence?: number;
 }
 
 /** An operator key's holder, as the store records it. */
@@ -213,8 +225,8 @@ export interface RecordFlushResult {
 
 /** One page of the due queue. */
 export interface RemediationQueue {
-  /** The state asked for; null for the default (`remediation_due`, `overdue`, `review_pending`, `waived`). */
-  state: RemediationState | null;
+  /** The filter asked for; null for the default (due, overdue and waived changes, and those with a pending review). */
+  state: RemediationQueueFilter | null;
   count: number;
   /** Oldest first. */
   remediations: RemediationStatus[];
@@ -223,18 +235,26 @@ export interface RemediationQueue {
 }
 
 export interface RemediationQueueParams {
-  /** One of the Stage 3 states (`STAGE3_STATES`); default: the open ones. */
-  state?: RemediationState;
+  /**
+   * A stored state (`STORED_STATES`), or `review_pending` for every change
+   * with a pending review whatever its state. Default: the due, overdue and
+   * waived changes, and those with a pending review.
+   */
+  state?: RemediationQueueFilter;
   /** 1..500, default 100. */
   limit?: number;
   /** The previous page's `next_after`. */
   after?: string;
 }
 
-/** One subject's remediation state, with every review and its stored remediation and review entries. */
+/** One subject's remediation state, with its newest 100 reviews and its newest 100 stored remediation and review entries. */
 export interface RemediationDetail extends RemediationStatus {
   reviews: ReviewSummary[];
+  /** True when the subject has more reviews than `reviews` holds. */
+  reviews_truncated: boolean;
   records: StoredRecord[];
+  /** True when the subject has more stored records than `records` holds. */
+  records_truncated: boolean;
 }
 
 export interface ReviewRequest {
@@ -245,7 +265,7 @@ export interface ReviewRequest {
   justification: string;
 }
 
-/** A requested review: its ID and the subject's state (`review_pending`). */
+/** A requested review: its ID and the subject's state (`review_pending: true`). */
 export interface ReviewRequested extends RemediationStatus {
   review_id: string;
 }
@@ -752,9 +772,38 @@ export class EvidenceStoreClient {
     );
   }
 
-  /** Every change to a resource, with how it was governed and its state, oldest first (admin). */
-  resourceChanges(resourceId: string): Promise<ResourceChanges> {
-    return this.http.adminGet<ResourceChanges>(`/admin/evidence/changes/${resourcePath(resourceId)}`);
+  /**
+   * One page of a resource's changes, with how each was governed and its
+   * state, oldest first (admin). Since 1.4.0 the NA pages them (`limit`
+   * 1..10000, default 1000; `after_sequence` the previous page's
+   * `next_after_sequence`); `allResourceChanges` follows the pages.
+   */
+  resourceChanges(resourceId: string, params: ResourceChangesParams = {}): Promise<ResourceChanges> {
+    return this.http.adminGet<ResourceChanges>(`/admin/evidence/changes/${resourcePath(resourceId)}`, { ...params });
+  }
+
+  /**
+   * Every change to a resource, oldest first, following pages (admin; v1.4.0).
+   * Against an NA before 1.4.0, which does not page, it yields the one
+   * response's changes, and throws when that response was truncated.
+   */
+  async *allResourceChanges(resourceId: string, limit?: number): AsyncGenerator<ResourceChange> {
+    let after: number | undefined;
+    for (;;) {
+      const page: ResourceChanges = await this.resourceChanges(resourceId, {
+        ...(limit !== undefined ? { limit } : {}), ...(after !== undefined ? { after_sequence: after } : {}),
+      });
+      yield* page.changes;
+      const next = page.next_after_sequence;
+      if (next === null || next === undefined) {
+        if (page.truncated) throw new Error('the resource has more changes than the NA returns; upgrade the NA to page them');
+        return;
+      }
+      if (!Number.isSafeInteger(next) || (after !== undefined && next <= after)) {
+        throw new Error('resource changes cursor did not advance');
+      }
+      after = next;
+    }
   }
 
   /** Operator key holders, as the store records them (admin). */

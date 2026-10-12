@@ -7,7 +7,8 @@ import {
   ObservationRecorder, OutOfBandRecordError, RateLimitError, RemediationNotRecordedError,
   ServiceUnavailableError, StrictJsonError, ValidationError,
   adminApprovalValid, cancelByRotatingForward, decisionCanonical, parseJson, policyDigest, pythonTimestamp,
-  recordOutboxEntry, reviewApprovalProblem, seedSigner, signBreakGlass, signCanonical, signRemediation, urgentAction,
+  recordOutboxEntry, remediationSubject, reviewApprovalProblem, seedSigner, signBreakGlass, signCanonical,
+  signRemediation, urgentAction,
   verifyBoundaryDecision, verifyRemediationRecord,
 } from '../src/index.js';
 import type {
@@ -91,6 +92,18 @@ describe('signRemediation', () => {
     expect(alerted.outcome).toBe('alerted');
   });
 
+  it('names a decision never executed as its own change', () => {
+    const state = {
+      subject_kind: 'decision' as const, subject_id: 'decision-1', change_kind: null, change_id: null,
+      resource_id: null, fallback: 'not_executed' as const,
+    };
+    expect(remediationSubject(state, 'kv:v/s')).toEqual({
+      subject_kind: 'decision', subject_id: 'decision-1', change_kind: 'execution', change_id: 'decision-1',
+      resource_id: 'kv:v/s',
+    });
+    expect(() => remediationSubject({ ...state, fallback: null })).toThrow(OutOfBandRecordError);
+  });
+
   it('refuses before signing what the NA would refuse, in its order', async () => {
     const sign = (input: Partial<RemediationInput>) =>
       signRemediation({ ...rotation, ...input, executor_sovereign_id: 'controller' }, signer);
@@ -153,6 +166,34 @@ describe('the due queue, notices and reviews', () => {
     const x = capture(page, page);
     const read = async () => { for await (const _ of x.gm.evidenceStore.allRemediations()) { /* drain */ } };
     await expect(read()).rejects.toThrow('cursor did not advance');
+  });
+
+  it('filters the queue on the pending-review flag', async () => {
+    const x = capture({ state: 'review_pending', count: 0, remediations: [], next_after: null });
+    await x.gm.evidenceStore.listRemediations({ state: 'review_pending' });
+    expect(x.call(0).url).toBe('http://na/admin/evidence/remediations?state=review_pending');
+  });
+
+  it("pages through a resource's changes", async () => {
+    const change = (n: number) => ({ store_sequence: n, kind: 'observation', state: 'remediation_due' });
+    const x = capture(
+      { resource_id: 'kv:v/s', truncated: true, changes: [change(3), change(7)], next_after_sequence: 7 },
+      { resource_id: 'kv:v/s', truncated: false, changes: [change(9)], next_after_sequence: null },
+    );
+    const all: number[] = [];
+    for await (const c of x.gm.evidenceStore.allResourceChanges('kv:v/s', 2)) all.push(c.store_sequence);
+    expect(all).toEqual([3, 7, 9]);
+    expect(x.call(0).url).toBe('http://na/admin/evidence/changes/kv%3Av/s?limit=2');
+    expect(x.call(1).url).toBe('http://na/admin/evidence/changes/kv%3Av/s?limit=2&after_sequence=7');
+  });
+
+  it('refuses a truncated history from an NA that does not page, and a cursor that does not advance', async () => {
+    const old = capture({ resource_id: 'r', truncated: true, changes: [] });
+    const drain = async (gm: GenesisMeshClient) => { for await (const _ of gm.evidenceStore.allResourceChanges('r')) { /* drain */ } };
+    await expect(drain(old.gm)).rejects.toThrow('upgrade the NA');
+    const page = { resource_id: 'r', truncated: true, changes: [], next_after_sequence: 4 };
+    const stuck = capture(page, page);
+    await expect(drain(stuck.gm)).rejects.toThrow('cursor did not advance');
   });
 
   it('gets a state and records a notice, with or without a channel', async () => {
@@ -335,6 +376,14 @@ describe('cancelByRotatingForward', () => {
     return { ...x, steps, submitRemediation, rotate, disable, options };
   }
 
+  it('goes ahead while a review is pending: a review stops no clock', async () => {
+    const x = await setup();
+    const result = await cancelByRotatingForward(x.gm, x.recorder, {
+      ...x.options, remediation: { ...due, state: 'overdue', review_pending: true },
+    });
+    expect(result.remediation).toMatchObject({ steps: 'rotate_forward_then_disable' });
+  });
+
   it('rotates forward under a decision, then disables, then records the linked remediation', async () => {
     const x = await setup();
     const result = await cancelByRotatingForward(x.gm, x.recorder, x.options);
@@ -379,6 +428,12 @@ describe('cancelByRotatingForward', () => {
     await expect(run({ ...due, mode: 'alert_only', steps: 'none' })).rejects.toMatchObject({ code: 'remediation_steps_mismatch' });
     await expect(run({ ...due, state: 'remediated' })).rejects.toMatchObject({ code: 'remediation_already_recorded' });
     await expect(run({ ...due, state: 'upheld' })).rejects.toMatchObject({ code: 'remediation_not_due' });
+    // A remediation is recorded only from remediation_due or overdue (1.4.0 review fixes).
+    await expect(run({ ...due, state: 'waived' })).rejects.toMatchObject({ code: 'remediation_not_due' });
+    await expect(run({ ...due, state: 'judged_allowed', review_pending: true }))
+      .rejects.toMatchObject({ code: 'remediation_not_due' });
+    await expect(run({ ...due, mode: 'alert_only', steps: 'none', fallback: 'not_executed' }))
+      .rejects.toMatchObject({ code: 'remediation_steps_mismatch' });
     await expect(run({ ...due, change_id: null })).rejects.toMatchObject({ code: 'remediation_subject_not_found' });
     await expect(run(due, { deniedVersionId: '-----BEGIN PRIVATE KEY-----' }))
       .rejects.toMatchObject({ code: 'remediation_secret_material' });
