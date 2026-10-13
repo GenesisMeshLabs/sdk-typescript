@@ -1146,9 +1146,12 @@ export class EvidenceStoreClient {
    * everything its records cite, the key history and the manifest the NA signs. The response
    * can be tens of megabytes (up to 50,000 entries). `auditPackFiles` turns it into the pack's
    * files; `verifyAuditPack` verifies them offline from the root key and the anchors you hold.
+   * A pack is costly: the NA allows a few per hour (`RateLimitError`, `429`, beyond
+   * `NA_RATE_LIMIT_AUDIT_PACKS_PER_HOUR`), so the request is never replayed; raise
+   * `ClientOptions.timeout` for a large range.
    */
   auditPack(params: AuditPackParams = {}): Promise<AuditPackResponse> {
-    return this.http.adminPost<AuditPackResponse>('/admin/evidence/audit-pack', { ...params }, true);
+    return this.http.adminPost<AuditPackResponse>('/admin/evidence/audit-pack', { ...params });
   }
 
   /** Archive records and how far they cover the store (admin, read tier; v1.5.0). */

@@ -25,6 +25,7 @@ import {
   type Signer,
 } from './auth.js';
 import { GenesisMeshError } from './errors.js';
+import { NA_RECORD_TIME_FIELDS, naKeysAt, type NAKeys } from './key-history.js';
 import { nonCanonicalFields, unknownFields } from './strict.js';
 import {
   timestampOrder, validBreakGlass, validJudgement, validObservation, validQuarantine, validRegistry, validRemediation,
@@ -205,11 +206,15 @@ const RECORD_KINDS: ReadonlyArray<[string, string, (v: unknown) => boolean]> = [
  * keys over the record as received, and it is in the reference's form with no
  * field this SDK does not know (as `verifyEvidenceEvents` checks it).
  */
-export function verifyOutOfBandRecord(record: OutOfBandRecord, publicKeys: readonly string[]): boolean {
+export function verifyOutOfBandRecord(record: OutOfBandRecord, publicKeys: NAKeys): boolean {
   const kind = RECORD_KINDS.find(([id]) => id in record);
   if (!kind || !kind[2](record)) return false;
   const sig = record.signature;
-  return !!sig && verifyCanonical(outOfBandCanonical(record), sig.sig, publicKeys)
+  // v1.5.0: given the NA's key history, an NA-signed record read alone is placed at its own signed time.
+  const field = Object.hasOwn(NA_RECORD_TIME_FIELDS, kind[1]) ? NA_RECORD_TIME_FIELDS[kind[1]]! : null;
+  const time = field !== null ? (record as unknown as Record<string, unknown>)[field] : null;
+  const keys = naKeysAt(publicKeys, field === null ? null : typeof time === 'string' ? time : '');
+  return !!sig && verifyCanonical(outOfBandCanonical(record), sig.sig, keys)
     && unknownFields(kind[1], record).length === 0 && nonCanonicalFields(kind[1], record).length === 0;
 }
 

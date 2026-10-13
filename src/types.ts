@@ -230,7 +230,9 @@ export type BoundaryVerificationReason =
   | 'unknown_field'
   | 'non_canonical_form'
   // v1.5.0: signed by a key of the NA's history, but not the one valid when the decision was made.
-  | 'na_key_not_valid_at_time';
+  | 'na_key_not_valid_at_time'
+  // v1.5.0: valid longer than the key that signed it may vouch for.
+  | 'decision_outlives_key';
 
 export interface BoundaryVerification {
   accepted: boolean;
@@ -1026,9 +1028,30 @@ export interface Readiness {
   database: ReadinessDatabase;
   signing_key: ReadinessSigningKey;
   rate_limiter: 'memory' | 'database' | string;
+  /**
+   * v1.5.0: this instance's NA key. `signing`; `pending`, a new key started before its succession
+   * takes effect (`signs_from`); `stopped`, succeeded or expired. Anything but `signing` is not ready.
+   */
+  na_key?: { state: 'signing' | 'pending' | 'stopped' | string; key_sequence?: number; signs_from?: string };
   /** The SQLite path, or the PostgreSQL URL without its password (ready responses only). */
   db_path?: string;
 }
+
+/**
+ * Error codes of the 1.5.0 routes (`GenesisMeshError.code`): key successions
+ * (`POST /admin/na/succession`), the NA key, audit packs (`429` beyond
+ * `NA_RATE_LIMIT_AUDIT_PACKS_PER_HOUR`), archives and retention.
+ */
+export type AuditErrorCode =
+  | 'invalid_succession' | 'succession_after_expiry' | 'succession_backdated' | 'succession_chain_break'
+  | 'succession_invalid_new_key_signature' | 'succession_invalid_root_signature' | 'succession_key_reused'
+  | 'succession_not_increasing' | 'succession_pending' | 'succession_sovereign_mismatch' | 'succession_times_invalid'
+  | 'na_key_expired' | 'na_key_not_yet_effective' | 'na_key_succeeded'
+  | 'audit_pack_not_anchored' | 'audit_pack_too_large' | 'invalid_audit_pack' | 'evidence_store_incomplete'
+  | 'rate_limit_exceeded'
+  | 'archive_anchor_mismatch' | 'archive_conflict' | 'archive_manifest_invalid' | 'archive_not_contiguous'
+  | 'archive_pack_unknown' | 'archive_pack_unverified' | 'invalid_archive'
+  | 'invalid_retention';
 
 /** Readiness of one configured endpoint, probed directly (no failover). */
 export interface EndpointReadiness {

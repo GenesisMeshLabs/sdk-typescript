@@ -5,7 +5,8 @@
  * `trust/key_succession.py`, with the same reason codes.
  *
  * A `KeySuccessionRecord` names the NA's next key, signed by the root key
- * (kept offline) and by the outgoing NA key. Every NA signature then verifies
+ * (kept offline), by the new key (proof that it is held) and by the outgoing
+ * NA key. Every NA signature then verifies
  * with the key that was valid at the record's own time, so records signed
  * before and after a succession keep verifying:
  *
@@ -20,13 +21,55 @@
  */
 
 import { createHash } from 'node:crypto';
-import { receivedCanonical, signedAsReceived, strictRefusal, unknownFields } from './strict.js';
+import { receivedCanonical, signedAsReceived, strictRefusal, withoutUnknownFields } from './strict.js';
 import type { Signature } from './types.js';
 import { isObject, timestampMicros, validGenesis, validKeySuccession } from './validation.js';
 
 /** How long after a succession takes effect the outgoing key is still accepted (seconds). */
 export const SUCCESSION_HANDOVER_SECONDS = 300;
 const HANDOVER_MICROS = SUCCESSION_HANDOVER_SECONDS * 1_000_000;
+
+/**
+ * A succession takes effect at least this long after the store records it
+ * (seconds): a `key_succession` entry recorded later than `effective_at` minus
+ * this is `succession_backdated`.
+ */
+export const SUCCESSION_MIN_LEAD_SECONDS = 60;
+
+/**
+ * The longest lifetime of a decision the NA issues (seconds). A decision
+ * signed by a key with an end is refused (`decision_outlives_key`) when it
+ * stays valid past that end, the hand-over and this lifetime.
+ */
+export const MAX_DECISION_LIFETIME_SECONDS = 300;
+
+/**
+ * How far an export entry's `recorded_at` may fall behind an earlier entry's
+ * (seconds) before it is `recorded_at_out_of_order`; entries retention carried
+ * forward are exempt.
+ */
+export const RECORD_TIME_TOLERANCE_SECONDS = 300;
+
+/**
+ * The time an NA-signed record is placed at in the key history when it is
+ * read alone, outside the store (in the store every entry is placed at its
+ * envelope's `recorded_at`).
+ */
+export const NA_RECORD_TIME_FIELDS: Readonly<Record<string, string>> = Object.freeze({
+  ArchiveRecord: 'archived_at',
+  AuditPackManifest: 'created_at',
+  BoundaryDecision: 'decision_made_at',
+  BoundaryPolicy: 'issued_at',
+  JudgementRecord: 'judged_at',
+  JustificationProof: 'proof_issued_at',
+  MembershipAttestation: 'issued_at',
+  QuarantineRecord: 'quarantined_at',
+  RecognitionTreaty: 'issued_at',
+  RegistryRecord: 'effective_at',
+  RetentionCheckpoint: 'created_at',
+  ReviewRecord: 'decided_at',
+  StoreAnchor: 'anchored_at',
+});
 
 /** The signed genesis block: the network's constitution, signed by the root key. */
 export interface GenesisBlock {
@@ -42,7 +85,11 @@ export interface GenesisBlock {
   [key: string]: unknown;
 }
 
-/** The NA's next key, signed by the root key and by the outgoing NA key (v1.5.0). */
+/**
+ * The NA's next key (v1.5.0), signed over one form by the root key
+ * (`key_id` `root`), the new key (`key_id` = `new_key_id`, its proof of
+ * possession) and the outgoing NA key, which the NA adds when it records it.
+ */
 export interface KeySuccessionRecord {
   succession_id: string;
   sovereign_id: string;
@@ -150,7 +197,11 @@ export class NAKeyHistory {
 
   /** The public keys a record dated `time` may be signed with (with the 300-second hand-over). */
   keysAt(time: string | Date): string[] {
-    const when = at(time);
+    return this.keysAtMicros(at(time));
+  }
+
+  /** `keysAt` for a time in microseconds since the epoch. */
+  keysAtMicros(when: number): string[] {
     if (Number.isNaN(when)) return [];
     return this.keys.filter((_, i) => accepts(this.windows[i]!, when)).map(k => k.public_key);
   }
@@ -177,6 +228,21 @@ export type NAKeys = readonly string[] | NAKeyHistory;
 export function naKeysAt(keys: NAKeys, time: string | Date | null): string[] {
   if (keys instanceof NAKeyHistory) return time === null ? keys.allKeys() : keys.keysAt(time);
   return [...keys];
+}
+
+/**
+ * True when a decision signed by `publicKey` stays valid past what that key
+ * may vouch for: its end (its succession, or its enforced `valid_to`), the
+ * hand-over and `MAX_DECISION_LIFETIME_SECONDS`. A list of keys has no ends.
+ */
+export function decisionOutlivesKey(keys: NAKeys, publicKey: string, validUntil: string): boolean {
+  if (!(keys instanceof NAKeyHistory)) return false;
+  const key = keys.keyFor(publicKey);
+  if (key === undefined) return false;
+  const ends = [key.succeeded_at, key.valid_to_enforced ? key.valid_to : null]
+    .filter((t): t is string => t !== null).map(at);
+  if (ends.length === 0) return false;
+  return at(validUntil) > Math.min(...ends) + HANDOVER_MICROS + MAX_DECISION_LIFETIME_SECONDS * 1_000_000;
 }
 
 /**
@@ -233,14 +299,18 @@ export interface KeyHistoryVerification {
 /**
  * Why a genesis block is refused, or null: it does not parse
  * (`genesis_invalid`), names another root key than the one held
- * (`genesis_root_mismatch`), or no signature over it as received verifies
- * with that key (`genesis_invalid_signature`).
+ * (`genesis_root_mismatch`), carries a field this SDK does not know or is not
+ * in canonical form, signed so by the root key (`unknown_field`,
+ * `non_canonical_form`), or no signature over it as received verifies with
+ * that key (`genesis_invalid_signature`).
  */
 export function genesisRefusal(raw: unknown, rootPublicKey?: string | null): string | null {
-  if (!isObject(raw) || !validGenesis(raw)) return 'genesis_invalid';
+  if (!isObject(raw) || !validGenesis(withoutUnknownFields('GenesisBlock', raw))) return 'genesis_invalid';
   const root = rootPublicKey || (raw['root_public_key'] as string);
   if (raw['root_public_key'] !== root) return 'genesis_root_mismatch';
-  return signedAsReceived('GenesisBlock', raw, [root]) ? null : 'genesis_invalid_signature';
+  const form = strictRefusal('GenesisBlock', raw, [root]);
+  if (form === 'unknown_field' || form === 'non_canonical_form') return form;
+  return form === null && signedAsReceived('GenesisBlock', raw, [root]) ? null : 'genesis_invalid_signature';
 }
 
 function genesisKey(genesis: GenesisBlock): NAKey {
@@ -261,33 +331,44 @@ export interface SuccessionContext {
   requirePreviousSignature?: boolean;
 }
 
+/** The record parsed with its unknown fields set aside, or null (`payload_invalid`). */
+function parsedSuccession(raw: unknown): KeySuccessionRecord | null {
+  if (!isObject(raw)) return null;
+  const known = withoutUnknownFields('KeySuccessionRecord', raw);
+  return validKeySuccession(known) ? known as unknown as KeySuccessionRecord : null;
+}
+
 /**
  * Why one succession record is refused, or null, in the contract's order:
- * `payload_invalid`; `invalid_signature`, `unknown_field` or
- * `non_canonical_form` (as for every record); `succession_sovereign_mismatch`;
- * `succession_chain_break` (not the next position, not the current key as the
- * previous one, or not the previous succession's digest);
- * `succession_key_reused`; `succession_not_increasing`;
- * `succession_after_expiry`; `succession_invalid_root_signature`;
+ * `payload_invalid` (its unknown fields set aside); `unknown_field` (signed so
+ * by one of its signers) or `invalid_signature`; `non_canonical_form`;
+ * `succession_sovereign_mismatch`; `succession_chain_break` (not the next
+ * position, not the current key as the previous one, or not the previous
+ * succession's digest); `succession_key_reused` (a key the history held, or
+ * the root key); `succession_backdated` (issued after it takes effect);
+ * `succession_not_increasing`; `succession_after_expiry`;
+ * `succession_invalid_root_signature`; `succession_invalid_new_key_signature`;
  * `succession_invalid_previous_signature`.
  */
 export function successionRefusal(raw: unknown, context: SuccessionContext): string | null {
   const { previous, rootPublicKey } = context;
-  if (!isObject(raw)) return 'payload_invalid';
+  const parsed = parsedSuccession(raw);
+  if (parsed === null) return 'payload_invalid';
   const signers = [rootPublicKey, previous.public_key];
-  if (unknownFields('KeySuccessionRecord', raw).length > 0) return strictRefusal('KeySuccessionRecord', raw, signers);
-  if (!validKeySuccession(raw)) return 'payload_invalid';
+  if (validPublicKey(parsed.new_public_key)) signers.push(parsed.new_public_key);
   const form = strictRefusal('KeySuccessionRecord', raw, signers);
   if (form !== null) return form;
-  const record = raw as unknown as KeySuccessionRecord;
+  const record = raw as KeySuccessionRecord;
   if (record.sovereign_id !== context.sovereignId) return 'succession_sovereign_mismatch';
   if (record.key_sequence !== previous.key_sequence + 1 || record.previous_public_key !== previous.public_key
     || (record.previous_succession_digest ?? null) !== context.previousDigest) {
     return 'succession_chain_break';
   }
-  if (!validPublicKey(record.new_public_key) || context.heldKeys.includes(record.new_public_key)) {
+  if (!validPublicKey(record.new_public_key) || context.heldKeys.includes(record.new_public_key)
+    || record.new_public_key === rootPublicKey) {
     return 'succession_key_reused';
   }
+  if (at(record.issued_at) > at(record.effective_at)) return 'succession_backdated';
   const effective = at(record.effective_at);
   if ((previous.valid_from !== null && effective <= at(previous.valid_from)) || at(record.new_valid_to) <= effective) {
     return 'succession_not_increasing';
@@ -296,6 +377,7 @@ export function successionRefusal(raw: unknown, context: SuccessionContext): str
     return 'succession_after_expiry';
   }
   if (!successionSignedBy(record, rootPublicKey)) return 'succession_invalid_root_signature';
+  if (!successionSignedBy(record, record.new_public_key)) return 'succession_invalid_new_key_signature';
   if ((context.requirePreviousSignature ?? true) && !successionSignedBy(record, previous.public_key)) {
     return 'succession_invalid_previous_signature';
   }
@@ -349,8 +431,8 @@ export function verifyKeyHistory(
       previous, previousDigest, sovereignId: block.network_name, rootPublicKey: root, heldKeys: keys.map(k => k.public_key),
     });
     if (reason !== null) {
-      const parsed = isObject(raw) && unknownFields('KeySuccessionRecord', raw).length === 0 && validKeySuccession(raw);
-      return fail(parsed ? (raw as unknown as KeySuccessionRecord).key_sequence : previous.key_sequence + 1, reason);
+      const parsed = parsedSuccession(raw);
+      return fail(parsed !== null ? parsed.key_sequence : previous.key_sequence + 1, reason);
     }
     const record = raw as KeySuccessionRecord;
     records.push(record);

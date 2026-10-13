@@ -125,6 +125,10 @@ export {
   verifyDataAccessIntent,
   treatyCanonical,
   verifyTreatySignature,
+  CARRIED_KINDS,
+  carriedSequences,
+  isoMicros,
+  keyPlacementProblem,
 } from './verify.js';
 export type {
   VerifyDecisionOptions, VerifyEvidenceOptions, ExecutorKeyInfo, RecognitionTreaty,
@@ -134,7 +138,12 @@ export type {
 // NA key succession and the key history (v1.5.0)
 export {
   NAKeyHistory,
+  MAX_DECISION_LIFETIME_SECONDS,
+  NA_RECORD_TIME_FIELDS,
+  RECORD_TIME_TOLERANCE_SECONDS,
   SUCCESSION_HANDOVER_SECONDS,
+  SUCCESSION_MIN_LEAD_SECONDS,
+  decisionOutlivesKey,
   genesisRefusal,
   naKeysAt,
   naSignatureAt,
@@ -172,6 +181,7 @@ export type { AnchorFailure, AnchorVerification, CheckAnchorsOptions, StoreAncho
 export {
   ANCHORS_FILE,
   ATTESTATIONS_FILE,
+  CHANGE_COLUMNS,
   CHECKS_FILE,
   CITED_FILE,
   ENTRIES_FILE,
@@ -185,14 +195,22 @@ export {
   PACK_FORMAT_VERSION,
   POLICIES_FILE,
   REPORT_FILE,
+  STATES_FILE,
   TREATIES_FILE,
   archiveCanonical,
   auditPackFiles,
   checkCompleteness,
+  packEntryDigests,
   packJsonBytes,
   packReasons,
   parseChanges,
+  parseRfc3339,
   readAuditPackDir,
+  receivedSignatureReason,
+  registryKeys,
+  renderReport,
+  reportCell,
+  reportHeader,
   verifyArchiveRecord,
   verifyAuditPack,
 } from './audit-pack.js';
@@ -206,7 +224,9 @@ export type {
   CompletenessReport,
   PackFile,
   PackFinding,
+  PackPeriod,
   PackVerification,
+  ReportHeader,
   VerifyAuditPackOptions,
 } from './audit-pack.js';
 

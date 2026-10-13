@@ -25,6 +25,7 @@
 import { randomUUID } from 'node:crypto';
 import { adminSigningPayload, checkSignable, signCanonical, verifyBytes, type Signer } from './auth.js';
 import { GenesisMeshError } from './errors.js';
+import type { NAKeys } from './key-history.js';
 import {
   metadataProblem, OutOfBandRecordError, outOfBandCanonical, timeOf, verifyOutOfBandRecord, wire,
 } from './out-of-band.js';
@@ -151,7 +152,7 @@ export function remediationCanonical(record: RemediationRecord | ReviewRecord): 
  * (its executor key's) over the record as received, in the reference's form
  * and with no field this SDK does not know.
  */
-export function verifyRemediationRecord(record: RemediationRecord, publicKeys: readonly string[]): boolean {
+export function verifyRemediationRecord(record: RemediationRecord, publicKeys: NAKeys): boolean {
   return 'remediation_id' in Object(record) && verifyOutOfBandRecord(record as never, publicKeys);
 }
 
@@ -161,7 +162,7 @@ export function verifyRemediationRecord(record: RemediationRecord, publicKeys: r
  * approvals prove it is `reviewApprovalProblem`; whether a second holder
  * decided it is `reviewHolderProblem`.
  */
-export function verifyReviewRecord(review: ReviewRecord, naPublicKeys: readonly string[]): boolean {
+export function verifyReviewRecord(review: ReviewRecord, naPublicKeys: NAKeys): boolean {
   return 'review_id' in Object(review) && verifyOutOfBandRecord(review as never, naPublicKeys);
 }
 

@@ -3,8 +3,14 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
+  NA_RECORD_TIME_FIELDS,
   checkCompleteness,
+  isoMicros,
   packReasons,
+  parseChanges,
+  parseTimestampMicros,
+  registryKeys,
+  reportCell,
   parseExportLines,
   parseJson,
   receivedCanonical,
@@ -22,7 +28,9 @@ import type { BoundaryDecision, Change, ExecutorKeyInfo, NAKeyHistory, StoreAnch
  * unchanged: the signed forms of the new records, the key history and each
  * refusal by name, the keys valid at a time (with the hand-over), exports and
  * anchors across a succession, a decision judged at its own time, audit packs
- * (valid and refused) and the completeness check. Every vector runs.
+ * (valid and refused), the completeness check, and (after the 1.5.0 review
+ * fixes) ranges with their cited entries, keys placed by the registry, report
+ * cells, changes files and record times. Every vector runs.
  */
 interface Vector {
   id: string;
@@ -68,8 +76,39 @@ function outcome(v: Vector): Record<string, unknown> {
       const result = verifyEvidenceEvents(parseExportLines(input['lines'] as string), {
         naPublicKeys: history(input), executorKeys: input['executor_keys'] as ExecutorKeyInfo[],
       });
+      return {
+        failures: result.failures.map(f => ({ store_sequence: f.store_sequence, reason: f.reason })),
+        warnings: (result.warnings ?? []).map(w => ({ store_sequence: w.store_sequence, reason: w.reason })),
+      };
+    }
+    case 'verify_range': {
+      const result = verifyEvidenceEvents(parseExportLines(input['lines'] as string), {
+        naPublicKeys: history(input), executorKeys: input['executor_keys'] as ExecutorKeyInfo[],
+        prior: parseExportLines(input['cited_lines'] as string),
+      });
       return { failures: result.failures.map(f => ({ store_sequence: f.store_sequence, reason: f.reason })) };
     }
+    case 'registry_keys': {
+      const placed = registryKeys(parseExportLines(input['lines'] as string), history(input));
+      const at = (value: string | null | undefined) => (value ? isoMicros(parseTimestampMicros(value)) : null);
+      return {
+        keys: Object.values(placed).sort((a, b) => (a.key_id < b.key_id ? -1 : 1)).map(k => ({
+          key_id: k.key_id, public_key: k.public_key, role: k.role, registered_sequence: k.registered_sequence ?? null,
+          registered_at: at(k.registered_at_time), retired_sequence: k.retired_sequence ?? null, retired_at: at(k.retired_at_time),
+        })),
+      };
+    }
+    case 'report_cell':
+      return { cells: (input['values'] as unknown[]).map(reportCell) };
+    case 'changes_file': {
+      try {
+        return { refused: false, changes: parseChanges(input['text'] as string, { csv: input['csv'] as boolean }) };
+      } catch {
+        return { refused: true };
+      }
+    }
+    case 'record_time':
+      return { field: Object.hasOwn(NA_RECORD_TIME_FIELDS, v.model!) ? NA_RECORD_TIME_FIELDS[v.model!] : null };
     case 'verify_anchors': {
       const genesis = input['genesis'] as { network_name: string };
       const result = verifyStoreAnchors(input['anchors'] as StoreAnchor[], {
@@ -87,16 +126,20 @@ function outcome(v: Vector): Record<string, unknown> {
     }
     case 'pack': {
       const rows = input['changes'] as Array<Record<string, unknown>> | undefined | null;
+      const prior = input['prior_entries'] as Record<string, string> | null | undefined;
       const result = verifyAuditPack(input['files'] as Record<string, string>, {
         rootPublicKey: input['root_public_key'] as string,
         heldAnchors: input['held_anchors'] as StoreAnchor[] | null,
         changes: rows ? changes(rows) : null,
+        period: (input['period'] as [string, string] | null | undefined) ?? null,
+        priorEntries: prior ? Object.fromEntries(Object.entries(prior).map(([k, d]) => [Number(k), d])) : null,
       });
       const out: Record<string, unknown> = {
         verified: result.verified, reasons: packReasons(result),
         warnings: [...new Set(result.warnings.map(w => w.reason))].sort(),
       };
       if (result.completeness !== null) out['unmatched_changes'] = result.completeness.unmatched_changes.map(c => c.index);
+      if (result.period !== null) out['period'] = { from: result.period.from, until: result.period.until };
       return out;
     }
     case 'completeness': {
@@ -108,6 +151,7 @@ function outcome(v: Vector): Record<string, unknown> {
         pairs: report.pairs.map(p => [p.change, p.record_id, p.matched_by]),
         unmatched_changes: report.unmatched_changes.map(c => c.index),
         outside_period: report.outside_period.map(c => c.index),
+        duplicate_changes: report.duplicate_changes.map(c => c.index),
         unmatched_records: report.unmatched_records.map(r => r.record_id),
       };
     }
@@ -117,10 +161,10 @@ function outcome(v: Vector): Record<string, unknown> {
 }
 
 describe('audit conformance suite (1.5.0)', () => {
-  it('is the 1.5.0 suite with its 44 vectors', () => {
+  it('is the 1.5.0 suite with its 105 vectors', () => {
     expect(suite.suite).toBe('audit');
     expect(suite.version).toBe('1.5.0');
-    expect(suite.vectors).toHaveLength(44);
+    expect(suite.vectors).toHaveLength(105);
   });
 
   it.each(suite.vectors.map(v => [v.id, v] as const))('%s', (_id, v) => {

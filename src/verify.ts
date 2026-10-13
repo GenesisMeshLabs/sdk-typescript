@@ -42,7 +42,8 @@ import {
   reviewApprovalProblem, reviewHolderProblem, rotationProblem, type RemediationRecord, type ReviewRecord,
 } from './remediation.js';
 import {
-  NAKeyHistory, naKeysAt, naSignatureAt, successionDigest, successionSignedBy, type KeySuccessionRecord, type NAKeys,
+  NAKeyHistory, RECORD_TIME_TOLERANCE_SECONDS, SUCCESSION_MIN_LEAD_SECONDS, decisionOutlivesKey, naKeysAt, naSignatureAt,
+  successionDigest, successionSignedBy, type KeySuccessionRecord, type NAKeys,
 } from './key-history.js';
 import {
   isKnownEntryKind, nonCanonicalFields, signedAsReceived as signedAsReceivedBy, strictRefusal, unknownFields,
@@ -266,6 +267,12 @@ export function verifyBoundaryDecision(
   if (now > micros(decision.decision_valid_until)) return reject('decision_expired');
   const signed = naSignatureAt(keys => decisionSigned(decision, keys), options.operatorPublicKeys, decision.decision_made_at);
   if (signed !== 'ok') return reject(signed);
+  // v1.5.0: a key with an end vouches for a decision only as long as the longest lifetime the NA
+  // issues past that end (and the hand-over).
+  const signer = naKeysAt(options.operatorPublicKeys, decision.decision_made_at).find(k => decisionSigned(decision, [k]));
+  if (signer !== undefined && decisionOutlivesKey(options.operatorPublicKeys, signer, decision.decision_valid_until)) {
+    return reject('decision_outlives_key');
+  }
   // v1.2.0: an authentic decision with a signed field this SDK does not know, or
   // expected inputs it cannot read, is refused by name: upgrade this SDK.
   if (
@@ -352,6 +359,70 @@ export interface ExecutorKeyInfo {
   role?: 'executor' | 'observer';
   /** v1.3.0: the key signs only for resources under this prefix (checked by the NA at admission). */
   resource_prefix?: string | null;
+  /**
+   * v1.5.0: where the store registered and retired the key, for a key read
+   * from its registry records (as an audit pack places it): by store position,
+   * or by time for a record backfilled at an upgrade or carried past
+   * retention. A record verifies only with a key registered before it and not
+   * retired before it (`evidence_unknown_executor`,
+   * `evidence_executor_key_retired`). A key supplied without them is not placed.
+   */
+  registered_sequence?: number | null;
+  registered_at_time?: string | null;
+  retired_sequence?: number | null;
+  retired_at_time?: string | null;
+}
+
+/** Why a record at this store position and time may not carry this key's signature, or null (v1.5.0). */
+export function keyPlacementProblem(key: ExecutorKeyInfo, storeSequence: number, recordedAt: string): string | null {
+  const registeredSequence = key.registered_sequence ?? null;
+  const registeredAt = key.registered_at_time ?? null;
+  if (registeredSequence === null && registeredAt === null) return null;
+  const at = micros(recordedAt);
+  const registered = (registeredSequence !== null && registeredSequence < storeSequence)
+    || (registeredAt !== null && micros(registeredAt) <= at);
+  if (!registered) return 'evidence_unknown_executor';
+  const retiredSequence = key.retired_sequence ?? null;
+  const retiredAt = key.retired_at_time ?? null;
+  const retired = (retiredSequence !== null && retiredSequence < storeSequence)
+    || (retiredAt !== null && micros(retiredAt) <= at);
+  return retired ? 'evidence_executor_key_retired' : null;
+}
+
+/** v1.5.0: the kinds retention appends again after its checkpoint, each with the time it was first recorded. */
+export const CARRIED_KINDS: ReadonlySet<string> = new Set(['registry', 'key_succession', 'archive']);
+
+/**
+ * Store positions of the entries retention carried forward (v1.5.0): entries
+ * of `CARRIED_KINDS` in an unbroken run of positions right after a retention
+ * checkpoint entry.
+ */
+export function carriedSequences(events: Iterable<EvidenceEvent>): Set<number> {
+  const out = new Set<number>();
+  let previous: EvidenceEvent['entry'] | null = null;
+  let carrying = false;
+  for (const event of [...events].sort((a, b) => a.entry.store_sequence - b.entry.store_sequence)) {
+    const entry = event.entry;
+    const adjacent = previous !== null && entry.store_sequence === previous.store_sequence + 1;
+    carrying = CARRIED_KINDS.has(entry.entry_kind) && adjacent && previous !== null
+      && (previous.entry_kind === 'retention_checkpoint' || carrying);
+    if (carrying) out.add(entry.store_sequence);
+    previous = entry;
+  }
+  return out;
+}
+
+/** An instant as the reference writes it in reports: UTC, six fraction digits when not zero, `Z`. */
+export function isoMicros(value: number): string {
+  const ms = Math.floor(value / 1000);
+  const fraction = value - ms * 1000;
+  const base = new Date(ms).toISOString().slice(0, 19);
+  const micro = (ms % 1000 + 1000) % 1000 * 1000 + fraction;
+  return `${base}${micro === 0 ? '' : `.${String(micro).padStart(6, '0')}`}Z`;
+}
+
+function keysAtMicros(keys: NAKeys, when: number): string[] {
+  return keys instanceof NAKeyHistory ? keys.keysAtMicros(when) : [...keys];
 }
 
 export interface VerifyEvidenceOptions {
@@ -470,6 +541,20 @@ export function verifyEvidenceEvents(
   // v1.5.0: with `prior` (an audit pack's cited records) every record the run cites is supplied,
   // and the chains continue from the records it holds.
   const pack = options.prior !== undefined && options.prior !== null;
+  // v1.5.0: the latest recorded_at so far in the run (microseconds), and whether the entries just
+  // visited are a block retention carried forward.
+  let clock: number | null = null;
+  let carrying = false;
+  // v1.5.0: the chains a checkpoint removed continue from its heads.
+  const seedHeads = (cp: RetentionCheckpoint) => {
+    for (const [rid, head] of Object.entries(cp.resource_heads ?? {})) {
+      const held = resourceHeads.get(rid);
+      if (held === undefined || held.resource_sequence < head.resource_sequence) resourceHeads.set(rid, head);
+    }
+    for (const [rid, position] of Object.entries(cp.observation_heads ?? {})) {
+      if ((observationHeads.get(rid) ?? 0) < position) observationHeads.set(rid, position);
+    }
+  };
 
   if (checkpoint && (!validCheckpoint(checkpoint) || !checkpointSigned(checkpoint, naKeysAt(naKeys, checkpoint.created_at)))) {
     failOn(result)(null, 'invalid_signature', 'retention_checkpoint');
@@ -492,6 +577,22 @@ export function verifyEvidenceEvents(
     const entry = event.entry;
     const seq = entry.store_sequence;
     target.checked_entries += 1;
+    // v1.5.0: in a contiguous run an entry is not recorded more than the tolerance before an earlier one
+    // (carried entries keep their first time), and an NA key must also be valid at the latest earlier time.
+    let notBefore: number | null = null;
+    if (contiguous && !citedRun) {
+      const adjacent = prev !== null && seq === prev.store_sequence + 1;
+      carrying = CARRIED_KINDS.has(entry.entry_kind) && adjacent && prev !== null
+        && (prev.entry_kind === 'retention_checkpoint' || carrying);
+      if (!carrying) {
+        const at = micros(entry.recorded_at);
+        if (clock !== null && at < clock - RECORD_TIME_TOLERANCE_SECONDS * 1_000_000) {
+          fail(seq, 'recorded_at_out_of_order', `recorded at ${isoMicros(at)}, after an entry recorded at ${isoMicros(clock)}`);
+        }
+        notBefore = clock;
+        clock = clock === null || at > clock ? at : clock;
+      }
+    }
     if (entryDigest(entry) !== event.entry_digest) fail(seq, 'entry_digest_mismatch');
     if (payloadDigest(event.payload) !== entry.payload_digest) fail(seq, 'payload_digest_mismatch');
     const linked = contiguous && !citedRun;
@@ -522,9 +623,11 @@ export function verifyEvidenceEvents(
       return;
     }
     if (checked.unsigned.length > 0) warn(seq, 'unsigned_field', checked.unsigned.join(', '));
-    if (checked.unsigned.length > 0 && (kind in OUT_OF_BAND_MODELS || kind === 'key_succession')) {
+    if (checked.unsigned.length > 0
+      && (kind in OUT_OF_BAND_MODELS || kind === 'key_succession' || kind === 'retention_checkpoint')) {
       // v1.3.0: the reference stores these records exactly as signed; a field outside the
       // signature is no part of one (the reference refuses it as it reads the record).
+      // v1.5.0: a retention checkpoint too.
       fail(seq, 'payload_invalid', checked.unsigned.join(', '));
       return;
     }
@@ -541,16 +644,31 @@ export function verifyEvidenceEvents(
       if (!signed) fail(seq, 'invalid_signature', kind);
       else if (nonCanonicalFields(model, record).length > 0) fail(seq, 'non_canonical_form', kind);
     };
-    // v1.5.0: an NA signature by the key valid at the entry's `recorded_at`; by another key of the
-    // history, `na_key_not_valid_at_time` (a form the reference does not write is named first).
-    const naSignature = (signedBy: (keys: readonly string[]) => boolean, model: string) => {
-      const outcome = naSignatureAt(signedBy, naKeys, entry.recorded_at);
-      if (outcome === 'ok') signature(true, model);
-      else if (outcome === 'na_key_not_valid_at_time' && nonCanonicalFields(model, record).length > 0) {
-        fail(seq, 'non_canonical_form', kind);
-      } else {
-        fail(seq, outcome, kind);
+    // v1.5.0: an NA signature by the key valid at the entry's `recorded_at` (and at the latest earlier
+    // time in the run); by another key of the history, `na_key_not_valid_at_time` (a form the reference
+    // does not write is named first). Returns the keys valid then when the signature is accepted.
+    const naSignature = (signedBy: (keys: readonly string[]) => boolean, model: string): readonly string[] | null => {
+      const recordedAt = micros(entry.recorded_at);
+      let valid = keysAtMicros(naKeys, recordedAt);
+      if (notBefore !== null && notBefore > recordedAt) {
+        const later = new Set(keysAtMicros(naKeys, notBefore));
+        valid = valid.filter(k => later.has(k));
       }
+      const loose = nonCanonicalFields(model, record).length > 0;
+      if (signedBy(valid)) {
+        signature(true, model);
+        return loose ? null : valid;
+      }
+      const others = allNaKeys.filter(k => !valid.includes(k));
+      if (others.length > 0 && signedBy(others)) fail(seq, loose ? 'non_canonical_form' : 'na_key_not_valid_at_time', kind);
+      else fail(seq, 'invalid_signature', kind);
+      return null;
+    };
+    // v1.5.0: a key-signed record verifies only with a key registered before it and not retired before it.
+    const misplaced = (key: ExecutorKeyInfo | undefined): boolean => {
+      const problem = key ? keyPlacementProblem(key, seq, entry.recorded_at) : null;
+      if (problem !== null) fail(seq, problem, `${kind} signed by ${key!.key_id}`);
+      return problem !== null;
     };
     // v1.3.1: a record's ID appears once per kind: a copy is a replay, still checked like any record.
     const recordId = String(record[RECORD_ID[kind]!]);
@@ -567,7 +685,12 @@ export function verifyEvidenceEvents(
     switch (kind) {
       case 'decision': {
         const model = record as unknown as BoundaryDecision;
-        naSignature(keys => decisionSigned(model, keys), 'BoundaryDecision');
+        const valid = naSignature(keys => decisionSigned(model, keys), 'BoundaryDecision');
+        // v1.5.0: valid longer than the key that signed it may vouch for.
+        const signer = valid?.find(k => decisionSigned(model, [k]));
+        if (signer !== undefined && decisionOutlivesKey(naKeys, signer, model.decision_valid_until)) {
+          fail(seq, 'decision_outlives_key', model.decision_id);
+        }
         target.decisions += 1;
         decisions.set(model.decision_id, model);
         judgedRecords.set(model.decision_id, { digest: entry.payload_digest, resource: null });
@@ -587,8 +710,10 @@ export function verifyEvidenceEvents(
         const ev = payload as unknown as ExecutionEvidence;
         const key = keyNamed(executorKeys, ev.signature?.key_id);
         // v1.3.0: only an executor key signs execution evidence.
-        signature(!!key && key.executor_sovereign_id === ev.executor_sovereign_id
-          && (key.role ?? 'executor') === 'executor' && verifyExecutionSignature(ev, key.public_key), 'ExecutionEvidence');
+        const fits = !!key && key.executor_sovereign_id === ev.executor_sovereign_id && (key.role ?? 'executor') === 'executor';
+        if (!fits || !misplaced(key)) {
+          signature(fits && verifyExecutionSignature(ev, key!.public_key), 'ExecutionEvidence');
+        }
         target.executions += 1;
         const decision = decisions.get(ev.decision_id);
         if (decision) {
@@ -637,7 +762,9 @@ export function verifyEvidenceEvents(
       }
       case 'retention_checkpoint': {
         const cp = payload as unknown as RetentionCheckpoint;
+        const failures = target.failures.length;
         naSignature(keys => verifyRetentionCheckpoint(cp, keys), 'RetentionCheckpoint');
+        const authentic = target.failures.length === failures;
         // v1.3.1: a checkpoint removed as many entries as positions, counted from the checkpoint
         // before it when the run holds that one, or from entry 1 when there is none.
         const previous = cp.previous_checkpoint_id;
@@ -650,11 +777,14 @@ export function verifyEvidenceEvents(
           }
         }
         checkpoints.set(cp.checkpoint_id, cp);
+        if (authentic) seedHeads(cp);
         break;
       }
       case 'observation':
       case 'break_glass': {
-        signature(outOfBandSigned(kind, payload, allNaKeys, executorKeys), OUT_OF_BAND_MODELS[kind]!);
+        if (!misplaced(fittingKey(kind, payload, executorKeys))) {
+          signature(outOfBandSigned(kind, payload, allNaKeys, executorKeys), OUT_OF_BAND_MODELS[kind]!);
+        }
         subjects.set(subjectKey(kind, recordId), { digest: entry.payload_digest, sequence: seq });
         const version = kind === 'observation' ? payload['version_id']
           : (payload['execution_parameters'] as Record<string, unknown> | undefined)?.['version_id'];
@@ -732,7 +862,9 @@ export function verifyEvidenceEvents(
       }
       case 'remediation': {
         // v1.4.0: signed by an executor key of the record's sovereign, as execution evidence is.
-        signature(outOfBandSigned('remediation', payload, allNaKeys, executorKeys), 'RemediationRecord');
+        if (!misplaced(fittingKey('remediation', payload, executorKeys))) {
+          signature(outOfBandSigned('remediation', payload, allNaKeys, executorKeys), 'RemediationRecord');
+        }
         counts.remediations += 1;
         const remediation = payload as unknown as RemediationRecord;
         notDecisions.add(remediation.remediation_id);
@@ -751,7 +883,7 @@ export function verifyEvidenceEvents(
       }
       case 'key_succession':
         checkSuccessionEntry(seq, payload as unknown as KeySuccessionRecord, fail, allNaKeys,
-          history?.root_public_key ?? null, successions);
+          history?.root_public_key ?? null, successions, micros(entry.recorded_at));
         counts.key_successions += 1;
         break;
       case 'archive':
@@ -783,10 +915,13 @@ export function verifyEvidenceEvents(
 }
 
 /**
- * v1.5.0: a key succession entry is signed by its outgoing key, an NA key;
- * given the NA's key history with its root key, it is one of the history's
- * successions (`succession_not_in_history`) and the root key signed it
- * (`succession_invalid_root_signature`).
+ * v1.5.0: a key succession entry is signed by its outgoing key, an NA key,
+ * and by the new key (`succession_invalid_new_key_signature`); given the NA's
+ * key history with its root key, it is one of the history's successions
+ * (`succession_not_in_history`) and the root key signed it
+ * (`succession_invalid_root_signature`). It was not issued after it takes
+ * effect, and the store recorded it at least `SUCCESSION_MIN_LEAD_SECONDS`
+ * before (`succession_backdated`).
  */
 function checkSuccessionEntry(
   seq: number,
@@ -795,8 +930,10 @@ function checkSuccessionEntry(
   naKeys: readonly string[],
   root: string | null,
   successions: ReadonlySet<string> | null,
+  recordedAt: number,
 ): void {
-  const refusal = strictRefusal('KeySuccessionRecord', record, root ? [...naKeys, root] : naKeys);
+  const refusal = strictRefusal('KeySuccessionRecord', record,
+    [...naKeys, ...(root ? [root] : []), record.new_public_key]);
   if (refusal !== null) {
     fail(seq, refusal === 'unknown_field' ? 'invalid_signature' : refusal, 'key_succession');
     return;
@@ -809,8 +946,17 @@ function checkSuccessionEntry(
     fail(seq, 'succession_invalid_root_signature', record.succession_id);
     return;
   }
+  if (!successionSignedBy(record, record.new_public_key)) {
+    fail(seq, 'succession_invalid_new_key_signature', record.succession_id);
+    return;
+  }
   if (root && successions && !successions.has(successionDigest(record))) {
     fail(seq, 'succession_not_in_history', record.succession_id);
+    return;
+  }
+  const effective = micros(record.effective_at);
+  if (micros(record.issued_at) > effective || recordedAt + SUCCESSION_MIN_LEAD_SECONDS * 1_000_000 > effective) {
+    fail(seq, 'succession_backdated', record.succession_id);
   }
 }
 
@@ -1059,6 +1205,18 @@ function outOfBandKeys(
   return key && key.executor_sovereign_id === sovereign && (key.role ?? 'executor') === role ? [key.public_key] : [];
 }
 
+/** The registered key that fits a key-signed Stage 2 or 3 record (its sovereign and role), or undefined. */
+function fittingKey(
+  kind: string,
+  payload: Record<string, unknown>,
+  executorKeys: Record<string, ExecutorKeyInfo>,
+): ExecutorKeyInfo | undefined {
+  const role = KEY_ROLES[kind];
+  const key = keyNamed(executorKeys, (payload['signature'] as Signature | null | undefined)?.key_id);
+  const sovereign = kind === 'observation' ? payload['observer_sovereign_id'] : payload['executor_sovereign_id'];
+  return key && role && key.executor_sovereign_id === sovereign && (key.role ?? 'executor') === role ? key : undefined;
+}
+
 /** Whether a Stage 2 record's signature covers it as received, under the key that may sign it. */
 function outOfBandSigned(
   kind: string,
@@ -1127,7 +1285,8 @@ function checkPayloadFields(
     signedAsReceived = signedBy(justificationCanonical(payload as unknown as DecisionJustification),
       (payload as unknown as DecisionJustification).signature, naPublicKeys);
   } else if (kind === 'key_succession') {
-    signedAsReceived = signedAsReceivedBy(model, payload, rootPublicKey ? [...naPublicKeys, rootPublicKey] : naPublicKeys);
+    const newKey = typeof payload['new_public_key'] === 'string' ? [payload['new_public_key']] : [];
+    signedAsReceived = signedAsReceivedBy(model, payload, [...naPublicKeys, ...(rootPublicKey ? [rootPublicKey] : []), ...newKey]);
   } else if (kind in OUT_OF_BAND_MODELS) {
     // The key the signature names, whatever its role: an authentic record with a field this SDK
     // does not know is refused by name first, as the reference refuses it.
@@ -1171,12 +1330,21 @@ export function verifyAgreement(
   offererPublicKeys: NAKeys,
   responderPublicKeys: NAKeys,
   expectedGraphDigest?: string,
+  now: Date = new Date(),
 ): AgreementVerification {
   const result = (accepted: boolean, reason: AgreementVerificationReason) =>
     ({ accepted, reason, agreement_id: record.agreement_id });
-  // v1.5.0: a party given as the NA's key history signs with the key valid at `established_at`.
-  const offererKeys = naKeysAt(offererPublicKeys, record.established_at);
-  const responderKeys = naKeysAt(responderPublicKeys, record.established_at);
+  // v1.5.0: a party given as the NA's key history signs with the key valid at `agreed_terms.valid_from`
+  // (signed; `established_at` is not) that is still accepted `now`: an agreement a succeeded key signed
+  // stops vouching when that key's hand-over ends.
+  const vouching = (keys: NAKeys) => {
+    if (!(keys instanceof NAKeyHistory)) return [...keys];
+    const current = new Set(keys.keysAt(now));
+    const from = record.agreed_terms?.valid_from;
+    return (typeof from === 'string' ? keys.keysAt(from) : []).filter(k => current.has(k));
+  };
+  const offererKeys = vouching(offererPublicKeys);
+  const responderKeys = vouching(responderPublicKeys);
   // 1.3.1: `signatures` that is not a list holds no signature (it threw a TypeError).
   const signatures = signatureList(record.signatures);
   if (signatures.length === 0) return result(false, 'missing_offerer_signature');

@@ -327,7 +327,8 @@ export const validManifest = shape({
   format: filled(oneOf('gm.audit.pack')), format_version: filled(oneOf(1)), pack_id: filled(bounded(128)),
   sovereign_id: bounded(256), created_at: utc, requested_by: absent(bounded(256)), from_sequence: positive,
   through_sequence: positive, start_anchor_sequence: absent(positive), end_anchor_sequence: positive,
-  files: array(packFile), issued_by: string, signature: optional(signature),
+  period_from: absent(utc), period_until: absent(utc), files: array(packFile), issued_by: string,
+  signature: optional(signature),
 }, true);
 /** The records an audit pack carries outside the store: what a verifier reads of each. */
 export const validPolicyRecord = shape({

@@ -80,10 +80,13 @@ const succession: KeySuccessionRecord = {
   previous_key_id: 'na-1', previous_public_key: na1.pubBase64, new_key_id: 'na-2', new_public_key: na2.pubBase64,
   effective_at: at(0), new_valid_to: NEW_VALID_TO, issued_at: at(-6 * 86400), signatures: [],
 };
-succession.signatures.push(
-  { key_id: 'root', sig: sign(successionCanonical(succession), root.seedBase64) },
-  { key_id: 'na-1', sig: sign(successionCanonical(succession), na1.seedBase64) },
-);
+/** A succession signed by the root key, the new key (its proof of possession) and the outgoing key. */
+function signedSuccession(record: KeySuccessionRecord, seeds: Array<[string, string]>): KeySuccessionRecord {
+  const body = { ...record, signatures: [] };
+  return { ...body, signatures: seeds.map(([keyId, seed]) => ({ key_id: keyId, sig: sign(successionCanonical(body), seed) })) };
+}
+const SIGNERS: Array<[string, string]> = [['root', root.seedBase64], ['na-2', na2.seedBase64], ['na-1', na1.seedBase64]];
+Object.assign(succession, signedSuccession(succession, SIGNERS));
 
 const verified = verifyKeyHistory(genesis, [succession], root.pubBase64);
 const history = verified.history!;
@@ -108,11 +111,30 @@ describe('the key history', () => {
   });
 
   it('refuses a succession the outgoing key did not sign, and another root key', () => {
-    const rootOnly = { ...succession, signatures: [succession.signatures[0]!] };
-    expect(verifyKeyHistory(genesis, [rootOnly], root.pubBase64).failures)
+    const noOutgoing = { ...succession, signatures: succession.signatures.slice(0, 2) };
+    expect(verifyKeyHistory(genesis, [noOutgoing], root.pubBase64).failures)
       .toEqual([{ key_sequence: 2, reason: 'succession_invalid_previous_signature', detail: '' }]);
     expect(verifyKeyHistory(genesis, [succession], stranger.pubBase64).failures.map(f => f.reason))
       .toEqual(['genesis_root_mismatch']);
+  });
+
+  it('refuses a succession the new key did not sign, the root key as the next key, and a backdated one', () => {
+    const reason = (record: KeySuccessionRecord) => verifyKeyHistory(genesis, [record], root.pubBase64).failures.map(f => f.reason);
+    const noProof = { ...succession, signatures: [succession.signatures[0]!, succession.signatures[2]!] };
+    expect(reason(noProof)).toEqual(['succession_invalid_new_key_signature']);
+    const rootAsKey = signedSuccession({ ...succession, new_public_key: root.pubBase64 },
+      [['root', root.seedBase64], ['na-1', na1.seedBase64]]);
+    expect(reason(rootAsKey)).toEqual(['succession_key_reused']);
+    const backdated = signedSuccession({ ...succession, issued_at: at(1) }, SIGNERS);
+    expect(reason(backdated)).toEqual(['succession_backdated']);
+  });
+
+  it('refuses a genesis block with a field the root key signed that this SDK does not know', () => {
+    const extended = { ...genesis, signatures: [], x_added: 1 };
+    const signedExtended = { ...extended, signatures: [{ key_id: 'root', sig: sign(receivedCanonical('GenesisBlock', extended), root.seedBase64) }] };
+    expect(verifyKeyHistory(signedExtended, [], root.pubBase64).failures.map(f => f.reason)).toEqual(['unknown_field']);
+    expect(verifyKeyHistory({ ...genesis, x_added: 1 }, [], root.pubBase64).failures.map(f => f.reason))
+      .toEqual(['genesis_invalid_signature']);
   });
 
   it('a list of keys is valid at every time', () => {
@@ -155,6 +177,17 @@ describe('decisions are verified with the key valid when they were made', () => 
   it('without a key history, any listed key verifies, as before', () => {
     expect(reason(decisionAt(86400, na1.seedBase64), [na1.pubBase64, na2.pubBase64])).toBe('authorized');
     expect(reason(decisionAt(-1, na2.seedBase64), [na1.pubBase64, na2.pubBase64])).toBe('authorized');
+  });
+
+  it('a succeeded key cannot vouch for a decision past its end, the hand-over and the lifetime cap', () => {
+    const longLived = (seconds: number, validFor: number): BoundaryDecision => {
+      const decision = { ...v.allowed.decision, decision_made_at: at(seconds), decision_valid_until: at(seconds + validFor) } as BoundaryDecision;
+      return { ...decision, signature: { key_id: 'na', sig: sign(decisionCanonical(decision), na1.seedBase64) } };
+    };
+    // Signed by the outgoing key one hour before the succession: valid up to 600 s past the succession.
+    expect(reason(longLived(-3600, 3600 + 600), history)).toBe('authorized');
+    expect(reason(longLived(-3600, 3600 + 601), history)).toBe('decision_outlives_key');
+    expect(reason(longLived(-3600, 30 * 86400), [na1.pubBase64])).toBe('authorized');
   });
 
   it('judged now, an archived decision has expired', () => {
@@ -200,7 +233,7 @@ describe('records outside the store, each at its own time', () => {
     expect(verifyPolicySignature(policyAt(1, na2.seedBase64), history)).toBe(true);
   });
 
-  it('a treaty at its issued_at, and an agreement at its established_at', () => {
+  it('a treaty at its issued_at, and an agreement at its agreed_terms.valid_from while its key vouches', () => {
     const treatyAt = (seconds: number, seed: string): RecognitionTreaty => {
       const t: RecognitionTreaty = {
         treaty_id: 'treaty-1', issuer_sovereign_id: SOVEREIGN, subject_sovereign_id: 'sovereign-b',
@@ -219,7 +252,7 @@ describe('records outside the store, each at its own time', () => {
       const record = {
         agreement_id: 'agreement-1', offer_id: 'offer-1', offerer_sovereign_id: SOVEREIGN, responder_sovereign_id: 'sovereign-b',
         agreed_terms: {
-          capabilities: ['read'], scope: {}, valid_from: '2026-01-01T00:00:00Z', valid_until: NEW_VALID_TO,
+          capabilities: ['read'], scope: {}, valid_from: at(seconds), valid_until: NEW_VALID_TO,
           freshness_commitment: 0,
         },
         graph_digest: 'g', offerer_evidence: {}, responder_evidence: {},
@@ -228,9 +261,15 @@ describe('records outside the store, each at its own time', () => {
       const sig = sign(agreementCanonical(record), seed);
       return { ...record, signatures: [{ key_id: 'na', sig }, { key_id: 'na', sig }] };
     };
-    expect(verifyAgreement(agreementAt(-86400, na1.seedBase64), history, history).reason).toBe('accepted');
-    expect(verifyAgreement(agreementAt(86400, na1.seedBase64), history, history).reason).toBe('invalid_offerer_signature');
-    expect(verifyAgreement(agreementAt(86400, na2.seedBase64), history, history).reason).toBe('accepted');
+    // Placed at agreed_terms.valid_from (signed), and the key must still be accepted now.
+    const beforeSuccession = new Date(SUCCESSION_AT - 1000);
+    const afterHandover = new Date(SUCCESSION_AT + 301_000);
+    expect(verifyAgreement(agreementAt(-86400, na1.seedBase64), history, history, undefined, beforeSuccession).reason).toBe('accepted');
+    expect(verifyAgreement(agreementAt(-86400, na1.seedBase64), history, history, undefined, afterHandover).reason)
+      .toBe('invalid_offerer_signature');
+    expect(verifyAgreement(agreementAt(86400, na1.seedBase64), history, history, undefined, afterHandover).reason)
+      .toBe('invalid_offerer_signature');
+    expect(verifyAgreement(agreementAt(86400, na2.seedBase64), history, history, undefined, afterHandover).reason).toBe('accepted');
     expect(verifyAgreement(agreementAt(86400, na1.seedBase64), [na1.pubBase64], [na1.pubBase64]).reason).toBe('accepted');
   });
 });
@@ -317,6 +356,18 @@ describe('exports, archives and packs from the audit suite', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('audit packs over HTTP', () => {
+  it('a 429 beyond the hourly pack limit is not replayed, even with retries on', async () => {
+    const fetch = mockFetch({ status: 429, body: { error: { code: 'rate_limit_exceeded', message: 'Rate limit exceeded' } } });
+    const gm = new GenesisMeshClient({
+      audience: 'TEST', baseUrl: 'http://localhost', signingKeyBase64: root.seedBase64, keyId: 'auditor',
+      retry: { attempts: 3, baseDelayMs: 1 }, fetch: fetch as unknown as typeof globalThis.fetch,
+    });
+    await expect(gm.evidenceStore.auditPack()).rejects.toMatchObject({ name: 'RateLimitError', status: 429 });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 
