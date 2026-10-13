@@ -996,7 +996,10 @@ export function renderReport(input: {
     ['Key successions and archives', ['Entry', 'Kind', 'ID', 'At'], others],
   ];
   for (const [title, headers, rows] of sections) lines.push(`## ${title}`, '', ...table(headers, rows));
-  return lines.join('\n').replace(/\n+$/, '') + '\n';
+  const text = lines.join('\n');
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === 10) end -= 1; // trailing line feeds, without a regex
+  return text.slice(0, end) + '\n';
 }
 
 // ── The completeness check ───────────────────────────────────────────────────
