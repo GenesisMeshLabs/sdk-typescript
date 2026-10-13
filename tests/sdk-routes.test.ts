@@ -51,6 +51,14 @@ const routes: Route[] = [
   { name: 'operator holders', method: 'GET', path: '/admin/evidence/operator-holders', admin: true, response: { holders: [{ key_id: 'k' }] }, expected: [{ key_id: 'k' }], call: gm => gm.evidenceStore.operatorHolders() },
   { name: 'propose holder', method: 'POST', path: '/admin/operator-keys/a%2Fb/holder', admin: true, body: { holder: 'team-b' }, call: gm => gm.evidenceStore.proposeHolder('a/b', 'team-b') },
   { name: 'approve holder', method: 'POST', path: '/admin/operator-keys/holder-changes/p%2F1/approve', admin: true, body: {}, call: gm => gm.evidenceStore.approveHolder('p/1') },
+  // v1.5.0: the key history, anchors, audit packs, archives and retention through a position.
+  { name: 'key history', method: 'GET', path: '/na/key-history', admin: false, call: gm => gm.na.getKeyHistory() },
+  { name: 'anchors', method: 'GET', path: '/admin/evidence/anchors?after_anchor=2&limit=10', admin: true, call: gm => gm.evidenceStore.anchors({ after_anchor: 2, limit: 10 }) },
+  { name: 'anchor now', method: 'POST', path: '/admin/evidence/anchors', admin: true, body: {}, call: gm => gm.evidenceStore.anchor() },
+  { name: 'audit pack', method: 'POST', path: '/admin/evidence/audit-pack', admin: true, body: { from_sequence: 5, until: '2026-10-01T00:00:00Z' }, call: gm => gm.evidenceStore.auditPack({ from_sequence: 5, until: '2026-10-01T00:00:00Z' }) },
+  { name: 'archives', method: 'GET', path: '/admin/evidence/archives', admin: true, call: gm => gm.evidenceStore.archives() },
+  { name: 'record archive', method: 'POST', path: '/admin/evidence/archives', admin: true, body: { manifest: { pack_id: 'p' }, location: 'archive://packs/p' }, call: gm => gm.evidenceStore.recordArchive({ pack_id: 'p' } as never, 'archive://packs/p') },
+  { name: 'retention through', method: 'POST', path: '/admin/evidence/retention/apply', admin: true, body: { through_sequence: 9 }, call: gm => gm.evidenceStore.applyRetention(null, { throughSequence: 9 }) },
 ];
 
 describe.each(routes)('$name', route => {

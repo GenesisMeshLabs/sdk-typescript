@@ -9,6 +9,7 @@ import { DataUsageClient } from './data_usage.js';
 import { PolicyClient } from './policy.js';
 import { EvidenceStoreClient } from './evidence_store.js';
 import { HealthClient } from './health.js';
+import { NetworkAuthorityClient } from './network_authority.js';
 
 export class GenesisMeshClient {
   readonly agreement: AgreementClient;
@@ -23,6 +24,8 @@ export class GenesisMeshClient {
   readonly dataUsage: DataUsageClient;
   /** Liveness, readiness and health (v0.60). */
   readonly health: HealthClient;
+  /** The NA's own keys: its key history (v1.5.0). */
+  readonly na: NetworkAuthorityClient;
 
   constructor(options: ClientOptions) {
     const http = new HttpTransport(options);
@@ -32,6 +35,7 @@ export class GenesisMeshClient {
     this.evidence      = new EvidenceClient(http);
     this.evidenceStore = new EvidenceStoreClient(http, options.outbox, options.recordOutbox);
     this.health        = new HealthClient(http);
+    this.na            = new NetworkAuthorityClient(http);
     this.attestation   = new AttestationClient(http);
     this.disclosure    = new DisclosureClient(http);
     this.consensus     = new ConsensusClient(http);
@@ -46,6 +50,7 @@ export { PolicyClient } from './policy.js';
 export { EvidenceClient } from './evidence.js';
 export { EvidenceStoreClient } from './evidence_store.js';
 export { HealthClient } from './health.js';
+export { NetworkAuthorityClient, KeyHistoryError } from './network_authority.js';
 export { AttestationClient } from './attestation.js';
 export { DisclosureClient } from './disclosure.js';
 export { ConsensusClient } from './consensus.js';
@@ -118,14 +123,98 @@ export {
   verifyAgreement,
   verifyDataLicensePolicySignature,
   verifyDataAccessIntent,
+  treatyCanonical,
+  verifyTreatySignature,
 } from './verify.js';
 export type {
-  VerifyDecisionOptions, VerifyEvidenceOptions, ExecutorKeyInfo,
+  VerifyDecisionOptions, VerifyEvidenceOptions, ExecutorKeyInfo, RecognitionTreaty,
   AgreementVerification, AgreementVerificationReason, DataIntentVerification, DataUsageViolationDetail, DataUsageViolationType,
 } from './verify.js';
 
+// NA key succession and the key history (v1.5.0)
+export {
+  NAKeyHistory,
+  SUCCESSION_HANDOVER_SECONDS,
+  genesisRefusal,
+  naKeysAt,
+  naSignatureAt,
+  successionCanonical,
+  successionDigest,
+  successionRefusal,
+  successionSignedBy,
+  validPublicKey,
+  verifyKeyHistory,
+  verifyKeyHistoryView,
+} from './key-history.js';
+export type {
+  GenesisBlock,
+  KeyHistoryFailure,
+  KeyHistoryVerification,
+  KeyHistoryView,
+  KeySuccessionRecord,
+  NAKey,
+  NAKeys,
+  SuccessionContext,
+} from './key-history.js';
+
+// Store anchors (offline, v1.5.0)
+export {
+  anchorCanonical,
+  anchorDigest,
+  checkEventsAgainstAnchors,
+  parseAnchors,
+  startingCheckpoint,
+  verifyStoreAnchors,
+} from './anchors.js';
+export type { AnchorFailure, AnchorVerification, CheckAnchorsOptions, StoreAnchor, VerifyAnchorsOptions } from './anchors.js';
+
+// Audit packs, archives and the completeness check (v1.5.0)
+export {
+  ANCHORS_FILE,
+  ATTESTATIONS_FILE,
+  CHECKS_FILE,
+  CITED_FILE,
+  ENTRIES_FILE,
+  EXECUTOR_KEYS_FILE,
+  FEEDS_FILE,
+  GENESIS_FILE,
+  KEY_HISTORY_FILE,
+  MANIFEST_FILE,
+  PACK_FILES,
+  PACK_FORMAT,
+  PACK_FORMAT_VERSION,
+  POLICIES_FILE,
+  REPORT_FILE,
+  TREATIES_FILE,
+  archiveCanonical,
+  auditPackFiles,
+  checkCompleteness,
+  packJsonBytes,
+  packReasons,
+  parseChanges,
+  readAuditPackDir,
+  verifyArchiveRecord,
+  verifyAuditPack,
+} from './audit-pack.js';
+export type {
+  ArchiveRecord,
+  AuditPackManifest,
+  AuditPackResponse,
+  Change,
+  CompletenessOptions,
+  CompletenessPair,
+  CompletenessReport,
+  PackFile,
+  PackFinding,
+  PackVerification,
+  VerifyAuditPackOptions,
+} from './audit-pack.js';
+
 // Strict verification: the field registry of signed records (v1.2.0)
-export { unknownFields, isKnownEntryKind, canonicalTimestamp, nonCanonicalTimestamps } from './strict.js';
+export {
+  unknownFields, isKnownEntryKind, canonicalTimestamp, nonCanonicalTimestamps, receivedCanonical, signedAsReceived,
+  strictRefusal,
+} from './strict.js';
 export { checkStrictJson, StrictJsonError } from './strict-json.js';
 export type { StrictJsonReason } from './strict-json.js';
 
@@ -321,6 +410,7 @@ export type * from './policy.js';
 export type * from './evidence.js';
 export type * from './evidence_store.js';
 export type * from './health.js';
+export type * from './network_authority.js';
 export type * from './attestation.js';
 export type * from './disclosure.js';
 export type * from './consensus.js';

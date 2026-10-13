@@ -21,6 +21,7 @@ import {
   type RemediationInput, type RemediationRecord, type RemediationStatus,
 } from './remediation.js';
 import type { Delivery, OutboxEntry, RecordOutboxEntry } from './outbox.js';
+import { naKeysAt } from './key-history.js';
 import { verifyBoundaryDecision, type VerifyDecisionOptions } from './verify.js';
 import type {
   BoundaryDecision,
@@ -362,7 +363,9 @@ export async function governedAction<T>(
   if ((resource_id === undefined) !== (resource_action === undefined)) {
     throw new Error('resource_id and resource_action go together');
   }
-  if (!verify?.operatorPublicKeys?.length) throw new DecisionVerificationError('verification_keys_required');
+  if (!verify?.operatorPublicKeys || naKeysAt(verify.operatorPublicKeys, null).length === 0) {
+    throw new DecisionVerificationError('verification_keys_required');
+  }
   const store = clients.evidenceStore;
   const outbox = store.outbox;
   // An outbox that cannot be read fails here, before anything is evaluated or run.
