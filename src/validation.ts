@@ -294,3 +294,56 @@ const ENVELOPE_INTEGERS = ['store_sequence', 'exec_sequence_no', 'resource_seque
 export const validEvent: Check = v => eventShape(v)
   && !isParsedFloat(v as object, 'schema_version')
   && !ENVELOPE_INTEGERS.some(k => isParsedFloat((v as { entry: object }).entry, k));
+
+// v1.5.0: the key history, anchors, archives and audit packs.
+const signatures = array(shape({ key_id: string, sig: string }));
+/** A genesis block as the reference reads it (unknown fields are ignored, not refused). */
+export const validGenesis = shape({
+  network_name: string, network_version: string, root_public_key: string,
+  network_authority: shape({ public_key: string, valid_from: timestamp, valid_to: timestamp }),
+  allowed_crypto_suites: optional(array(string)), allowed_transports: optional(array(string)),
+  policy_manifest: shape({ hash: string, url: optional(nullable(string)) }),
+  bootstrap_anchors: optional(array(shape({ id: string, endpoint: string }))), signatures: optional(signatures),
+});
+/** A key succession record (its `succession_id` the reference fills when absent). */
+export const validKeySuccession = shape({
+  succession_id: filled(bounded(128)), sovereign_id: bounded(256), key_sequence: v => integer(v) && (v as number) >= 2,
+  previous_key_id: bounded(128), previous_public_key: bounded(128), previous_succession_digest: absent(sha256),
+  new_key_id: bounded(128), new_public_key: bounded(128), effective_at: utc, new_valid_to: utc, issued_at: utc,
+  signatures: filled(signatures),
+}, true);
+export const validAnchor = shape({
+  anchor_sequence: positive, sovereign_id: string, store_sequence: positive, entry_digest: string, anchored_at: utc,
+  previous_anchor_digest: absent(string), issued_by: string, signature: optional(signature),
+}, true);
+export const validArchive = shape({
+  archive_id: filled(bounded(128)), pack_id: bounded(128), from_sequence: positive, through_sequence: positive,
+  through_entry_digest: sha256, end_anchor_sequence: positive, manifest_sha256: sha256, location: bounded(1024),
+  archived_at: utc, recorded_by: absent(string), issuer_sovereign_id: string, issued_by: string,
+  signature: optional(signature),
+}, true);
+const packFile = shape({ path: bounded(256), sha256, bytes: nonnegative }, true);
+export const validManifest = shape({
+  format: filled(oneOf('gm.audit.pack')), format_version: filled(oneOf(1)), pack_id: filled(bounded(128)),
+  sovereign_id: bounded(256), created_at: utc, requested_by: absent(bounded(256)), from_sequence: positive,
+  through_sequence: positive, start_anchor_sequence: absent(positive), end_anchor_sequence: positive,
+  period_from: absent(utc), period_until: absent(utc), files: array(packFile), issued_by: string,
+  signature: optional(signature),
+}, true);
+/** The records an audit pack carries outside the store: what a verifier reads of each. */
+export const validPolicyRecord = shape({
+  policy_id: string, version: positive, valid_from: timestamp, valid_until: timestamp, issued_at: timestamp,
+  issued_by: string, issuer_sovereign_id: string, signature: optional(signature),
+});
+export const validAttestationRecord = shape({
+  attestation_id: string, issuer_sovereign_id: string, subject_id: string, issued_at: timestamp,
+  valid_from: timestamp, expires_at: timestamp, issued_by: string, signatures: filled(signatures),
+});
+export const validTreaty = shape({
+  treaty_id: string, issuer_sovereign_id: string, subject_sovereign_id: string, subject_public_keys: array(string),
+  issued_at: timestamp, valid_from: timestamp, expires_at: timestamp, issued_by: string, signatures: filled(signatures),
+});
+export const validFeed = shape({
+  feed_id: string, issuer_sovereign_id: string, sequence: nonnegative, issued_at: timestamp, issued_by: string,
+  signatures: filled(signatures),
+});

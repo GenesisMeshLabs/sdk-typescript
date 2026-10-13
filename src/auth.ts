@@ -193,6 +193,14 @@ export function jsonUtf8Size(value: unknown): number {
 }
 
 /**
+ * Compact sorted JSON with non-ASCII text kept as it is (`ensure_ascii=False`):
+ * the form of every file of an audit pack (v1.5.0), before its final newline.
+ */
+export function canonicalJsonUnescaped(value: unknown): string {
+  return encodeJson(value, false);
+}
+
+/**
  * Nesting a signed record sits under in what carries it: the list of a batch
  * request, or an export entry's quarantine record that holds it.
  */

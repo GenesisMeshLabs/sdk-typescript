@@ -10,6 +10,7 @@ import {
   verifyRevocationFeedSignature, verifyEvidenceEvents, parseExportLines, ConflictError,
   MemoryOutbox, MetadataRefusedError, executionDigest, ObservationRecorder,
   cancelByRotatingForward, urgentAction, reviewApprovalProblem, verifyReviewRecord, verifyRemediationRecord,
+  auditPackFiles, verifyAuditPack, packReasons, verifyStoreAnchors, checkEventsAgainstAnchors, verifyArchiveRecord,
 } from '../src/index.js';
 import type {
   BoundaryPolicy, BoundaryPolicyIntent, BreakGlassResult, EvidenceEvent, GovernedActionParams, RecordOutboxEntry,
@@ -26,6 +27,8 @@ suite('SDK against a live Python Network Authority', () => {
     baseUrl: string; signingKeyBase64: string; keyId: string; naPublicKey: string; outOfBand?: boolean;
     /** 1.4.0: the NA records remediations and reviews; `reviewer` is a privileged key of another holder. */
     remediation?: boolean; reviewer?: { keyId: string; signingKeyBase64: string };
+    /** 1.5.0: the key history, audit packs and archives; `rootPublicKey` signed the genesis block. */
+    audit?: boolean; rootPublicKey?: string;
   };
   let naPublicKey: string;
   let diagnostics = '';
@@ -483,4 +486,64 @@ suite('SDK against a live Python Network Authority', () => {
     expect((await gm.policy.deactivate(id, first.version)).active).toBe(false);
     expect(verifyBoundaryDecision((await gm.boundary.evaluate(request)).decision, params.verify)).toMatchObject({ accepted: false, reason: 'policy_binding_mismatch' });
   }, 30_000);
+
+  it('verifies the key history from the root key, an audit pack offline, and records its archive (1.5.0)', async () => {
+    if (!config.audit || !config.rootPublicKey) return; // a core before 1.5.0
+    // The key history, rebuilt from the root key held out of band.
+    const view = await gm.na.getKeyHistory();
+    expect(view.handover_seconds).toBe(300);
+    const history = await gm.na.verifiedKeyHistory(config.rootPublicKey);
+    expect(history.allKeys()).toEqual([naPublicKey]);
+    await expect(gm.na.verifiedKeyHistory(generateTestKeyPair().pubBase64)).rejects.toMatchObject({ code: 'genesis_root_mismatch' });
+
+    // Records signed by the NA verify with the key valid at their time.
+    const id = randomUUID();
+    const attestation = await gm.attestation.issue({ subject_id: id, roles: ['role:client'], claims: { capabilities: ['sdk.audit'] } });
+    expect(verifyAttestationSignature(attestation, history)).toBe(true);
+    const decision = (await gm.boundary.evaluate({ attestation_id: attestation.attestation_id, requested_capability: 'sdk.audit' })).decision;
+    expect(verifyBoundaryDecision(decision, { operatorPublicKeys: history, atRecordTime: true }).accepted).toBe(true);
+
+    // Anchor the head, then hold every anchor out of band, as an auditor does.
+    expect(['anchored', 'unchanged']).toContain((await gm.evidenceStore.anchor()).status);
+    const held = await gm.evidenceStore.allAnchors();
+    expect(verifyStoreAnchors(held, { naPublicKeys: history, sovereignId: history.sovereign_id }).failures).toEqual([]);
+    const status = await gm.evidenceStore.status();
+    expect(status.latest_anchor?.anchor_sequence).toBe(held[held.length - 1]!.anchor_sequence);
+    expect(status.unanchored_entries).toBe(0);
+    if (config.outOfBand) {
+      expect(typeof status.registry_healthy).toBe('boolean');
+      expect(Array.isArray(status.registry_problems)).toBe(true);
+      expect(status).toHaveProperty('policy_history_started');
+    }
+
+    // The whole store verifies against the key history and the anchors held.
+    const events: EvidenceEvent[] = [];
+    for await (const event of gm.evidenceStore.exportAll()) events.push(event);
+    const exported = verifyEvidenceEvents(events, { naPublicKeys: history, executorKeys: await gm.evidenceStore.listExecutorKeys() });
+    checkEventsAgainstAnchors(events, held, exported);
+    expect(exported.failures).toEqual([]);
+
+    // An audit pack of the store, verified offline from the root key and the anchors held.
+    const pack = await gm.evidenceStore.auditPack();
+    const files = auditPackFiles(pack);
+    const verification = verifyAuditPack(files, { rootPublicKey: config.rootPublicKey, heldAnchors: held });
+    expect(packReasons(verification)).toEqual([]);
+    expect(verification.verified).toBe(true);
+    expect(verification.range?.through_sequence).toBe(pack.manifest.through_sequence);
+    // A changed file is refused by name.
+    const tampered = { ...files, 'report.md': Buffer.from('# not the report\n') };
+    expect(packReasons(verifyAuditPack(tampered, { rootPublicKey: config.rootPublicKey, heldAnchors: held })))
+      .toEqual(['manifest_digest_mismatch']);
+
+    // Written to immutable storage and read back intact: the NA records the archive, once.
+    const location = `archive://sdk-e2e/packs/${pack.manifest.pack_id}`;
+    const recorded = await gm.evidenceStore.recordArchive(pack.manifest, location);
+    expect(recorded.status).toBe('recorded');
+    expect(recorded.archived_through_sequence).toBe(pack.manifest.through_sequence);
+    expect(verifyArchiveRecord(recorded.archive, history)).toBe(true);
+    expect((await gm.evidenceStore.recordArchive(pack.manifest, location)).status).toBe('duplicate');
+    const archives = await gm.evidenceStore.archives();
+    expect(archives.archives.map(a => a.pack_id)).toContain(pack.manifest.pack_id);
+    expect(archives.archived_through_sequence).toBe(pack.manifest.through_sequence);
+  }, 60_000);
 });

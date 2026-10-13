@@ -14,7 +14,7 @@
  * reference page "Canonical Form of Signed Records".
  */
 
-import { cloneJson, compareCodePoints } from './auth.js';
+import { canonicalJson, cloneJson, compareCodePoints, copyPythonFloats, defineMember, verifyCanonical } from './auth.js';
 import { CANONICAL_REGISTRY } from './canonical-registry.js';
 
 /**
@@ -201,4 +201,56 @@ export function nonCanonicalFields(model: string, record: unknown, path = ''): s
   };
   walk(model, record, path, true);
   return [...new Set(found)].sort(compareCodePoints);
+}
+
+/**
+ * The signed form of a registry root as received (v1.5.0, the reference's
+ * `received_canonical`): every field but its signature, the fields it omits
+ * when absent left out when null, or its fixed signed fields. Nothing unknown
+ * is dropped, so a signature over a field this SDK does not know still
+ * verifies here.
+ */
+export function receivedCanonical(model: string, record: Record<string, unknown>): string {
+  const s = spec(model);
+  const body: Record<string, unknown> = {};
+  if (s.canonical_fields !== undefined) {
+    for (const key of s.canonical_fields) defineMember(body, key, Object.hasOwn(record, key) ? record[key] : null);
+  } else {
+    const omit = new Set(s.omit_when_none ?? []);
+    for (const [key, value] of Object.entries(record)) {
+      if (key === s.signature_field || value === undefined || (omit.has(key) && value === null)) continue;
+      defineMember(body, key, value);
+    }
+  }
+  copyPythonFloats(record, body);
+  return canonicalJson(body);
+}
+
+/** The `sig` values a root's signature field holds: a list for `signatures`, one object for `signature`. */
+function signatureValues(model: string, record: Record<string, unknown>): string[] {
+  const field = spec(model).signature_field;
+  const raw = field ? record[field] : undefined;
+  const items = field === 'signatures' ? (Array.isArray(raw) ? raw : []) : (isRecord(raw) ? [raw] : []);
+  return items.filter(isRecord).map(s => s['sig']).filter((sig): sig is string => typeof sig === 'string');
+}
+
+/** True when a signature on `record` verifies over its received form under one of the keys (v1.5.0). */
+export function signedAsReceived(model: string, record: unknown, publicKeys: readonly string[]): boolean {
+  if (!isRecord(record)) return false;
+  const body = receivedCanonical(model, record);
+  return signatureValues(model, record).some(sig => verifyCanonical(body, sig, publicKeys));
+}
+
+/**
+ * Why a record must be refused for its form, or null (v1.5.0, the reference's
+ * `strict_refusal`): with a field this SDK does not know, or not in canonical
+ * form, `unknown_field` or `non_canonical_form` when its signature verifies
+ * over the record as received, and `invalid_signature` when it does not.
+ */
+export function strictRefusal(model: string, record: unknown, publicKeys: readonly string[]): string | null {
+  if (!isRecord(record)) return null;
+  const unknown = unknownFields(model, record).length > 0;
+  if (!unknown && nonCanonicalFields(model, record).length === 0) return null;
+  if (!signedAsReceived(model, record, publicKeys)) return 'invalid_signature';
+  return unknown ? 'unknown_field' : 'non_canonical_form';
 }

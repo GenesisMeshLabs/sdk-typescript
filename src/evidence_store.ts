@@ -1,3 +1,5 @@
+import type { StoreAnchor } from './anchors.js';
+import type { ArchiveRecord, AuditPackManifest, AuditPackResponse } from './audit-pack.js';
 import { checkMetadataOnly, SecretMaterialError } from './execution.js';
 import type { HttpTransport } from './client.js';
 import { executionDigest } from './canonical.js';
@@ -292,6 +294,49 @@ export interface ReviewDecided extends Omit<RemediationStatus, 'review'> {
 const OBSERVATION_BATCH = 100;
 
 /** Latest state of one resource, from its execution history and (1.3.1) its break-glass records. */
+/** One page of `GET /admin/evidence/anchors` (v1.2.0). */
+export interface AnchorPage {
+  count: number;
+  /** The next page's `after_anchor`; null on the last page. */
+  next_after_anchor: number | null;
+  anchors: StoreAnchor[];
+}
+
+/** `POST /admin/evidence/anchors`: the store's head signed now, or the latest anchor while it has not moved. */
+export interface AnchorResult {
+  anchor: StoreAnchor | null;
+  status: 'anchored' | 'unchanged';
+}
+
+/**
+ * The range of an audit pack (v1.5.0), every bound optional: the range widens
+ * to the anchors around it, and ends at the last anchor that fits.
+ */
+export interface AuditPackParams {
+  from_sequence?: number;
+  /** ISO 8601 with an offset: the range starts at the first entry recorded at or after it. */
+  since?: string;
+  until_sequence?: number;
+  /** ISO 8601 with an offset: the range ends at the last anchor signed at or before it. */
+  until?: string;
+}
+
+/** `GET /admin/evidence/archives` (v1.5.0). */
+export interface ArchiveList {
+  archives: ArchiveRecord[];
+  /** How far an unbroken run of archive records covers the store. */
+  archived_through_sequence: number;
+  /** Whether retention removes only what archives cover (`NA_RETENTION_REQUIRE_ARCHIVE`). */
+  require_archive: boolean;
+}
+
+/** `POST /admin/evidence/archives` (v1.5.0): `recorded` (201), or `duplicate` (200) for the same manifest. */
+export interface ArchiveResult {
+  status: 'recorded' | 'duplicate';
+  archive: ArchiveRecord;
+  archived_through_sequence: number;
+}
+
 export interface ResourceState {
   resource_id: string;
   /** The newest execution record's position on the resource chain; 0 when it has only break-glass records. */
@@ -1055,9 +1100,73 @@ export class EvidenceStoreClient {
     );
   }
 
-  /** Remove entries older than `olderThanDays` behind a signed checkpoint (admin, privileged). */
-  applyRetention(olderThanDays: number): Promise<RetentionResult> {
-    return this.http.adminPost<RetentionResult>('/admin/evidence/retention/apply', { older_than_days: olderThanDays });
+  /**
+   * Remove entries older than `olderThanDays` behind a signed checkpoint (admin, privileged).
+   * v1.5.0: `throughSequence` stops the prefix at a store position (`olderThanDays` may then be
+   * null), and while the NA requires archives (the default) nothing past what archive records
+   * cover is removed (`held_back.reason` `not_archived`).
+   */
+  applyRetention(olderThanDays: number | null, options: { throughSequence?: number } = {}): Promise<RetentionResult> {
+    const body: Record<string, number> = {};
+    if (olderThanDays !== null) body['older_than_days'] = olderThanDays;
+    if (options.throughSequence !== undefined) body['through_sequence'] = options.throughSequence;
+    return this.http.adminPost<RetentionResult>('/admin/evidence/retention/apply', body);
+  }
+
+  /** One page of the NA's signed store anchors, in order (admin, read tier; v1.2.0). */
+  anchors(params: { after_anchor?: number; limit?: number } = {}): Promise<AnchorPage> {
+    return this.http.adminGet<AnchorPage>('/admin/evidence/anchors', { ...params });
+  }
+
+  /**
+   * Every store anchor after `afterAnchor`, following pages (admin, read tier): the copies an
+   * auditor keeps outside the operator's reach and verifies exports and audit packs against.
+   */
+  async allAnchors(afterAnchor = 0): Promise<StoreAnchor[]> {
+    const anchors: StoreAnchor[] = [];
+    let after: number | null = afterAnchor;
+    while (after !== null) {
+      const page: AnchorPage = await this.anchors({ after_anchor: after, limit: MAX_PAGE });
+      if (page.next_after_anchor !== null && (!Number.isSafeInteger(page.next_after_anchor) || page.next_after_anchor <= after)) {
+        throw new Error('anchor page cursor did not advance');
+      }
+      anchors.push(...page.anchors);
+      after = page.next_after_anchor;
+    }
+    return anchors;
+  }
+
+  /** Sign the store's current head now (admin, read tier; v1.2.0). */
+  anchor(): Promise<AnchorResult> {
+    return this.http.adminPost<AnchorResult>('/admin/evidence/anchors', {}, true);
+  }
+
+  /**
+   * An audit pack (admin, read tier; v1.5.0): one range of the store between two anchors,
+   * everything its records cite, the key history and the manifest the NA signs. The response
+   * can be tens of megabytes (up to 50,000 entries). `auditPackFiles` turns it into the pack's
+   * files; `verifyAuditPack` verifies them offline from the root key and the anchors you hold.
+   * A pack is costly: the NA allows a few per hour (`RateLimitError`, `429`, beyond
+   * `NA_RATE_LIMIT_AUDIT_PACKS_PER_HOUR`), so the request is never replayed; raise
+   * `ClientOptions.timeout` for a large range.
+   */
+  auditPack(params: AuditPackParams = {}): Promise<AuditPackResponse> {
+    return this.http.adminPost<AuditPackResponse>('/admin/evidence/audit-pack', { ...params });
+  }
+
+  /** Archive records and how far they cover the store (admin, read tier; v1.5.0). */
+  archives(): Promise<ArchiveList> {
+    return this.http.adminGet<ArchiveList>('/admin/evidence/archives');
+  }
+
+  /**
+   * Record that a pack was written to immutable storage at `location` and read back intact
+   * (admin, privileged; v1.5.0). The NA checks the manifest is its own, ends at its anchor of
+   * the last entry and continues the archives without a gap, then appends a signed archive record.
+   * The same manifest again answers `duplicate`.
+   */
+  recordArchive(manifest: AuditPackManifest, location: string): Promise<ArchiveResult> {
+    return this.http.adminPost<ArchiveResult>('/admin/evidence/archives', { manifest, location }, true);
   }
 
   /** The most recent retention checkpoint in the store, or null (admin). */

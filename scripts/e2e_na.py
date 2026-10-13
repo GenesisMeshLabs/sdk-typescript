@@ -3,6 +3,7 @@
 Only generated test credentials are emitted, to the parent test process. The
 real HTTP routes, signatures, policy enforcement and SQLite store are used.
 """
+import importlib.util
 import inspect
 import json
 import signal
@@ -56,7 +57,10 @@ def main():
         config = {"baseUrl": f"http://127.0.0.1:{server.server_port}",
                   "signingKeyBase64": operator.private_key_b64, "keyId": "ops",
                   "naPublicKey": root.public_key_b64, "outOfBand": "evidence_out_of_band" in options,
-                  "remediation": remediation}
+                  "remediation": remediation,
+                  # 1.5.0: the key history, audit packs and archives; the root key signed the genesis block.
+                  "audit": importlib.util.find_spec("genesis_mesh.trust.key_succession") is not None,
+                  "rootPublicKey": root.public_key_b64}
         if remediation:
             config["reviewer"] = {"keyId": "ops-2", "signingKeyBase64": reviewer.private_key_b64}
         print(json.dumps(config), flush=True)

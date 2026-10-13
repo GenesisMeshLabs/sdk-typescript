@@ -17,11 +17,13 @@ function freeze<T>(value: T): T {
 export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
   "version": 2,
   "entry_kinds": [
+    "archive",
     "break_glass",
     "decision",
     "execution",
     "judgement",
     "justification",
+    "key_succession",
     "observation",
     "quarantine",
     "registry",
@@ -91,6 +93,30 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "version": null
       }
     },
+    "ArchiveRecord": {
+      "fields": {
+        "archive_id": null,
+        "archived_at": "timestamp",
+        "end_anchor_sequence": null,
+        "from_sequence": null,
+        "issued_by": null,
+        "issuer_sovereign_id": null,
+        "location": null,
+        "manifest_sha256": null,
+        "pack_id": null,
+        "recorded_by": null,
+        "signature": {
+          "object": "Signature"
+        },
+        "through_entry_digest": null,
+        "through_sequence": null
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "recorded_by"
+      ]
+    },
     "AttestationBinding": {
       "fields": {
         "attestation_digest": null,
@@ -98,6 +124,43 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "issuer_sovereign_id": null,
         "revocation_seq_checked": null,
         "subject_id": null
+      }
+    },
+    "AuditPackManifest": {
+      "fields": {
+        "created_at": "timestamp",
+        "end_anchor_sequence": null,
+        "files": {
+          "list": "PackFile"
+        },
+        "format": null,
+        "format_version": null,
+        "from_sequence": null,
+        "issued_by": null,
+        "pack_id": null,
+        "period_from": "timestamp",
+        "period_until": "timestamp",
+        "requested_by": null,
+        "signature": {
+          "object": "Signature"
+        },
+        "sovereign_id": null,
+        "start_anchor_sequence": null,
+        "through_sequence": null
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "requested_by",
+        "start_anchor_sequence",
+        "period_from",
+        "period_until"
+      ]
+    },
+    "BootstrapAnchor": {
+      "fields": {
+        "endpoint": null,
+        "id": null
       }
     },
     "BoundaryDecision": {
@@ -394,6 +457,29 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "result": null
       }
     },
+    "GenesisBlock": {
+      "fields": {
+        "allowed_crypto_suites": null,
+        "allowed_transports": null,
+        "bootstrap_anchors": {
+          "list": "BootstrapAnchor"
+        },
+        "network_authority": {
+          "object": "NetworkAuthority"
+        },
+        "network_name": null,
+        "network_version": null,
+        "policy_manifest": {
+          "object": "PolicyManifestRef"
+        },
+        "root_public_key": null,
+        "signatures": {
+          "list": "Signature"
+        }
+      },
+      "root": true,
+      "signature_field": "signatures"
+    },
     "JudgementRecord": {
       "fields": {
         "action": null,
@@ -458,6 +544,29 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
       "root": true,
       "signature_field": "signature"
     },
+    "KeySuccessionRecord": {
+      "fields": {
+        "effective_at": "timestamp",
+        "issued_at": "timestamp",
+        "key_sequence": null,
+        "new_key_id": null,
+        "new_public_key": null,
+        "new_valid_to": "timestamp",
+        "previous_key_id": null,
+        "previous_public_key": null,
+        "previous_succession_digest": null,
+        "signatures": {
+          "list": "Signature"
+        },
+        "sovereign_id": null,
+        "succession_id": null
+      },
+      "root": true,
+      "signature_field": "signatures",
+      "omit_when_none": [
+        "previous_succession_digest"
+      ]
+    },
     "MembershipAttestation": {
       "fields": {
         "attestation_id": null,
@@ -477,6 +586,13 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
       },
       "root": true,
       "signature_field": "signatures"
+    },
+    "NetworkAuthority": {
+      "fields": {
+        "public_key": null,
+        "valid_from": "timestamp",
+        "valid_to": "timestamp"
+      }
     },
     "ObservationRecord": {
       "fields": {
@@ -508,6 +624,13 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "version_id"
       ]
     },
+    "PackFile": {
+      "fields": {
+        "bytes": null,
+        "path": null,
+        "sha256": null
+      }
+    },
     "PolicyBinding": {
       "fields": {
         "context_digest": null,
@@ -533,6 +656,12 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "passed": null,
         "policy_id": null,
         "policy_version": null
+      }
+    },
+    "PolicyManifestRef": {
+      "fields": {
+        "hash": null,
+        "url": null
       }
     },
     "PolicySelector": {
@@ -566,6 +695,35 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
       "omit_when_none": [
         "resource_id"
       ]
+    },
+    "RecognitionTreaty": {
+      "fields": {
+        "expires_at": "timestamp",
+        "issued_at": "timestamp",
+        "issued_by": null,
+        "issuer_sovereign_id": null,
+        "metadata": "open",
+        "scope": {
+          "object": "RecognitionTreatyScope"
+        },
+        "signatures": {
+          "list": "Signature"
+        },
+        "status": null,
+        "subject_public_keys": null,
+        "subject_sovereign_id": null,
+        "treaty_id": null,
+        "valid_from": "timestamp"
+      },
+      "root": true,
+      "signature_field": "signatures"
+    },
+    "RecognitionTreatyScope": {
+      "fields": {
+        "accepted_statuses": null,
+        "allowed_roles": null,
+        "claims": "open"
+      }
     },
     "RegistryRecord": {
       "fields": {

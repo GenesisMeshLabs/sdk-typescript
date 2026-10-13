@@ -47,6 +47,7 @@ execution recording, evidence-store queries and offline verification.
 - [High availability: failover, readiness and conflicts](docs/high-availability.md)
 - [Changes outside the controlled path: observations and break-glass](docs/out-of-band-changes.md) (1.3.0)
 - [Remediation, reviews and urgent changes](docs/remediation-and-reviews.md) (1.4.0)
+- [Key succession, audit packs and independent verification](docs/audit-packs.md) (1.5.0)
 
 `governedAction` requires verification keys and explicit expected policies. It
 verifies the signed response and its request context before calling the supplied
@@ -73,6 +74,13 @@ decider's signed request is embedded in the review and verifies offline
 ordinary capability, the emergency capability on a DENY, or break-glass
 naming the emergency capability when the NA does not answer: it is never
 blocked, and always judged.
+
+From 1.5.0 the NA can replace its key: verify its key history from the root
+key you hold (`gm.na.verifiedKeyHistory(rootPublicKey)`) and pass it wherever
+NA keys are taken, so each record verifies with the key valid at its own
+time. An auditor asks for an audit pack (`evidenceStore.auditPack()`) and
+verifies it offline with `verifyAuditPack`, from the root key and the anchors
+it holds (`evidenceStore.allAnchors()`).
 
 ## Sub-clients
 
@@ -256,7 +264,9 @@ console.log(dv.valid, dv.violations);
 The SDK verifies boundary decisions, evidence exports, and from 0.61.0
 agreements, data license policies and data access intents offline, and signs
 data access intents with `createDataAccessIntent`. See
-[docs/offline-verification.md](docs/offline-verification.md).
+[docs/offline-verification.md](docs/offline-verification.md). From 1.5.0 it
+verifies the NA's key history, store anchors and audit packs too; see
+[docs/audit-packs.md](docs/audit-packs.md).
 
 ## Raw admin calls
 

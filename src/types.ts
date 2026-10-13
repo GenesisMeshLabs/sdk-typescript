@@ -228,7 +228,11 @@ export type BoundaryVerificationReason =
   | 'attestation_binding_mismatch'
   | 'attestation_binding_missing'
   | 'unknown_field'
-  | 'non_canonical_form';
+  | 'non_canonical_form'
+  // v1.5.0: signed by a key of the NA's history, but not the one valid when the decision was made.
+  | 'na_key_not_valid_at_time'
+  // v1.5.0: valid longer than the key that signed it may vouch for.
+  | 'decision_outlives_key';
 
 export interface BoundaryVerification {
   accepted: boolean;
@@ -733,7 +737,10 @@ export type EntryKind =
   | 'registry'
   // v1.4.0: remediations and reviews, written only with EVIDENCE_REMEDIATION=on.
   | 'remediation'
-  | 'review';
+  | 'review'
+  // v1.5.0: NA key successions and archives (never pruned: carried past retention).
+  | 'key_succession'
+  | 'archive';
 
 /** Store envelope; every entry commits to the previous one. */
 export interface EvidenceStoreEntry {
@@ -843,6 +850,17 @@ export interface EvidenceVerificationFailure {
   detail: string;
 }
 
+/** How a run of entries ties to the anchors held (`EvidenceStoreVerification.anchors`, v1.5.0). */
+export interface AnchorSummary {
+  anchors_checked: number;
+  anchors_matched: number;
+  anchors_before_export: number;
+  anchors_after_export: number;
+  linked_start: boolean;
+  anchored_through_sequence: number | null;
+  unanchored_entries: number;
+}
+
 export interface EvidenceStoreVerification {
   verified: boolean;
   checked_entries: number;
@@ -856,7 +874,12 @@ export interface EvidenceStoreVerification {
   /** v1.4.0, present when nonzero. */
   remediations?: number;
   reviews?: number;
+  /** v1.5.0, present when nonzero. */
+  key_successions?: number;
+  archives?: number;
   failures: EvidenceVerificationFailure[];
+  /** Set by `checkEventsAgainstAnchors` (v1.5.0); absent otherwise. */
+  anchors?: AnchorSummary;
   /** Findings that do not fail verification (v1.2.0), such as `unsigned_field`. */
   warnings?: EvidenceVerificationFailure[];
 }
@@ -890,8 +913,20 @@ export interface EvidenceStoreStatus {
   rejections?: number;
   active_executor_keys?: number;
   retention_checkpoint: number | null;
+  /** v1.2.0, with the store on: the latest anchor, null before the first. */
+  latest_anchor?: { anchor_sequence: number; store_sequence: number; anchored_at: string } | null;
+  /** v1.2.0: entries after the latest anchor. */
+  unanchored_entries?: number;
+  /** v1.3.1: why this instance cannot anchor (the latest anchor is dated ahead of its clock); absent when it can. */
+  anchoring_blocked?: string;
   /** v1.3.0: observations and break-glass records not judged yet (they hold retention back). */
   unjudged_records?: number;
+  /** v1.3.1, with the out-of-band records on: when the policy history starts, null before it does. */
+  policy_history_started?: string | null;
+  /** v1.3.1, with the out-of-band records on: whether the registry can be judged on. */
+  registry_healthy?: boolean;
+  /** v1.3.1, with the out-of-band records on: what keeps the registry from being healthy. */
+  registry_problems?: string[];
   /** v1.4.0: `on` when the NA records remediations and reviews. */
   evidence_remediation?: string;
   /** v1.4.0, with the records on: the number of remediation states by state. */
@@ -920,6 +955,11 @@ export interface ExecutorKeyState {
 export interface RetentionResult {
   removed_count: number;
   checkpoint: RetentionCheckpoint | null;
+  /**
+   * v1.3.1: why retention stopped short, when it did: records not judged yet, or (v1.5.0)
+   * `not_archived`, entries no archive covers yet (with `archived_through_sequence`).
+   */
+  held_back?: { reason: string; message: string; [key: string]: unknown };
 }
 
 /** Rejection codes from `POST /evidence/execution` (422, or 409 for `evidence_conflict`). */
@@ -988,9 +1028,30 @@ export interface Readiness {
   database: ReadinessDatabase;
   signing_key: ReadinessSigningKey;
   rate_limiter: 'memory' | 'database' | string;
+  /**
+   * v1.5.0: this instance's NA key. `signing`; `pending`, a new key started before its succession
+   * takes effect (`signs_from`); `stopped`, succeeded or expired. Anything but `signing` is not ready.
+   */
+  na_key?: { state: 'signing' | 'pending' | 'stopped' | string; key_sequence?: number; signs_from?: string };
   /** The SQLite path, or the PostgreSQL URL without its password (ready responses only). */
   db_path?: string;
 }
+
+/**
+ * Error codes of the 1.5.0 routes (`GenesisMeshError.code`): key successions
+ * (`POST /admin/na/succession`), the NA key, audit packs (`429` beyond
+ * `NA_RATE_LIMIT_AUDIT_PACKS_PER_HOUR`), archives and retention.
+ */
+export type AuditErrorCode =
+  | 'invalid_succession' | 'succession_after_expiry' | 'succession_backdated' | 'succession_chain_break'
+  | 'succession_invalid_new_key_signature' | 'succession_invalid_root_signature' | 'succession_key_reused'
+  | 'succession_not_increasing' | 'succession_pending' | 'succession_sovereign_mismatch' | 'succession_times_invalid'
+  | 'na_key_expired' | 'na_key_not_yet_effective' | 'na_key_succeeded'
+  | 'audit_pack_not_anchored' | 'audit_pack_too_large' | 'invalid_audit_pack' | 'evidence_store_incomplete'
+  | 'rate_limit_exceeded'
+  | 'archive_anchor_mismatch' | 'archive_conflict' | 'archive_manifest_invalid' | 'archive_not_contiguous'
+  | 'archive_pack_unknown' | 'archive_pack_unverified' | 'invalid_archive'
+  | 'invalid_retention';
 
 /** Readiness of one configured endpoint, probed directly (no failover). */
 export interface EndpointReadiness {
