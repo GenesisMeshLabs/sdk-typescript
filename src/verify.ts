@@ -42,8 +42,9 @@ import {
   reviewApprovalProblem, reviewHolderProblem, rotationProblem, type RemediationRecord, type ReviewRecord,
 } from './remediation.js';
 import {
-  grantRecordDigest, nextPreviousUse, tokenSignatureValid, useProblem, validGrant, validGrantRevocation, validGrantUse,
-  type CapabilityGrant, type GrantExecutionEvidence, type GrantRevocationRecord, type PreviousUse,
+  continuesChain, grantRecordDigest, nextPreviousUse, tokenSignatureValid, useProblem, validGrant, validGrantRevocation,
+  validGrantUse, type CapabilityGrant, type GrantExecutionEvidence, type GrantRevocationRecord, type PreviousUse,
+  type UseChainHead,
 } from './grants.js';
 import {
   NAKeyHistory, RECORD_TIME_TOLERANCE_SECONDS, SUCCESSION_MIN_LEAD_SECONDS, decisionOutlivesKey, naKeysAt, naSignatureAt,
@@ -539,13 +540,19 @@ export function verifyEvidenceEvents(
   // rotations remediations already cite.
   const versions = new Map<string, string | null>();
   const cited = new Set<string>();
-  // v1.6.0: grants by ID (the record and its digest as received), when each was revoked (the first
-  // authentic revocation), the head of each grant's use chain (its position and state), and each
-  // use's digest and time by grant and position.
+  // v1.6.0: grants by ID (the record and its digest as received; an authentic grant only), when each
+  // was revoked (the first authentic revocation), the head of each grant's use chain (an admitted use,
+  // or a quarantined one that continued it), its last admitted use, how many uses were admitted (when
+  // the chain is held from its first use), each chain use's digest and time by grant and position, and
+  // the IDs of uses and of the other records observations match by ID.
   const grantsHeld = new Map<string, { grant: CapabilityGrant; digest: string }>();
   const revoked = new Map<string, string>();
-  const lastUse = new Map<string, { sequence: number; previous: PreviousUse }>();
+  const chainHeads = new Map<string, UseChainHead>();
+  const lastAdmitted = new Map<string, PreviousUse>();
+  const admittedUses = new Map<string, number>();
   const useHeads = new Map<string, { digest: string; executed_at: string }>();
+  const useIds = new Set<string>();
+  const otherMatchable = new Set<string>();
   let firstSequence: number | null = null;
   let fromStart = false;
   let prev: EvidenceEvent['entry'] | null = null;
@@ -752,6 +759,9 @@ export function verifyEvidenceEvents(
         }
         lastExec.set(ev.decision_id, ev);
         matchable.add(ev.evidence_id);
+        // v1.6.0: observations match a grant use, execution evidence and a break-glass record by ID.
+        if (useIds.has(ev.evidence_id)) fail(seq, 'duplicate_record', `execution ${ev.evidence_id} is a grant use's ID`);
+        otherMatchable.add(ev.evidence_id);
         executed.set(ev.evidence_id, {
           resource: ev.resource_id ?? null, sequence: seq, executed_at: micros(ev.executed_at),
           executor: ev.executor_sovereign_id, decision_id: ev.decision_id,
@@ -812,6 +822,8 @@ export function verifyEvidenceEvents(
         } else {
           counts.break_glass += 1;
           matchable.add(recordId);
+          if (useIds.has(recordId)) fail(seq, 'duplicate_record', `break_glass ${recordId} is a grant use's ID`);
+          otherMatchable.add(recordId);
         }
         break;
       }
@@ -852,10 +864,13 @@ export function verifyEvidenceEvents(
         break;
       }
       case 'quarantine': {
+        const failures = target.failures.length;
         naSignature(keys => outOfBandSigned('quarantine', payload, keys, executorKeys), 'QuarantineRecord');
+        const authentic = target.failures.length === failures;
         counts.quarantined += 1;
         const quarantine = payload as unknown as QuarantineRecord;
         if (payloadDigest(quarantine.record) !== quarantine.record_digest) fail(seq, 'quarantine_digest_mismatch');
+        else if (authentic && quarantine.record_kind === 'grant_execution') quarantinedUse(quarantine.record);
         break;
       }
       case 'registry': {
@@ -904,10 +919,15 @@ export function verifyEvidenceEvents(
         break;
       // v1.6.0: pre-issued grants (src/grants.ts).
       case 'grant': {
+        const failures = target.failures.length;
         naSignature(keys => outOfBandSigned('grant', payload, keys, executorKeys), 'CapabilityGrant');
         counts.grants += 1;
-        const grant = payload as unknown as CapabilityGrant;
-        grantsHeld.set(grant.grant_id, { grant, digest: grantRecordDigest('CapabilityGrant', payload) });
+        // A grant whose signature fails is not held: its uses and revocation are checked as for a grant
+        // the run does not hold.
+        if (target.failures.length === failures) {
+          const grant = payload as unknown as CapabilityGrant;
+          grantsHeld.set(grant.grant_id, { grant, digest: grantRecordDigest('CapabilityGrant', payload) });
+        }
         break;
       }
       case 'grant_revocation': {
@@ -935,13 +955,37 @@ export function verifyEvidenceEvents(
         }
         counts.grant_executions += 1;
         checkGrantUseEntry(seq, entry, payload as unknown as GrantExecutionEvidence, payload, fail, {
-          grantsHeld, revoked, lastUse, useHeads, resourceHeads, executorKeys, naKeys,
+          grantsHeld, revoked, chainHeads, lastAdmitted, admittedUses, useHeads, resourceHeads, executorKeys, naKeys,
           chained, pack, contiguous, fromStart,
         });
+        if (otherMatchable.has(recordId)) fail(seq, 'duplicate_record', `grant_execution ${recordId} is another record's ID`);
+        useIds.add(recordId);
         matchable.add(recordId);
         break;
       }
     }
+  };
+
+  /**
+   * v1.6.0: a quarantined use (signed by its grant's bearer key, when the run holds the grant) that
+   * continues its grant's use chain is the chain's head: the next use may link to it.
+   */
+  const quarantinedUse = (raw: unknown) => {
+    if (!validGrantUse(raw)) return;
+    const use = raw as GrantExecutionEvidence;
+    const held = grantsHeld.get(use.grant_id);
+    if (held !== undefined) {
+      const sig = use.signature;
+      if (!sig || sig.key_id !== held.grant.bearer_key_id
+        || !signedBy(outOfBandCanonical(use), sig, [held.grant.bearer_public_key])) return;
+    }
+    const head = chainHeads.get(use.grant_id)
+      ?? (fromStart || pack || use.use_sequence === 1 ? { use_sequence: 0, digest: null } : undefined);
+    if (head === undefined || !continuesChain(use, head)) return;
+    const digest = grantRecordDigest('GrantExecutionEvidence', use);
+    chainHeads.set(use.grant_id, { use_sequence: use.use_sequence, digest });
+    useHeads.set(`${use.grant_id}\u0000${use.use_sequence}`, { digest, executed_at: use.executed_at });
+    if (use.use_sequence === 1 && !admittedUses.has(use.grant_id)) admittedUses.set(use.grant_id, 0);
   };
 
   const counts = Object.fromEntries(COUNTED.map(name => [name, 0])) as Counts;
@@ -1150,7 +1194,9 @@ function checkReviewEntry(
 interface GrantRun {
   grantsHeld: ReadonlyMap<string, { grant: CapabilityGrant; digest: string }>;
   revoked: ReadonlyMap<string, string>;
-  lastUse: Map<string, { sequence: number; previous: PreviousUse }>;
+  chainHeads: Map<string, UseChainHead>;
+  lastAdmitted: Map<string, PreviousUse>;
+  admittedUses: Map<string, number>;
   useHeads: Map<string, { digest: string; executed_at: string }>;
   resourceHeads: Map<string, ResourceHead>;
   executorKeys: Record<string, ExecutorKeyInfo>;
@@ -1163,14 +1209,18 @@ interface GrantRun {
 }
 
 /**
- * v1.6.0: a grant use names a grant the run holds when it holds the store
- * from its start (`grant_missing`; in a pack `cited_record_missing`), with its
- * digest (`grant_mismatch`), signed by its bearer key (`grant_bearer_mismatch`);
- * the uses of a grant form a chain (`grant_use_chain_break`); then the use
- * rules (`useProblem`, with the admission codes) with what the run holds. A
- * use takes the next position of its resource's chain, which the NA assigns in
- * the envelope (`resource_chain_break`); one without a resource has none
- * (`envelope_mismatch`).
+ * v1.6.0: the uses of a grant form a chain, whose head may be a quarantined use
+ * that continued it (`grant_use_chain_break`); a use names a grant the run
+ * holds when it holds the store from its start (`grant_missing`; in a pack
+ * `cited_record_missing`), is signed by its bearer key
+ * (`grant_bearer_mismatch`), within the key's resource prefix
+ * (`grant_use_out_of_scope`), and names the grant's digest (`grant_mismatch`);
+ * then the use rules (`useProblem`, with the admission codes) with what the
+ * run holds: the budget counts admitted uses when the run holds the chain from
+ * its first use, and the order and time rules compare a use with the last
+ * admitted one. A use takes the next position of its resource's chain, which
+ * the NA assigns in the envelope (`resource_chain_break`); one without a
+ * resource has none (`envelope_mismatch`).
  */
 function checkGrantUseEntry(
   seq: number,
@@ -1183,38 +1233,40 @@ function checkGrantUseEntry(
   const received = grantRecordDigest('GrantExecutionEvidence', payload);
   const held = run.grantsHeld.get(use.grant_id);
   const grant = held?.grant ?? null;
+  const sig = use.signature;
+  const signer = keyNamed(run.executorKeys, sig?.key_id);
+  const head = run.chainHeads.get(use.grant_id) ?? (run.fromStart ? { use_sequence: 0, digest: null } : undefined);
+  if (run.chained && head !== undefined && !continuesChain(use, head)) fail(seq, 'grant_use_chain_break', use.grant_id);
   if (held === undefined) {
     if (run.pack && run.chained) fail(seq, 'cited_record_missing', `grant ${use.grant_id}`);
     else if (run.chained && run.contiguous && run.fromStart) fail(seq, 'grant_missing', use.grant_id);
-  } else {
-    const sig = use.signature;
-    const bearer = keyNamed(run.executorKeys, sig?.key_id);
-    if (!sig || sig.key_id !== held.grant.bearer_key_id || use.executor_sovereign_id !== held.grant.bearer_sovereign_id
-      || (bearer !== undefined && bearer.public_key !== held.grant.bearer_public_key)) {
-      fail(seq, 'grant_bearer_mismatch', use.use_id);
-    }
-    if (use.grant_digest !== held.digest) fail(seq, 'grant_mismatch', use.grant_id);
+  } else if (!sig || sig.key_id !== held.grant.bearer_key_id || use.executor_sovereign_id !== held.grant.bearer_sovereign_id
+    || (signer !== undefined && signer.public_key !== held.grant.bearer_public_key)) {
+    fail(seq, 'grant_bearer_mismatch', use.use_id);
   }
-  const head = run.lastUse.get(use.grant_id);
-  if (run.chained && (head !== undefined || run.fromStart) && (
-    use.use_sequence !== (head ? head.sequence + 1 : 1)
-    || (use.prev_use_digest ?? null) !== (head ? head.previous.digest : null))) {
-    fail(seq, 'grant_use_chain_break', use.grant_id);
+  const prefix = signer?.resource_prefix ?? null;
+  if (prefix !== null && !(use.resource_id ?? '').startsWith(prefix)) {
+    fail(seq, 'grant_use_out_of_scope', `signing key covers only resources starting with ${prefix}`);
   }
-  const previous = head !== undefined && head.sequence === use.use_sequence - 1 ? head.previous : null;
+  if (held !== undefined && use.grant_digest !== held.digest) fail(seq, 'grant_mismatch', use.grant_id);
+  if (use.use_sequence === 1 && !run.admittedUses.has(use.grant_id)) run.admittedUses.set(use.grant_id, 0);
   const token = use.time_token;
   const tokenKeys = naKeysAt(run.naKeys, token.issued_at);
   if (run.chained) {
     const named = token.use_sequence ? run.useHeads.get(`${use.grant_id}\u0000${token.use_sequence}`) ?? null : null;
     const problem = useProblem(use, {
-      grant, previous, tokenHead: named, tokenKeys, rawToken: payload['time_token'],
-      revokedAt: run.revoked.get(use.grant_id) ?? null, recordedAt: entry.recorded_at,
+      grant, previous: run.lastAdmitted.get(use.grant_id) ?? null, admitted: run.admittedUses.get(use.grant_id) ?? null,
+      tokenHead: named, tokenKeys, rawToken: payload['time_token'], revokedAt: run.revoked.get(use.grant_id) ?? null,
+      recordedAt: entry.recorded_at,
     });
     if (problem !== null) fail(seq, problem.code, problem.detail);
   } else if (!tokenSignatureValid(payload['time_token'], tokenKeys)) {
     fail(seq, 'grant_time_token_invalid', use.use_id);
   }
-  run.lastUse.set(use.grant_id, { sequence: use.use_sequence, previous: nextPreviousUse(use, received, previous) });
+  run.chainHeads.set(use.grant_id, { use_sequence: use.use_sequence, digest: received });
+  run.lastAdmitted.set(use.grant_id, nextPreviousUse(use));
+  const admitted = run.admittedUses.get(use.grant_id);
+  if (admitted !== undefined) run.admittedUses.set(use.grant_id, admitted + 1);
   run.useHeads.set(`${use.grant_id}\u0000${use.use_sequence}`, { digest: received, executed_at: use.executed_at });
   if (use.resource_id !== undefined && use.resource_id !== null) {
     const resourceHead = run.resourceHeads.get(use.resource_id);

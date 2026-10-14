@@ -7,6 +7,7 @@ import {
   envelopeProblem, grantDigest, grantRecordCanonical, grantUseDigest, inRange, judgementState, normalizeNumber,
   parseExportLines, parseJson, pythonTimestamp, recordOutboxEntry, renderReport, revocationFeedCanonical, scalarEquals,
   seedSigner, signCanonical, signGrantUse, signTimeTokenRequest, useProblem, verifyCapabilityGrant, verifyEvidenceEvents,
+  continuesChain, validGrantUse, isRetryableConflict, ConflictError,
   verifyGrantRevocation, verifyGrantUse, verifyRevocationFeedSignature, verifyTimeToken, verifyTimeTokenRequest,
 } from '../src/index.js';
 import type {
@@ -129,6 +130,10 @@ describe('the signed records (v1.6.0)', () => {
     expect(use.grant_digest).toBe(grantDigest(grant));
     expect(use).not.toHaveProperty('prev_use_digest');
     expect(use.time_token).not.toHaveProperty('use_head_digest');
+    expect(verifyGrantRevocation(await naSigned<GrantRevocationRecord>({
+      revocation_id: 'r-2', grant_id: grant.grant_id, grant_digest: grantDigest(grant), reason: 'agreement_untrusted',
+      revoked_at: at(600), issuer_sovereign_id: 'sovereign-c', issued_by: 'na-key',
+    }), [NA.pubBase64])).toBe(true);
     const revocation = await naSigned<GrantRevocationRecord>({
       revocation_id: 'r-1', grant_id: grant.grant_id, grant_digest: grantDigest(grant), reason: 'operator',
       revoked_at: at(600), issuer_sovereign_id: 'sovereign-c', issued_by: 'na-key',
@@ -170,14 +175,37 @@ describe('the signed records (v1.6.0)', () => {
 
   it('checks a use offline as the NA does, naming the first rule it breaks', async () => {
     const { grant, token, use } = await world();
-    const check = { grant, previous: null, tokenHead: null, tokenKeys: [NA.pubBase64], revokedAt: null, recordedAt: at(300) };
+    const check = {
+      grant, previous: null, admitted: 0, tokenHead: null, tokenKeys: [NA.pubBase64], revokedAt: null, recordedAt: at(300),
+    };
     expect(useProblem(use, check)).toBeNull();
     expect(useProblem(use, { ...check, tokenKeys: [BEARER.pubBase64] })?.code).toBe('grant_time_token_invalid');
     expect(useProblem(use, { ...check, revokedAt: at(300) })?.code).toBe('grant_revoked');
     expect(useProblem(use, { ...check, recordedAt: at(-1) })?.code).toBe('grant_use_in_future');
     expect(useProblem({ ...use, capability: 'x' }, { ...check, revokedAt: at(0) })?.code).toBe('grant_capability_mismatch');
-    expect(useProblem({ ...use, executed_at: at(-1) }, { ...check, grant: null })?.code).toBe('grant_use_before_time_token');
     expect(useProblem({ ...use, time_token: token }, check)).toBeNull();
+    // 1.6.0 review fixes: up to 300 seconds before the token is allowed; the budget counts admitted uses only.
+    expect(useProblem({ ...use, executed_at: at(-300) }, { ...check, grant: null })).toBeNull();
+    expect(useProblem({ ...use, executed_at: at(-301) }, { ...check, grant: null })?.code).toBe('grant_use_before_time_token');
+    expect(useProblem({ ...use, use_sequence: 4 }, { ...check, admitted: 2 })?.code).toBe('grant_time_token_exhausted');
+    expect(useProblem({ ...use, use_sequence: 3 }, { ...check, admitted: 3 })?.code).toBe('grant_budget_exhausted');
+    expect(useProblem({ ...use, use_sequence: 3 }, { ...check, admitted: null, recordedAt: at(400) })?.code)
+      .toBe('grant_time_token_exhausted');
+    expect(useProblem({ ...use, use_sequence: 2 }, { ...check, admitted: null })).toBeNull();
+    // A token issued before the grant is not the grant's.
+    const early = await naSigned<TimeToken>({ ...token, issued_at: at(-1), signature: undefined });
+    expect(useProblem({ ...use, time_token: early }, check)?.code).toBe('grant_time_token_invalid');
+    expect(useProblem({ ...use, time_token: early }, { ...check, grant: null })).toBeNull();
+  });
+
+  it('continues a chain from its head, admitted or quarantined, and refuses a use_id that is not a UUID', async () => {
+    const { use } = await world();
+    expect(continuesChain(use, { use_sequence: 0, digest: null })).toBe(true);
+    expect(continuesChain(use, { use_sequence: 1, digest: grantUseDigest(use) })).toBe(false);
+    expect(continuesChain({ use_sequence: 2, prev_use_digest: grantUseDigest(use) }, { use_sequence: 1, digest: grantUseDigest(use) })).toBe(true);
+    expect(validGrantUse(use)).toBe(true);
+    expect(validGrantUse({ ...use, use_id: use.use_id.toUpperCase() })).toBe(false);
+    expect(validGrantUse({ ...use, use_id: 'use-1' })).toBe(false);
   });
 });
 
@@ -302,25 +330,32 @@ describe('grant uses in the record outbox (v1.6.0)', () => {
     expect(JSON.parse(String((fetch.mock.calls[1] as [string, RequestInit])[1].body))).toEqual({ evidence: JSON.parse(canonicalJson(use)) });
   });
 
-  it('dead-letters a use the NA refuses for good, retries a chain gap, and dead-letters a gap behind a dead letter', async () => {
+  it('dead-letters a use the NA quarantines, retries a chain gap and a use dated ahead, and still sends the uses after a quarantined one', async () => {
     const { grant, token, use } = await world();
     const second = await signGrantUse({
       grant, use_sequence: 2, previous: use, capability: 'secret.rotate', request_parameters: { lifetime_days: 30 },
       executed_at: at(400), time_token: token, outcome: 'success',
     }, bearerSigner);
     expect(RECORD_PERMANENT_REFUSALS.has('grant_envelope_mismatch')).toBe(true);
+    expect(RECORD_PERMANENT_REFUSALS.has('grant_use_out_of_scope')).toBe(true);
     expect(RECORD_PERMANENT_REFUSALS.has('grant_use_chain_gap')).toBe(false);
+    expect(RECORD_PERMANENT_REFUSALS.has('grant_use_in_future')).toBe(false);
     const gm = new GenesisMeshClient({ audience: 'TEST', baseUrl: 'http://na', recordOutbox: new MemoryOutbox<RecordOutboxEntry>() });
     const http = (gm.evidenceStore as unknown as { http: { publicPost: (...a: unknown[]) => Promise<unknown> } }).http;
     const post = jest.spyOn(http, 'publicPost')
       .mockRejectedValueOnce(new ValidationError('outside', 'grant_use_chain_gap'))
       .mockRejectedValueOnce(new ValidationError('refused', 'grant_envelope_mismatch'))
-      .mockRejectedValueOnce(new ValidationError('gap', 'grant_use_chain_gap'));
+      .mockRejectedValueOnce(new ValidationError('ahead', 'grant_use_in_future'))
+      .mockResolvedValueOnce(recorded);
     expect((await gm.evidenceStore.enqueueRecord(second)).queued).toMatchObject({ state: 'pending', last_error: { code: 'grant_use_chain_gap' } });
+    // The NA quarantines the first use; it is the chain's head, so the second is judged on its own.
     expect((await gm.evidenceStore.enqueueRecord(use)).queued).toMatchObject({ state: 'dead_letter', last_error: { code: 'grant_envelope_mismatch' } });
+    const ahead = await gm.evidenceStore.flushRecords({ ignoreBackoff: true });
+    expect(ahead.pending.map(e => [e.id, e.last_error?.code])).toEqual([[second.use_id, 'grant_use_in_future']]);
     const flushed = await gm.evidenceStore.flushRecords({ ignoreBackoff: true });
-    expect(flushed.dead_lettered.map(e => [e.id, e.last_error?.code])).toEqual([[second.use_id, PREDECESSOR_DEAD_LETTERED]]);
-    expect(post).toHaveBeenCalledTimes(3);
+    expect(flushed.admitted.map(e => e.id)).toEqual([second.use_id]);
+    expect(flushed.dead_lettered).toEqual([]);
+    expect(post).toHaveBeenCalledTimes(4);
   });
 
   it('retries a use while the NA is unreachable', async () => {
@@ -352,12 +387,20 @@ describe('GrantsClient routes (v1.6.0)', () => {
       parameter_envelope: { n: { number_range: { number_type: 'integer', minimum: 1, maximum: 9 } } } }],
     ['listGrants', 'GET', 'http://na/admin/grants?status=revoked&limit=10', true, (gm: GenesisMeshClient) => gm.grants.listGrants({ status: 'revoked', limit: 10 }), undefined],
     ['getGrant', 'GET', 'http://na/admin/grants/g%2F1', true, (gm: GenesisMeshClient) => gm.grants.getGrant('g/1'), undefined],
+    ['listGrantUses', 'GET', 'http://na/admin/grants/g%2F1/uses?limit=5&before=9', true, (gm: GenesisMeshClient) => gm.grants.listGrantUses('g/1', { limit: 5, before: 9 }), undefined],
+    ['storedResourceHead', 'GET', 'http://na/admin/evidence/resource-heads/kv%3Avault/k', true, (gm: GenesisMeshClient) => gm.evidenceStore.storedResourceHead('kv:vault/k'), undefined],
+    ['search by grant', 'GET', 'http://na/admin/evidence?grant_id=g-1', true, (gm: GenesisMeshClient) => gm.evidenceStore.search({ grant_id: 'g-1' }), undefined],
     ['revokeGrant', 'POST', 'http://na/admin/grants/g%2F1/revoke', true, (gm: GenesisMeshClient) => gm.grants.revokeGrant('g/1', 'lost'), { reason: 'lost' }],
     ['submitGrantUse', 'POST', 'http://na/evidence/grant-executions', false, (gm: GenesisMeshClient) => gm.grants.submitGrantUse({ use_id: 'u' } as GrantExecutionEvidence), { evidence: { use_id: 'u' } }],
   ] as const)('%s', async (_name, method, url, admin, call, body) => {
     const { fetch, gm } = client({ ok: true });
     await call(gm);
     expect(sent(fetch)).toEqual({ url, method, admin, body });
+  });
+
+  it('retries an issuance the NA refused as a conflict', () => {
+    expect(isRetryableConflict(new ConflictError('changed', 'grant_issuance_conflict'))).toBe(true);
+    expect(isRetryableConflict(new ConflictError('revoked', 'grant_already_revoked'))).toBe(false);
   });
 
   it('requestTimeToken signs the request with the bearer key and returns the token', async () => {

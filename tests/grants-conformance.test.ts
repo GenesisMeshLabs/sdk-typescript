@@ -6,7 +6,9 @@ import {
   GrantRecordError,
   envelopeParameter,
   envelopeProblem,
+  StrictJsonError,
   parseExportLines,
+  parseJson,
   receivedCanonical,
   signedAsReceived,
   useProblem,
@@ -21,10 +23,10 @@ import type { CapabilityGrant, ExecutorKeyInfo, GrantExecutionEvidence, Previous
  * parameters and envelopes with the number rules, the use rules in their
  * order, and exports holding grants, uses and revocations.
  *
- * The `issuance` vectors are the NA's own check (`check_grant`, deciding
- * every gate of every applied policy over a grant's envelope): the suite says
- * an SDK may skip them, and this one neither issues grants nor evaluates
- * policies, so they are listed and not run.
+ * The suite's `na_only_kinds` (`issuance`: the NA's own check, deciding every
+ * gate of every applied policy over a grant's envelope) are skipped, as the
+ * suite says an SDK does: this one neither issues grants nor evaluates
+ * policies.
  */
 interface Vector {
   id: string;
@@ -38,13 +40,8 @@ interface Vector {
 }
 
 const raw = readFileSync(fileURLToPath(new URL('./fixtures/conformance/grants.json', import.meta.url)), 'utf-8');
-// Not `parseJson`: vector `parameter-bound-beyond-64-bits` holds the integer 2^64 as a JSON number, which the
-// strict reader refuses for the whole file (`integer_out_of_range`). Read here as a `bigint`, the envelope
-// rule refuses it, as the reference does.
-const suite = JSON.parse(raw, (_key: string, value: unknown, context?: { source?: string }) =>
-  (typeof value === 'number' && !Number.isSafeInteger(value) && context?.source && /^-?\d+$/.test(context.source)
-    ? BigInt(context.source) : value)) as { suite: string; version: string; vectors: Vector[] };
-const NA_RULES = new Set(['issuance']);
+const suite = parseJson(raw) as { suite: string; version: string; na_only_kinds: string[]; vectors: Vector[] };
+const NA_RULES = new Set(suite.na_only_kinds);
 
 function outcome(v: Vector): Record<string, unknown> {
   const input = v.input ?? {};
@@ -57,9 +54,11 @@ function outcome(v: Vector): Record<string, unknown> {
       return { valid: signedAsReceived(v.model!, v.record!, [v.public_key!]) };
     case 'envelope_parameter':
       try {
-        return { valid: true, normalized: envelopeParameter(input['parameter']) };
+        // A parameter given as text is read as every implementation reads JSON (2^64 is refused).
+        const parameter = 'parameter_json' in input ? parseJson(input['parameter_json'] as string) : input['parameter'];
+        return { valid: true, normalized: envelopeParameter(parameter) };
       } catch (err) {
-        if (!(err instanceof GrantRecordError)) throw err;
+        if (!(err instanceof GrantRecordError) && !(err instanceof StrictJsonError)) throw err;
         return { valid: false };
       }
     case 'envelope': {
@@ -73,6 +72,7 @@ function outcome(v: Vector): Record<string, unknown> {
       const found = useProblem(use, {
         grant: (input['grant'] as CapabilityGrant | null) ?? null,
         previous: (input['previous'] as PreviousUse | null) ?? null,
+        admitted: (input['admitted'] as number | null) ?? null,
         tokenHead: head, tokenKeys: input['na_public_keys'] as string[], rawToken: use.time_token,
         revokedAt: (input['revoked_at'] as string | null) ?? null, recordedAt: (input['recorded_at'] as string | null) ?? null,
       });
@@ -96,12 +96,13 @@ function outcome(v: Vector): Record<string, unknown> {
 }
 
 describe('grants conformance vectors (v1.6.0)', () => {
-  it('is the grants suite, all 143 vectors', () => {
+  it('is the grants suite, all 158 vectors, strict JSON', () => {
     expect(suite.suite).toBe('grants');
     expect(suite.version).toBe('1.6.0');
-    expect(suite.vectors).toHaveLength(143);
-    // The NA's issuance check: 58 vectors this SDK does not run (see above).
-    expect(suite.vectors.filter(v => NA_RULES.has(v.kind))).toHaveLength(58);
+    expect(suite.vectors).toHaveLength(158);
+    // The NA's issuance check: 59 vectors this SDK does not run (see above).
+    expect(suite.na_only_kinds).toEqual(['issuance']);
+    expect(suite.vectors.filter(v => NA_RULES.has(v.kind))).toHaveLength(59);
   });
 
   for (const v of suite.vectors.filter(v => !NA_RULES.has(v.kind))) {

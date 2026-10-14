@@ -3,15 +3,22 @@
  * Network Authority (NA) cannot be reached, keeps each use in the record
  * outbox, and uploads the uses when the NA is back.
  *
- * Before each change the holder checks the grant offline, in this order:
- * the capability (`grant_capability_mismatch`), the closed envelope
- * (`grant_envelope_mismatch`), secret material in the request parameters
- * (`grant_use_secret_material`), the budget counting its own uses
- * (`grant_budget_exhausted`), the validity (`grant_expired` past its end,
- * `grant_use_outside_validity` before its start), the revocation feed it
+ * Before each change the holder checks the grant offline, in this order (the
+ * NA's order where the two share a rule): secret material in the request
+ * parameters (`grant_use_secret_material`), the bearer key's resource prefix
+ * (`grant_use_out_of_scope`), the capability (`grant_capability_mismatch`),
+ * the closed envelope (`grant_envelope_mismatch`), the budget counting its
+ * own uses (`grant_budget_exhausted`), the validity (`grant_expired` past its
+ * end, `grant_use_outside_validity` before its start), the revocation feed it
  * holds and what the NA last answered (`grant_revoked`, or the NA's code),
- * and the uses left on its time token (`grant_time_token_exhausted`, after
- * asking for a fresh token when the NA answers).
+ * and the uses left on its time token, at most `max_uses_per_time_token`
+ * after the use the token names (`grant_time_token_exhausted`, after asking
+ * for a fresh token when the NA answers).
+ *
+ * Every use the holder signs takes the next place in its chain: one the NA
+ * refuses for good is quarantined and stays in the chain, so the uses after
+ * it are judged on their own. The holder never signs a use the NA would
+ * refuse without storing it (secret material is checked first).
  *
  * The public contract's `grant_fallback` rule: when the grant has ended, its
  * budget or time token is spent, or it is revoked, the holder does not block
@@ -84,6 +91,12 @@ export interface GrantHolderOptions {
   signer: Signer;
   /** The NA's keys (a list, or its key history): grants, time tokens and feeds must verify under them. */
   naPublicKeys: NAKeys;
+  /**
+   * The bearer key's resource prefix, as it is registered (`resource_prefix`):
+   * a use outside it, or without a resource, is refused offline
+   * (`grant_use_out_of_scope`), as the NA would quarantine it.
+   */
+  resourcePrefix?: string | null;
   /** A grant just issued and its first time token; or `state` to resume. */
   grant?: CapabilityGrant;
   timeToken?: TimeToken;
@@ -198,6 +211,7 @@ export class GrantHolder {
   private readonly clients: GrantHolderClients;
   private readonly signer: Signer;
   private readonly naKeys: NAKeys;
+  private readonly resourcePrefix: string | null;
   private readonly persistState?: (state: GrantHolderState) => void | Promise<void>;
   private readonly now: () => Date;
   private readonly recorder: ExecutionRecorder;
@@ -213,6 +227,7 @@ export class GrantHolder {
     this.clients = options.clients;
     this.signer = options.signer;
     this.naKeys = options.naPublicKeys;
+    this.resourcePrefix = options.resourcePrefix ?? null;
     this.persistState = options.persist;
     this.now = options.now ?? (() => new Date());
     const grant = state.grant;
@@ -377,19 +392,24 @@ export class GrantHolder {
       throw new Error('resource_id and resource_action go together');
     }
     const parameters = params.request_parameters ?? {};
+    // Refused before anything runs: the NA would refuse such a use and never store it.
+    const secret = metadataProblem({ request_parameters: parameters });
+    if (secret !== null) throw new GrantRefusedError(secret, 'grant_use_secret_material');
+    if (this.resourcePrefix !== null && !(params.resource_id ?? '').startsWith(this.resourcePrefix)) {
+      throw new GrantRefusedError(`the bearer key covers only resources starting with ${this.resourcePrefix}`,
+        'grant_use_out_of_scope');
+    }
     if (!grant.capabilities.includes(params.capability)) {
       throw new GrantRefusedError(`${params.capability} is not one of the grant's capabilities`, 'grant_capability_mismatch');
     }
     const outside = envelopeProblem(grant.parameter_envelope, parameters);
     if (outside !== null) throw new GrantRefusedError(outside, 'grant_envelope_mismatch');
-    // Refused before anything runs: the NA would refuse such a use and never store it.
-    const secret = metadataProblem({ request_parameters: parameters });
-    if (secret !== null) throw new GrantRefusedError(secret, 'grant_use_secret_material');
     await this.checkBearer();
 
     const sequence = state.uses + 1;
     const now = this.now();
-    // Never dated before the time token, nor before the previous use: the token proves the time is no earlier.
+    // Never dated before the time token, nor before the previous use: the token proves the time is no earlier
+    // (the NA allows 300 seconds before the token; the holder needs none of it).
     let executedAt = timeOf(now, 'executed_at', 'grant_use_malformed')!;
     for (const floor of [state.time_token.issued_at, state.head_executed_at]) {
       if (floor !== null && timestampMicros(floor) > timestampMicros(executedAt)) executedAt = floor;

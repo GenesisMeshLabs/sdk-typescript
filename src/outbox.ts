@@ -170,7 +170,8 @@ export const PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
  * subject and forward rotation the NA does not hold yet
  * (`remediation_subject_not_found`, `remediation_rotation_missing`),
  * `remediation_disabled`, a grant use whose predecessor the NA does not hold
- * yet (`grant_use_chain_gap`) and `grants_disabled`.
+ * yet (`grant_use_chain_gap`), one dated ahead of the NA's clock
+ * (`grant_use_in_future`) and `grants_disabled`.
  */
 export const RECORD_PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
   // 1.3.1: refused by the NA's strict JSON reader; a batch so refused is split until the record is found.
@@ -207,7 +208,8 @@ export const RECORD_PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
   'remediation_already_recorded',
   'remediation_conflict',
   // v1.6.0: grant uses (`GRANT_USE_REJECTION_CODES`). The NA keeps an authentic use it refuses for good
-  // as a quarantine entry (`error.details.quarantine_id`). A chain gap is retried: the earlier uses go first.
+  // as a quarantine entry (`error.details.quarantine_id`). A chain gap is retried (the earlier uses go
+  // first), and so is a use dated in the future (`grant_use_in_future`: once the NA's clock reaches it).
   'invalid_grant_use',
   'grant_use_malformed',
   'grant_not_found',
@@ -228,9 +230,9 @@ export const RECORD_PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
   'grant_use_before_time_token',
   'grant_use_out_of_order',
   'grant_use_outside_validity',
-  'grant_use_in_future',
   'grant_use_uploaded_late',
   'grant_revoked',
+  'grant_use_out_of_scope',
 ]);
 
 const FIRST_RETRY_MS = 5_000;

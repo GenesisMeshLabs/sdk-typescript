@@ -184,6 +184,7 @@ export type { AnchorFailure, AnchorVerification, CheckAnchorsOptions, StoreAncho
 
 // Audit packs, archives and the completeness check (v1.5.0)
 export {
+  AGREEMENTS_FILE,
   ANCHORS_FILE,
   ATTESTATIONS_FILE,
   CHANGE_COLUMNS,
@@ -195,6 +196,7 @@ export {
   GENESIS_FILE,
   KEY_HISTORY_FILE,
   MANIFEST_FILE,
+  OPTIONAL_PACK_FILES,
   PACK_FILES,
   PACK_FORMAT,
   PACK_FORMAT_VERSION,
@@ -351,6 +353,7 @@ export {
   QUARANTINED_USE_CODES,
   GrantRecordError,
   checkGrantUse,
+  continuesChain,
   envelopeParameter,
   envelopeProblem,
   envelopeShapeProblem,
@@ -401,6 +404,7 @@ export type {
   TimeToken,
   TimeTokenRequest,
   TimeTokenRequestInput,
+  UseChainHead,
   UseCheck,
   UseProblem,
 } from './grants.js';

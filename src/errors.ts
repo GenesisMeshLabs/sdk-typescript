@@ -150,6 +150,8 @@ const HA_CONFLICT_CODES: ReadonlySet<string> = new Set([
   'boundary_policy_version_conflict',
   'crl_publish_contention',
   'retention_in_progress',
+  // v1.6.0: what a grant rests on changed between the NA's check and its write.
+  'grant_issuance_conflict',
 ]);
 
 /**

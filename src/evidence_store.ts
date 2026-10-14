@@ -4,7 +4,6 @@ import { checkMetadataOnly, SecretMaterialError } from './execution.js';
 import type { HttpTransport } from './client.js';
 import { executionDigest } from './canonical.js';
 import { GenesisMeshError, NotFoundError } from './errors.js';
-import type { GrantExecutionEvidence } from './grants.js';
 import {
   outOfBandDigest,
   type BreakGlassRecord,
@@ -65,6 +64,8 @@ export interface EvidenceSearchParams {
   outcome?: string;
   entry_kind?: EntryKind;
   decision_id?: string;
+  /** v1.6.0: a grant's uses and its revocation. */
+  grant_id?: string;
   /** ISO timestamps bounding `recorded_at`. */
   since?: string;
   until?: string;
@@ -215,6 +216,15 @@ export interface HolderChange {
   approved: boolean;
   approved_by?: string;
   registry_record_id?: string;
+}
+
+/** A resource's head as the NA names it (`GET /admin/evidence/resource-heads/<resource_id>`). */
+export interface StoredResourceHead extends ResourceHead {
+  resource_id: string;
+  /** v1.6.0: what the head is; absent from an NA before 1.6.0. */
+  entry_kind?: 'execution' | 'grant_execution' | 'retention_checkpoint';
+  /** v1.6.0: the head's `evidence_id` or `use_id`; null for a retention checkpoint. */
+  record_id?: string | null;
 }
 
 /** What became of a record handed to the record outbox. */
@@ -896,40 +906,18 @@ export class EvidenceStoreClient {
             ? await this.http.publicPost<RecordSubmission>('/evidence/grant-executions', { evidence: entry.record }, true)
             : await this.submitBreakGlass(entry.record as BreakGlassRecord);
     } catch (err) {
-      // v1.6.0: a use the NA cannot place yet waits for the earlier uses; behind a dead letter it never will.
-      if (entry.kind === 'grant_execution' && err instanceof GenesisMeshError && err.code === 'grant_use_chain_gap'
-        && await this.grantPredecessorDead(outbox, entry)) {
-        return {
-          queued: await this.recordFailed(outbox, entry, err, {
-            status: err.status, code: PREDECESSOR_DEAD_LETTERED,
-            message: `an earlier use of this grant was refused; the NA answered ${err.code}: ${err.message}`,
-          }),
-        };
-      }
+      // v1.6.0: a grant use the NA refuses for good is a dead letter, and the NA quarantines it; when it
+      // continued the chain it is the chain's head, so the uses after it are still sent, each judged on
+      // its own. A chain gap and a use dated in the future are retried.
       return { queued: await this.recordFailed(outbox, entry, err) };
     }
     await this.removeRecord(outbox, entry.id);
     return { submission };
   }
 
-  /** Whether the record outbox holds an earlier use of the same grant as a dead letter (v1.6.0). */
-  private async grantPredecessorDead(outbox: RecordOutbox, entry: RecordOutboxEntry): Promise<boolean> {
-    const use = entry.record as GrantExecutionEvidence;
-    return (await outbox.list()).some(e => e.kind === 'grant_execution' && e.state === 'dead_letter'
-      && (e.record as GrantExecutionEvidence).grant_id === use.grant_id
-      && (e.record as GrantExecutionEvidence).use_sequence < use.use_sequence);
-  }
-
-  /**
-   * The entry after a failed submission: pending with a backoff, or a dead
-   * letter (`refused`: a dead letter for that reason, whatever the error).
-   */
-  private async recordFailed(
-    outbox: RecordOutbox, entry: RecordOutboxEntry, err: unknown, refused?: SubmissionFailure,
-  ): Promise<RecordOutboxEntry> {
-    const classified = classifySubmissionError(err, RECORD_PERMANENT_REFUSALS);
-    const failure = refused ?? classified.failure;
-    const transient = refused === undefined && classified.transient;
+  /** The entry after a failed submission: pending with a backoff, or a dead letter. */
+  private async recordFailed(outbox: RecordOutbox, entry: RecordOutboxEntry, err: unknown): Promise<RecordOutboxEntry> {
+    const { failure, transient } = classifySubmissionError(err, RECORD_PERMANENT_REFUSALS);
     const attempts = entry.attempts + 1;
     if (transient && err instanceof GenesisMeshError && err.retryAfterSeconds !== null) {
       this.recordsPausedUntil = Math.max(this.recordsPausedUntil, Date.parse(nextAttemptAt(0, err)));
@@ -1225,9 +1213,7 @@ export class EvidenceStoreClient {
    */
   async resourceHead(resourceId: string): Promise<ResourceHead | null> {
     try {
-      const head = await this.http.adminGet<ResourceHead & { resource_id: string }>(
-        `/admin/evidence/resource-heads/${resourcePath(resourceId)}`,
-      );
+      const head = await this.storedResourceHead(resourceId);
       return { resource_sequence: head.resource_sequence, record_digest: head.record_digest };
     } catch (err) {
       if (!(err instanceof NotFoundError)) throw err;
@@ -1235,6 +1221,16 @@ export class EvidenceStoreClient {
       // Route missing: an NA older than v0.63.1.
     }
     return this.resourceHeadFromHistory(resourceId);
+  }
+
+  /**
+   * The NA's answer for a resource's head (admin): its position and digest,
+   * and (v1.6.0) what the head is, `entry_kind` (`execution`, `grant_execution`
+   * or `retention_checkpoint`) and `record_id` (null for a checkpoint). Throws
+   * `NotFoundError` (`resource_not_found`) for a resource with no history.
+   */
+  storedResourceHead(resourceId: string): Promise<StoredResourceHead> {
+    return this.http.adminGet<StoredResourceHead>(`/admin/evidence/resource-heads/${resourcePath(resourceId)}`);
   }
 
   private async resourceHeadFromHistory(resourceId: string): Promise<ResourceHead | null> {

@@ -33,6 +33,8 @@ class FakeNA {
   uses: unknown[] = [];
   breakGlass: unknown[] = [];
   tokenRefusal: string | null = null;
+  /** Refuse the next use for good: the NA quarantines it. */
+  quarantineNext: string | null = null;
   revokedGrants: string[] = [];
   feedSequence = 1;
   requests: string[] = [];
@@ -57,6 +59,11 @@ class FakeNA {
         return reply(201, { time_token: token });
       }
       case '/evidence/grant-executions':
+        if (this.quarantineNext) {
+          const code = this.quarantineNext;
+          this.quarantineNext = null;
+          return reply(422, { error: { code, message: 'refused', details: { quarantine_id: 'q-1' } } });
+        }
         this.uses.push(body.evidence);
         return reply(201, { status: 'recorded', entry: {}, entry_digest: 'd', payload: body.evidence, resource_sequence: this.uses.length });
       case '/evidence/break-glass':
@@ -77,7 +84,10 @@ class FakeNA {
   }) as typeof fetch;
 }
 
-async function setup(overrides: Partial<CapabilityGrant> = {}, options: { persist?: (s: GrantHolderState) => void } = {}) {
+async function setup(
+  overrides: Partial<CapabilityGrant> = {},
+  options: { persist?: (s: GrantHolderState) => void; resourcePrefix?: string } = {},
+) {
   const na = new FakeNA();
   const grant = await naSigned<CapabilityGrant>({
     grant_id: 'grant-1', bearer_key_id: 'device-key', bearer_public_key: BEARER.pubBase64, bearer_sovereign_id: 'site-7',
@@ -306,6 +316,27 @@ describe('GrantHolder: acting within a grant offline (v1.6.0)', () => {
     await expect(impostor.act(x.rotate(), async () => ({}))).rejects.toMatchObject({ code: 'grant_bearer_mismatch' });
     expect(() => new GrantHolder({ ...options, signer: bearer, clients: new GenesisMeshClient({ baseUrl: 'http://na' }) }))
       .toThrow('record outbox');
+  });
+
+  it('keeps a use the NA quarantines in its chain: the next use follows it and is judged on its own', async () => {
+    const x = await setup();
+    x.na.quarantineNext = 'grant_use_outside_validity';
+    const first = await x.holder.act(x.rotate(), async () => ({})) as GrantUseResult<unknown>;
+    expect(first.queued).toMatchObject({ state: 'dead_letter', last_error: { code: 'grant_use_outside_validity' } });
+    const second = await x.holder.act(x.rotate(), async () => ({})) as GrantUseResult<unknown>;
+    expect(second.use).toMatchObject({ use_sequence: 2, prev_use_digest: grantUseDigest(first.use) });
+    expect(second.submission?.status).toBe('recorded');
+    expect(x.holder.state.uses).toBe(2);
+  });
+
+  it('refuses offline a use outside the bearer key resource prefix, or without a resource', async () => {
+    const x = await setup({}, { resourcePrefix: 'kv:site-7/' });
+    const action = jest.fn(async () => ({}));
+    await expect(x.holder.act({ ...x.rotate(), resource_id: 'kv:site-8/api-key' }, action)).rejects.toMatchObject({ code: 'grant_use_out_of_scope' });
+    await expect(x.holder.act({ capability: 'secret.rotate', request_parameters: { lifetime_days: 30 } }, action))
+      .rejects.toMatchObject({ code: 'grant_use_out_of_scope' });
+    expect(action).not.toHaveBeenCalled();
+    expect((await x.holder.act(x.rotate(), action)).path).toBe('grant');
   });
 
   it('runs two uses one after the other, never at one place in the chain', async () => {

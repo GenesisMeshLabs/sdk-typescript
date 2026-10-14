@@ -61,6 +61,8 @@ export const MAX_ENVELOPE_VALUES = 256;
 
 /** An envelope parameter's name: one segment of `request_parameters`. */
 const PARAMETER_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+/** A use's ID: a UUID in its canonical lowercase form (observations match a use by it). */
+const USE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MIN_INTEGER = -(2n ** 63n);
 const MAX_INTEGER = 2n ** 64n - 1n;
 const SKEW_MICROS = GRANT_CLOCK_SKEW_SECONDS * 1_000_000;
@@ -73,8 +75,9 @@ export type GrantNumber = number | bigint;
 export type GrantScalar = string | boolean | GrantNumber | null;
 
 export type GrantBasisKind = 'agreement' | 'attestation';
-export type GrantRevocationReason =
-  'operator' | 'attestation_revoked' | 'policy_deactivated' | 'policy_activated' | 'bearer_key_retired';
+/** Why a grant was revoked; `agreement_untrusted` when its agreement basis is no longer signed by trusted parties. */
+export type GrantRevocationReason = 'operator' | 'attestation_revoked' | 'policy_deactivated' | 'policy_activated'
+  | 'bearer_key_retired' | 'agreement_untrusted';
 export type GrantUseOutcome = 'success' | 'failure' | 'partial';
 /** How a gate was decided over a grant's whole envelope and validity. */
 export type GrantGateDecision = 'pass' | 'may_fail' | 'undecidable';
@@ -187,6 +190,7 @@ export interface TimeTokenRequest {
 
 /** One use of a grant, signed by its bearer key. */
 export interface GrantExecutionEvidence {
+  /** A UUID in its canonical lowercase form. */
   use_id: string;
   grant_id: string;
   /** SHA-256 of the grant's signed form. */
@@ -222,18 +226,23 @@ export interface GrantRevocationRecord {
   signature?: Signature | null;
 }
 
-/** Why a use is refused at admission, in the order the NA checks; each verifier names the same. */
+/**
+ * Why a use is refused at admission, in the order the NA checks; each verifier names the same. The
+ * chain's checks come before the checks of the use against its grant, so a quarantined use takes its
+ * place in the chain when it continues it.
+ */
 export const GRANT_USE_REJECTION_CODES = [
   'grant_use_malformed',
   'grant_not_found',
   'grant_use_invalid_signature',
-  'grant_bearer_mismatch',
   'grant_use_secret_material',
-  'grant_bearer_key_retired',
-  'grant_mismatch',
   'grant_use_conflict',
   'grant_use_chain_gap',
   'grant_use_chain_mismatch',
+  'grant_bearer_mismatch',
+  'grant_bearer_key_retired',
+  'grant_use_out_of_scope',
+  'grant_mismatch',
   'grant_capability_mismatch',
   'grant_envelope_mismatch',
   'grant_budget_exhausted',
@@ -253,14 +262,18 @@ export type GrantUseRejectionCode = (typeof GRANT_USE_REJECTION_CODES)[number];
 /**
  * Refusals of an authentic use the NA keeps as a quarantine entry: the use
  * happened, and no retry overcomes them. Not a chain gap (the holder uploads
- * the earlier uses first) nor secret material (never stored).
+ * the earlier uses first), secret material (never stored) nor a use dated in
+ * the future (retried once the NA's clock reaches it). A quarantined use that
+ * continues the chain (`continuesChain`; never a conflict or a chain
+ * mismatch) becomes the chain's head: the holder's later uses are judged on
+ * their own.
  */
 export const QUARANTINED_USE_CODES: ReadonlySet<string> = new Set([
-  'grant_bearer_mismatch', 'grant_bearer_key_retired', 'grant_mismatch', 'grant_use_conflict',
-  'grant_use_chain_mismatch', 'grant_capability_mismatch', 'grant_envelope_mismatch', 'grant_budget_exhausted',
-  'grant_time_token_invalid', 'grant_time_token_mismatch', 'grant_time_token_regressed',
-  'grant_time_token_exhausted', 'grant_use_before_time_token', 'grant_use_out_of_order',
-  'grant_use_outside_validity', 'grant_use_in_future', 'grant_use_uploaded_late', 'grant_revoked',
+  'grant_use_conflict', 'grant_use_chain_mismatch', 'grant_bearer_mismatch', 'grant_bearer_key_retired',
+  'grant_use_out_of_scope', 'grant_mismatch', 'grant_capability_mismatch', 'grant_envelope_mismatch',
+  'grant_budget_exhausted', 'grant_time_token_invalid', 'grant_time_token_mismatch',
+  'grant_time_token_regressed', 'grant_time_token_exhausted', 'grant_use_before_time_token',
+  'grant_use_out_of_order', 'grant_use_outside_validity', 'grant_use_uploaded_late', 'grant_revoked',
 ]);
 
 /**
@@ -575,7 +588,8 @@ export const validTimeTokenRequest: Check = v => shape({
  */
 export const validGrantUse: Check = v => {
   if (!shape({
-    use_id: filled(text(128)), grant_id: text(128), grant_digest: sha256, use_sequence: between(1, GRANT_MAX_USES),
+    use_id: filled(v => typeof v === 'string' && USE_ID.test(v)), grant_id: text(128), grant_digest: sha256,
+    use_sequence: between(1, GRANT_MAX_USES),
     prev_use_digest: optional(sha256), executor_sovereign_id: text(256), capability: text(256),
     request_parameters: filled(isObject), resource_id: optional(text(256)), resource_action: optional(action),
     executed_at: utc, time_token: validTimeToken, outcome: oneOf('success', 'failure', 'partial'),
@@ -589,7 +603,8 @@ export const validGrantUse: Check = v => {
 /** A grant revocation in the shape the reference reads. */
 export const validGrantRevocation: Check = shape({
   revocation_id: filled(text(128)), grant_id: text(128), grant_digest: sha256,
-  reason: oneOf('operator', 'attestation_revoked', 'policy_deactivated', 'policy_activated', 'bearer_key_retired'),
+  reason: oneOf('operator', 'attestation_revoked', 'policy_deactivated', 'policy_activated', 'bearer_key_retired',
+    'agreement_untrusted'),
   detail: optional(text(1024)), revoked_by: optional(text(256)), revoked_at: utc, issuer_sovereign_id: string,
   issued_by: string, signature: signatureShape,
 });
@@ -674,23 +689,40 @@ export function tokenSignatureValid(rawToken: unknown, keys: readonly string[]):
 
 // ── Uses ─────────────────────────────────────────────────────────────────────
 
-/** The use before this one in the grant's chain, as the NA, a verifier or a holder holds it. */
+/**
+ * The last admitted use of the grant before this one, as the NA or a verifier holds it: the order and
+ * time rules compare a use with it (never with a quarantined use).
+ */
 export interface PreviousUse {
-  digest: string;
   executed_at: string;
-  time_token_id: string;
   time_token_issued_at: string;
-  /** How many uses up to and including this one cite its time token (they are consecutive). */
-  token_uses: number;
+}
+
+/** The head of a grant's use chain: its last use, admitted or quarantined after it continued the chain. */
+export interface UseChainHead {
+  /** 0 before the first use. */
+  use_sequence: number;
+  /** The head's digest; null before the first use. */
+  digest: string | null;
+}
+
+/** Whether a use continues a grant's use chain whose head is `head`. */
+export function continuesChain(use: Pick<GrantExecutionEvidence, 'use_sequence' | 'prev_use_digest'>, head: UseChainHead): boolean {
+  return use.use_sequence === head.use_sequence + 1 && (use.prev_use_digest ?? null) === head.digest;
 }
 
 /** What `useProblem` checks a use against: whatever the caller holds of its grant and chain. */
 export interface UseCheck {
   /** The grant; null skips the checks that need it. */
   grant: CapabilityGrant | null;
-  /** The use before it in the chain; null for the first use or when it is not held. */
+  /** The last admitted use before it; null for none or when it is not held. */
   previous: PreviousUse | null;
-  /** The digest and time of the use the time token names, when held. */
+  /**
+   * How many uses of the grant were admitted before it; null when the caller
+   * does not hold the chain from its start (the budget is then not checked).
+   */
+  admitted: number | null;
+  /** The digest and time of the use the time token names (admitted or quarantined), when held. */
   tokenHead: { digest: string; executed_at: string } | null;
   /** The NA keys valid at the token's `issued_at`. */
   tokenKeys: readonly string[];
@@ -721,10 +753,12 @@ function iso(at: number): string {
 /**
  * The first rule a use breaks, or null, in the order every implementation
  * checks (the reference's `use_problem`): the capability, the envelope, the
- * budget, the time token's signature and grant, the token's head, a regressed
- * token, the token's use limit, before the token, out of order, outside the
- * validity, in the future, uploaded late, revoked. Run after the use's
- * signature, bearer key, grant digest and chain position are checked.
+ * budget (admitted uses), the time token's signature, grant and age, the
+ * token's head, a token older than the last admitted use's, the token's use
+ * limit (at most `max_uses_per_time_token` uses after the use it names),
+ * more than 300 seconds before the token, before the last admitted use,
+ * outside the validity, in the future, uploaded late, revoked. Run after the
+ * use's chain position, signature, bearer key and grant digest are checked.
  */
 export function useProblem(use: GrantExecutionEvidence, check: UseCheck): UseProblem | null {
   const { grant, previous } = check;
@@ -737,12 +771,13 @@ export function useProblem(use: GrantExecutionEvidence, check: UseCheck): UsePro
     }
     const problem = envelopeProblem(grant.parameter_envelope, use.request_parameters);
     if (problem !== null) return { code: 'grant_envelope_mismatch', detail: problem };
-    if (use.use_sequence > grant.max_uses) {
-      return { code: 'grant_budget_exhausted', detail: `use ${use.use_sequence} of a budget of ${grant.max_uses}` };
+    if (check.admitted !== null && check.admitted >= grant.max_uses) {
+      return { code: 'grant_budget_exhausted', detail: `${check.admitted} uses admitted of a budget of ${grant.max_uses}` };
     }
   }
   const raw = check.rawToken === undefined ? token : check.rawToken;
-  if (token.grant_id !== use.grant_id || !tokenSignatureValid(raw, check.tokenKeys)) {
+  if (token.grant_id !== use.grant_id || !tokenSignatureValid(raw, check.tokenKeys)
+    || (grant !== null && tokenIssued < micros(grant.issued_at))) {
     return { code: 'grant_time_token_invalid', detail: "the time token is not the NA's for this grant" };
   }
   if (token.use_sequence >= use.use_sequence) {
@@ -756,22 +791,21 @@ export function useProblem(use: GrantExecutionEvidence, check: UseCheck): UsePro
     || micros(head.executed_at) > tokenIssued + SKEW_MICROS)) {
     return { code: 'grant_time_token_mismatch', detail: `use ${token.use_sequence} is not the one the time token names` };
   }
-  if (previous !== null) {
-    if (tokenIssued < micros(previous.time_token_issued_at)) {
-      return { code: 'grant_time_token_regressed', detail: "the time token is older than the previous use's" };
-    }
-    if (grant !== null && previous.time_token_id === token.time_token_id
-      && previous.token_uses >= grant.max_uses_per_time_token) {
-      return {
-        code: 'grant_time_token_exhausted',
-        detail: `${grant.max_uses_per_time_token} uses already cite time token ${token.time_token_id}`,
-      };
-    }
+  if (previous !== null && tokenIssued < micros(previous.time_token_issued_at)) {
+    return { code: 'grant_time_token_regressed', detail: "the time token is older than the previous use's" };
   }
-  if (executed < tokenIssued) {
+  if (grant !== null && use.use_sequence - token.use_sequence > grant.max_uses_per_time_token) {
+    return {
+      code: 'grant_time_token_exhausted',
+      detail: `use ${use.use_sequence} is more than ${grant.max_uses_per_time_token} uses after the time token's `
+        + `${token.use_sequence}`,
+    };
+  }
+  if (executed < tokenIssued - SKEW_MICROS) {
     return {
       code: 'grant_use_before_time_token',
-      detail: `executed at ${iso(executed)}, before the time token's ${iso(tokenIssued)}`,
+      detail: `executed at ${iso(executed)}, more than ${GRANT_CLOCK_SKEW_SECONDS} s before the time token's `
+        + `${iso(tokenIssued)}`,
     };
   }
   if (previous !== null && executed < micros(previous.executed_at)) {
@@ -805,14 +839,9 @@ export function useProblem(use: GrantExecutionEvidence, check: UseCheck): UsePro
   return null;
 }
 
-/** The chain's state after a use (its digest `digest`): what the next use is checked against. */
-export function nextPreviousUse(use: GrantExecutionEvidence, digest: string, previous: PreviousUse | null): PreviousUse {
-  const token = use.time_token;
-  const same = previous !== null && previous.time_token_id === token.time_token_id;
-  return {
-    digest, executed_at: use.executed_at, time_token_id: token.time_token_id,
-    time_token_issued_at: token.issued_at, token_uses: same ? previous.token_uses + 1 : 1,
-  };
+/** What the next use is checked against once this one is admitted. */
+export function nextPreviousUse(use: GrantExecutionEvidence): PreviousUse {
+  return { executed_at: use.executed_at, time_token_issued_at: use.time_token.issued_at };
 }
 
 /** Why a use may carry secret material, or null: the metadata guard over its parameters and outcome detail. */

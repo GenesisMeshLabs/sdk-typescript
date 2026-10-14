@@ -19,21 +19,22 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { canonicalJsonUnescaped, compareCodePoints, copyPythonFloats, defineMember, parseJson, verifyCanonical } from './auth.js';
 import { checkEventsAgainstAnchors, startingCheckpoint, verifyStoreAnchors, type StoreAnchor } from './anchors.js';
-import { attestationDigest, entryDigest, policyDigest, policySetDigest } from './canonical.js';
+import { agreementCanonical, attestationDigest, entryDigest, policyDigest, policySetDigest } from './canonical.js';
 import { validGrant, type CapabilityGrant } from './grants.js';
 import { naSignatureAt, verifyKeyHistory, type NAKey, type NAKeyHistory, type NAKeys } from './key-history.js';
 import { outOfBandCanonical } from './out-of-band.js';
 import { nonCanonicalFields, signedAsReceived, strictRefusal, unknownFields } from './strict.js';
 import type {
-  AnchorSummary, BoundaryDecision, BoundaryPolicy, EvidenceEvent, EvidenceStoreVerification, MembershipAttestation,
+  AgreementRecord, AnchorSummary, BoundaryDecision, BoundaryPolicy, EvidenceEvent, EvidenceStoreVerification, MembershipAttestation,
   PolicyBinding, Signature, SovereignRevocationFeed,
 } from './types.js';
 import {
-  isObject, timestampMicros, validAnchor, validArchive, validAttestationRecord, validDecision, validFeed, validJudgement,
+  isObject, timestamp, timestampMicros, validAnchor, validArchive, validAttestationRecord, validDecision, validFeed, validJudgement,
   validManifest, validPolicyRecord, validRegistry, validTreaty,
 } from './validation.js';
 import {
-  carriedSequences, isoMicros, parseExportLines, verifyBoundaryDecision, verifyEvidenceEvents, type ExecutorKeyInfo, type RecognitionTreaty,
+  carriedSequences, isoMicros, parseExportLines, verifyAgreement, verifyBoundaryDecision, verifyEvidenceEvents,
+  type ExecutorKeyInfo, type RecognitionTreaty,
 } from './verify.js';
 
 export const PACK_FORMAT = 'gm.audit.pack';
@@ -60,6 +61,13 @@ export const PACK_FILES: readonly string[] = [
   ANCHORS_FILE, CHECKS_FILE, CITED_FILE, ENTRIES_FILE, EXECUTOR_KEYS_FILE, GENESIS_FILE, KEY_HISTORY_FILE,
   POLICIES_FILE, REPORT_FILE, STATES_FILE, ATTESTATIONS_FILE, FEEDS_FILE, TREATIES_FILE,
 ];
+/**
+ * v1.6.0: the agreements the pack's grants rest on, each as received. A pack holds it only when it
+ * holds a grant under an agreement, so a pack without one keeps the 1.5 file set.
+ */
+export const AGREEMENTS_FILE = 'trust/agreements.jsonl';
+/** Files of the format a pack holds only when it has something to put in them (v1.6.0). */
+export const OPTIONAL_PACK_FILES: readonly string[] = [AGREEMENTS_FILE];
 
 /** One file of a pack: its `/`-separated relative path, SHA-256 and size. */
 export interface PackFile {
@@ -344,7 +352,7 @@ function checkManifest(files: ReadonlyMap<string, Uint8Array>, fail: PackFail): 
     if (!listed.has(path)) fail(MANIFEST_FILE, null, 'manifest_file_missing', `${path} is not listed`);
   }
   for (const path of [...listed.keys()].sort(compareCodePoints)) {
-    if (!PACK_FILES.includes(path)) {
+    if (!PACK_FILES.includes(path) && !OPTIONAL_PACK_FILES.includes(path)) {
       // A pack holds the files of its format and nothing else.
       fail(MANIFEST_FILE, null, 'manifest_unknown_file', `${path} is not a file of the format`);
       continue;
@@ -710,6 +718,7 @@ function checkCitedTrust(
   let attestations: MembershipAttestation[];
   let treaties: RecognitionTreaty[];
   let feeds: SovereignRevocationFeed[];
+  const agreements = new Map<string, unknown>();
   try {
     const read = <T>(path: string, valid: (v: unknown) => boolean, model?: string): T[] => {
       const items = jsonLines(files.get(path));
@@ -722,6 +731,10 @@ function checkCitedTrust(
     attestations = read<MembershipAttestation>(ATTESTATIONS_FILE, validAttestationRecord);
     treaties = read<RecognitionTreaty>(TREATIES_FILE, validTreaty);
     feeds = read<SovereignRevocationFeed>(FEEDS_FILE, validFeed);
+    // v1.6.0: optional; each agreement as received, by its ID.
+    for (const raw of files.has(AGREEMENTS_FILE) ? jsonLines(files.get(AGREEMENTS_FILE)) : []) {
+      if (isObject(raw)) agreements.set(String(raw['agreement_id']), raw);
+    }
   } catch (err) {
     fail(POLICIES_FILE, null, 'cited_trust_invalid', message(err));
     return;
@@ -792,6 +805,13 @@ function checkCitedTrust(
         const bound = byAttestation.get(grant.basis_id);
         if (bound === undefined) fail(where, seq, 'cited_attestation_missing', grant.basis_id);
         else if (attestationDigest(bound) !== grant.basis_digest) fail(where, seq, 'cited_attestation_mismatch', grant.basis_id);
+      } else {
+        // v1.6.0 review fixes: an agreement basis too: held, the one the grant names, between the
+        // grant's parties, and signed by both with keys the pack vouches for.
+        const problem = agreementProblem(grant, agreements.get(grant.basis_id), history, issuerKeys);
+        if (problem !== null) {
+          fail(problem === 'cited_agreement_missing' ? where : AGREEMENTS_FILE, seq, problem, grant.basis_id);
+        }
       }
     }
     if (binding === null || binding === undefined) continue;
@@ -807,6 +827,47 @@ function checkCitedTrust(
     }
   }
 }
+
+/**
+ * Why the agreement a grant rests on does not hold up in a pack, or null
+ * (v1.6.0): `cited_agreement_missing` when the pack does not hold it;
+ * `cited_agreement_mismatch` when it is not the one the grant's
+ * `basis_digest` names, or its parties are not the grant's (the responder is
+ * the requester, the offerer the provider); `agreement_invalid_signature`
+ * when its two parties did not sign it, as received, with keys the pack
+ * vouches for (the NA's key valid at `agreed_terms.valid_from` for its own
+ * sovereign, a treaty's subject keys for another; an agreement the NA offered
+ * and accepted itself carries the NA's signature for both).
+ */
+function agreementProblem(
+  grant: CapabilityGrant,
+  raw: unknown,
+  history: NAKeyHistory,
+  treatyKeys: ReadonlyMap<string, string[]>,
+): string | null {
+  if (raw === undefined) return 'cited_agreement_missing';
+  if (!validAgreementRecord(raw)) return 'cited_agreement_mismatch';
+  const agreement = raw as unknown as AgreementRecord;
+  const digest = createHash('sha256').update(agreementCanonical(agreement), 'utf-8').digest('hex');
+  if (digest !== grant.basis_digest || agreement.responder_sovereign_id !== grant.requester_sovereign_id
+    || agreement.offerer_sovereign_id !== grant.provider_sovereign_id) {
+    return 'cited_agreement_mismatch';
+  }
+  const own = history.sovereign_id;
+  const naKeys = history.keysAt(agreement.agreed_terms.valid_from);
+  const keys = (party: string) => (party === own ? naKeys : (treatyKeys.get(party) ?? []).filter(k => !naKeys.includes(k)));
+  const pairs: Array<[string[], string[]]> = [[keys(agreement.offerer_sovereign_id), keys(agreement.responder_sovereign_id)]];
+  if (agreement.offerer_sovereign_id === own) pairs.push([naKeys, naKeys]);
+  for (const [offerer, responder] of pairs) {
+    if (offerer.length > 0 && responder.length > 0 && verifyAgreement(agreement, offerer, responder).accepted) return null;
+  }
+  return 'agreement_invalid_signature';
+}
+
+/** An agreement in the shape the reference reads (its parties, terms and signatures). */
+const validAgreementRecord = (v: unknown): boolean => isObject(v) && typeof v['agreement_id'] === 'string'
+  && typeof v['offerer_sovereign_id'] === 'string' && typeof v['responder_sovereign_id'] === 'string'
+  && isObject(v['agreed_terms']) && timestamp(v['agreed_terms']['valid_from']) && Array.isArray(v['signatures']);
 
 // ── The report ────────────────────────────────────────────────────────────────
 

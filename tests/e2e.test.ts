@@ -639,7 +639,15 @@ suite('SDK against a live Python Network Authority', () => {
       expect(synced.flushed?.admitted.map(e => e.id)).toEqual(uses.map(u => u.use.use_id));
       expect(synced.flushed?.dead_lettered).toEqual([]);
       expect(await device1.evidenceStore.recordOutbox!.list()).toEqual([]);
-      expect(await gm.grants.getGrant(issued.grant.grant_id)).toMatchObject({ uses: 2, remaining_uses: 1 });
+      expect(await gm.grants.getGrant(issued.grant.grant_id)).toMatchObject({ uses: 2, remaining_uses: 1, chain_length: 2 });
+      const chain = await gm.grants.listGrantUses(issued.grant.grant_id, { limit: 1 });
+      expect(chain.uses.map(u => [u.use_id, u.state, u.resource_sequence])).toEqual([[uses[1]!.use.use_id, 'admitted', 2]]);
+      expect((await gm.grants.listGrantUses(issued.grant.grant_id, { before: chain.next_before! })).uses.map(u => u.use_sequence)).toEqual([1]);
+      expect(await gm.evidenceStore.storedResourceHead(resource)).toMatchObject({
+        resource_sequence: 2, entry_kind: 'grant_execution', record_id: uses[1]!.use.use_id,
+      });
+      expect((await gm.evidenceStore.search({ grant_id: issued.grant.grant_id })).entries.map(e => e.entry.record_id))
+        .toEqual(uses.map(u => u.use.use_id));
       const changes = await gm.evidenceStore.resourceChanges(resource);
       expect(changes.changes.map(c => [c.kind, c.governed_by])).toEqual([['grant_execution', 'grant'], ['grant_execution', 'grant']]);
       expect((await gm.evidenceStore.resourceHistory(resource)).verification.verified).toBe(true);

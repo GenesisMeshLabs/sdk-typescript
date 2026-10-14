@@ -76,15 +76,16 @@ export interface GrantSummary {
 }
 
 export interface GrantListParams {
-  /** `active` (not revoked, not past its end), `expired` or `revoked`. */
+  /** `active` (not revoked, not past its end: also `scheduled` and `exhausted` grants), `expired` or `revoked`. */
   status?: 'active' | 'expired' | 'revoked';
   bearer_key_id?: string;
   /** 1 to 500, default 100. */
   limit?: number;
-  /** The previous page's `next_before`. */
+  /** The previous page's `next_before`: the ID of its last grant (an unknown one is `400 invalid_page`). */
   before?: string;
 }
 
+/** Grants, newest first by `issued_at`, then `grant_id`. */
 export interface GrantList {
   grants: GrantSummary[];
   next_before: string | null;
@@ -93,9 +94,42 @@ export interface GrantList {
 /** One grant: its summary, the uses left, the signed grant, its policy versions and its revocation. */
 export interface GrantDetail extends GrantSummary {
   remaining_uses: number;
+  /** The positions of its use chain: admitted uses and quarantined uses that continued it. */
+  chain_length: number;
   grant: CapabilityGrant;
   policy_versions: Array<{ policy_id: string; version: number }>;
   revocation: GrantRevocationRecord | null;
+}
+
+/** One position of a grant's use chain (`GET /admin/grants/<id>/uses`). */
+export interface GrantUseSummary {
+  use_id: string;
+  use_sequence: number;
+  /** `quarantined`: a use the NA refused that continued the chain. */
+  state: 'admitted' | 'quarantined';
+  /** Null when admitted. */
+  rejection_code: string | null;
+  executed_at: string;
+  recorded_at: string;
+  store_sequence: number;
+  resource_id: string | null;
+  /** The position the NA assigned in the resource's chain; null when quarantined or without a resource. */
+  resource_sequence: number | null;
+  outcome: string;
+}
+
+export interface GrantUsesParams {
+  /** 1 to 500, default 100. */
+  limit?: number;
+  /** The previous page's `next_before`: a `use_sequence`. */
+  before?: number;
+}
+
+/** A grant's use chain, newest first. */
+export interface GrantUses {
+  grant_id: string;
+  uses: GrantUseSummary[];
+  next_before: number | null;
 }
 
 export interface GrantRevoked {
@@ -124,7 +158,9 @@ export class GrantsClient {
    * Issue a grant (admin, privileged). The NA checks the basis and every
    * active policy over the whole envelope and validity, and refuses with
    * `422` and the first problem's reason (`grant_basis_invalid` ...
-   * `grant_gate_may_deny`; every problem in `details.problems`).
+   * `grant_gate_may_deny`; every problem in `details.problems`). `409
+   * grant_issuance_conflict`: what the grant rests on changed meanwhile;
+   * retry (`isRetryableConflict`).
    */
   issueGrant(params: IssueGrantParams): Promise<IssuedGrant> {
     const body: Record<string, unknown> = { ...params, valid_until: time(params.valid_until) };
@@ -143,9 +179,18 @@ export class GrantsClient {
   }
 
   /**
+   * A grant's use chain, newest first (admin, read tier; beta): admitted uses
+   * and quarantined uses that continued it. Follow `next_before`. A use refused
+   * as a conflict or a chain mismatch is not in the chain.
+   */
+  listGrantUses(grantId: string, params: GrantUsesParams = {}): Promise<GrantUses> {
+    return this.http.adminGet<GrantUses>(`/admin/grants/${encodeURIComponent(grantId)}/uses`, { ...params });
+  }
+
+  /**
    * Revoke a grant now (admin, privileged): uses executed from now on are
    * refused. `reason` (1 to 1024 characters) is recorded as the revocation's
-   * `detail`. `409 grant_already_revoked`.
+   * `detail`; the revocation's `reason` is `operator`. `409 grant_already_revoked`.
    */
   revokeGrant(grantId: string, reason?: string): Promise<GrantRevoked> {
     return this.http.adminPost<GrantRevoked>(`/admin/grants/${encodeURIComponent(grantId)}/revoke`,
@@ -170,8 +215,9 @@ export class GrantsClient {
   /**
    * Submit one signed use (`POST /evidence/grant-executions`), authenticated
    * by its bearer key's signature. A refusal of an authentic use no retry
-   * overcomes names its quarantine entry in `details.quarantine_id`;
-   * `grant_use_chain_gap` asks for the earlier uses first.
+   * overcomes names its quarantine entry in `details.quarantine_id` (the same
+   * one when the use is uploaded again); `grant_use_chain_gap` asks for the
+   * earlier uses first, and `grant_use_in_future` to retry later.
    */
   submitGrantUse(evidence: GrantExecutionEvidence): Promise<GrantUseSubmission> {
     return this.http.publicPost<GrantUseSubmission>('/evidence/grant-executions', { evidence }, true);
