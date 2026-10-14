@@ -39,7 +39,9 @@
   feed listing `revoked_grant_ids`. Audit packs check a grant's policy
   binding and its basis, an attestation or an agreement from
   `trust/agreements.jsonl` (`cited_agreement_missing`,
-  `cited_agreement_mismatch`, `agreement_invalid_signature`), and their
+  `cited_agreement_mismatch`, `agreement_invalid_signature`; an agreement
+  the NA signed for both parties needs the responder's treaty in the pack),
+  and their
   report lists grant uses as changes and has *Grants* and *Grant
   revocations* sections when the pack holds them.
 

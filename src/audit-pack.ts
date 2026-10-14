@@ -837,7 +837,8 @@ function checkCitedTrust(
  * when its two parties did not sign it, as received, with keys the pack
  * vouches for (the NA's key valid at `agreed_terms.valid_from` for its own
  * sovereign, a treaty's subject keys for another; an agreement the NA offered
- * and accepted itself carries the NA's signature for both).
+ * and accepted itself carries the NA's signature for both, which vouches only
+ * while the pack carries a treaty for the responder).
  */
 function agreementProblem(
   grant: CapabilityGrant,
@@ -857,7 +858,11 @@ function agreementProblem(
   const naKeys = history.keysAt(agreement.agreed_terms.valid_from);
   const keys = (party: string) => (party === own ? naKeys : (treatyKeys.get(party) ?? []).filter(k => !naKeys.includes(k)));
   const pairs: Array<[string[], string[]]> = [[keys(agreement.offerer_sovereign_id), keys(agreement.responder_sovereign_id)]];
-  if (agreement.offerer_sovereign_id === own) pairs.push([naKeys, naKeys]);
+  // The NA-offered-and-accepted exception holds, as on the NA's routes, only while the responder holds a
+  // treaty from this NA (one the pack carries).
+  if (agreement.offerer_sovereign_id === own && (treatyKeys.get(agreement.responder_sovereign_id) ?? []).length > 0) {
+    pairs.push([naKeys, naKeys]);
+  }
   for (const [offerer, responder] of pairs) {
     if (offerer.length > 0 && responder.length > 0 && verifyAgreement(agreement, offerer, responder).accepted) return null;
   }

@@ -8,7 +8,9 @@ import type { StoreAnchor } from '../src/index.js';
  * Audit packs holding grants (v1.6.0 review fixes), written by the core's NA
  * with its own test helpers (`tests/fixtures/grant-packs.json`, from
  * genesismesh feat/grants): a grant under an agreement, whose pack holds
- * `trust/agreements.jsonl` and checks it (and three refused variants, each
+ * `trust/agreements.jsonl` and checks it (and four refused variants, the last
+ * without the responder's treaty, which an agreement the NA signed for both
+ * parties needs (core 39b34d6); each
  * re-signed as an operator holding the NA key could), and a range after a
  * quarantined use, which cites the grant's whole chain. Each case carries the
  * Python reference's verdict.
@@ -25,9 +27,10 @@ interface Case {
 const fixture = parseJson(readFileSync(fileURLToPath(new URL('./fixtures/grant-packs.json', import.meta.url)), 'utf-8')) as { cases: Case[] };
 
 describe('audit packs holding grants (v1.6.0)', () => {
-  it('holds the five cases', () => {
+  it('holds the six cases', () => {
     expect(fixture.cases.map(c => c.id)).toEqual([
-      'agreement-valid', 'agreement-missing', 'agreement-unsigned', 'agreement-changed', 'range-after-quarantined-use',
+      'agreement-valid', 'agreement-missing', 'agreement-unsigned', 'agreement-changed', 'agreement-responder-treaty-stripped',
+      'range-after-quarantined-use',
     ]);
   });
 
@@ -40,8 +43,8 @@ describe('audit packs holding grants (v1.6.0)', () => {
   it('accepts the optional agreements file, and only a pack holding a grant under an agreement has it', () => {
     const [valid] = fixture.cases;
     expect(Object.keys(valid!.files)).toContain('trust/agreements.jsonl');
-    expect(Object.keys(fixture.cases[4]!.files)).not.toContain('trust/agreements.jsonl');
-    const cited = fixture.cases[4]!.files['cited.jsonl']!.split('\n').filter(Boolean)
+    expect(Object.keys(fixture.cases[5]!.files)).not.toContain('trust/agreements.jsonl');
+    const cited = fixture.cases[5]!.files['cited.jsonl']!.split('\n').filter(Boolean)
       .map(line => (parseJson(line) as { entry: { entry_kind: string } }).entry.entry_kind);
     expect(cited).toEqual(expect.arrayContaining(['grant', 'grant_execution', 'quarantine']));
   });
