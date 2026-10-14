@@ -134,7 +134,10 @@ admit, so it counts every use it signed; once the NA has answered a use as
 quarantined (its dead letter in the record outbox names the quarantine entry,
 `last_error.quarantine_id`), that use no longer counts against the budget,
 though it keeps its place in the chain. A use quarantined as a conflict or a
-chain mismatch did not continue the chain and still counts. The holder never
+chain mismatch did not continue the chain and still counts, and so does one
+quarantined as `grant_budget_exhausted`: the NA counted more admitted uses
+than the holder knew of, and not counting it would keep the holder signing
+uses the NA refuses. The holder never
 signs a use the NA would refuse without storing it: secret material is
 checked first. A chain gap and a use dated ahead of the NA's clock
 (`grant_use_in_future`) are retried.

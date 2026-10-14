@@ -205,8 +205,11 @@ export interface GrantSyncResult {
 /** The NA's answers to a time token request that end the grant for its holder. */
 const ENDED = new Set(['grant_expired', 'grant_revoked', 'grant_budget_exhausted', 'grant_bearer_key_retired']);
 
-/** The refusals of a quarantined use that did not continue the chain. */
-const OFF_CHAIN = new Set(['grant_use_conflict', 'grant_use_chain_mismatch']);
+/**
+ * The refusals of a quarantined use that still counts against the holder's budget: a conflict or a chain
+ * mismatch did not continue the chain, and a use refused as over budget means the holder's count is short.
+ */
+const STILL_COUNTED = new Set(['grant_use_conflict', 'grant_use_chain_mismatch', 'grant_budget_exhausted']);
 
 const PROBE = 'genesis-mesh grant holder: bearer key check for grant ';
 
@@ -503,8 +506,8 @@ export class GrantHolder {
   /**
    * How many of the holder's uses the NA has quarantined after they continued the chain: the dead letters
    * of this grant in the record outbox the NA answered with a quarantine entry, other than a conflict or a
-   * chain mismatch (which do not continue it). They keep their place in the chain but are never admitted,
-   * so the budget, which counts admitted uses, does not count them.
+   * chain mismatch (which do not continue it) or an exhausted budget (`STILL_COUNTED`). They keep their
+   * place in the chain but are never admitted, so the budget, which counts admitted uses, does not count them.
    */
   private async quarantinedUses(): Promise<number> {
     const { grant, uses } = this.current;
@@ -513,7 +516,7 @@ export class GrantHolder {
       const use = entry.record as GrantExecutionEvidence;
       const failure = entry.last_error;
       if (entry.kind === 'grant_execution' && entry.state === 'dead_letter' && use.grant_id === grant.grant_id
-        && use.use_sequence <= uses && typeof failure?.quarantine_id === 'string' && !OFF_CHAIN.has(failure.code)) {
+        && use.use_sequence <= uses && typeof failure?.quarantine_id === 'string' && !STILL_COUNTED.has(failure.code)) {
         quarantined.add(use.use_sequence);
       }
     }

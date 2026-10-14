@@ -360,6 +360,20 @@ describe('GrantHolder: acting within a grant offline (v1.6.0)', () => {
     expect(over).toMatchObject({ path: 'break_glass', unusable: 'grant_budget_exhausted' });
   });
 
+  it('keeps counting a use quarantined as over budget, so a holder whose count is short does not keep signing', async () => {
+    // Budget 2 so the holder signs use 2 at all; the NA, whose view diverged (another holder used the
+    // budget), admits use 1 and quarantines use 2 as over budget.
+    const x = await setup({ max_uses: 2 });
+    await x.holder.act(x.rotate(), async () => ({}));
+    x.na.quarantineNext = 'grant_budget_exhausted';
+    const second = await x.holder.act(x.rotate(), async () => ({})) as GrantUseResult<unknown>;
+    expect(second.queued).toMatchObject({ state: 'dead_letter', last_error: { code: 'grant_budget_exhausted', quarantine_id: 'q-1' } });
+    x.na.offline = true;
+    const over = await x.holder.act(x.rotate(), async () => ({})) as GrantFallbackResult<unknown>;
+    expect(over).toMatchObject({ path: 'break_glass', unusable: 'grant_budget_exhausted' });
+    expect(x.na.uses).toHaveLength(1);
+  });
+
   it('refuses offline a use outside the bearer key resource prefix, or without a resource', async () => {
     const x = await setup({}, { resourcePrefix: 'kv:site-7/' });
     const action = jest.fn(async () => ({}));
