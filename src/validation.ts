@@ -164,7 +164,8 @@ export const validBreakGlass = shape({
 export const validJudgement = shape({
   judgement_id: bounded(128), subject_kind: oneOf('observation', 'break_glass'), subject_id: bounded(128),
   subject_digest: sha256, subject_store_sequence: positive, resource_id: bounded(256), action, capability: bounded(256),
-  governed_by: oneOf('prior_decision', 'after_the_fact'), verdict, reason: absent(bounded(1024, 0)),
+  // v1.6.0: `grant`, a change matched to a grant use.
+  governed_by: oneOf('prior_decision', 'after_the_fact', 'grant'), verdict, reason: absent(bounded(1024, 0)),
   evaluated_as_of: utc, evaluated_from: absent(utc), policy_binding: absent(policyBinding),
   gate_results: filled(array(gateResult)), current_verdict: absent(verdict), current_policy_set_digest: absent(string),
   flagged_for_review: absent(boolean), matched_evidence_id: absent(string), matched_decision_id: absent(string),
@@ -172,8 +173,9 @@ export const validJudgement = shape({
   signature: optional(signature),
 });
 export const validQuarantine = shape({
-  // v1.4.0: a refused remediation record is kept too.
-  quarantine_id: bounded(128), record_kind: oneOf('execution', 'observation', 'break_glass', 'remediation'), record: isObject,
+  // v1.4.0: a refused remediation record is kept too; v1.6.0: a refused grant use.
+  quarantine_id: bounded(128),
+  record_kind: oneOf('execution', 'observation', 'break_glass', 'remediation', 'grant_execution'), record: isObject,
   record_digest: sha256, rejection_code: bounded(128), detail: filled(bounded(1024, 0)), resource_id: absent(bounded(256)),
   quarantined_at: utc, issuer_sovereign_id: string, issued_by: string, signature: optional(signature),
 });

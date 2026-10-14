@@ -19,7 +19,8 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import { canonicalJsonUnescaped, compareCodePoints, copyPythonFloats, defineMember, parseJson, verifyCanonical } from './auth.js';
 import { checkEventsAgainstAnchors, startingCheckpoint, verifyStoreAnchors, type StoreAnchor } from './anchors.js';
-import { entryDigest, policyDigest, policySetDigest } from './canonical.js';
+import { attestationDigest, entryDigest, policyDigest, policySetDigest } from './canonical.js';
+import { validGrant, type CapabilityGrant } from './grants.js';
 import { naSignatureAt, verifyKeyHistory, type NAKey, type NAKeyHistory, type NAKeys } from './key-history.js';
 import { outOfBandCanonical } from './out-of-band.js';
 import { nonCanonicalFields, signedAsReceived, strictRefusal, unknownFields } from './strict.js';
@@ -760,7 +761,7 @@ function checkCitedTrust(
     const kind = event.entry.entry_kind;
     const seq = event.entry.store_sequence;
     const where = seq < fromSequence ? CITED_FILE : ENTRIES_FILE;
-    let binding: PolicyBinding | null | undefined = null;
+    let binding: Pick<PolicyBinding, 'policies' | 'policy_set_digest'> | null | undefined = null;
     if (kind === 'decision') {
       const decision = event.payload['decision'];
       if (!validDecision(decision)) continue;
@@ -782,6 +783,16 @@ function checkCitedTrust(
     } else if (kind === 'judgement') {
       if (!validJudgement(event.payload)) continue;
       binding = (event.payload as { policy_binding?: PolicyBinding | null }).policy_binding;
+    } else if (kind === 'grant') {
+      // v1.6.0: the policy versions a grant is bound to, and the attestation it rests on.
+      if (!validGrant(event.payload)) continue;
+      const grant = event.payload as unknown as CapabilityGrant;
+      binding = grant.policy_binding;
+      if (grant.basis_kind === 'attestation') {
+        const bound = byAttestation.get(grant.basis_id);
+        if (bound === undefined) fail(where, seq, 'cited_attestation_missing', grant.basis_id);
+        else if (attestationDigest(bound) !== grant.basis_digest) fail(where, seq, 'cited_attestation_mismatch', grant.basis_id);
+      }
     }
     if (binding === null || binding === undefined) continue;
     if (policySetDigest(binding.policies) !== binding.policy_set_digest) {
@@ -936,6 +947,8 @@ export function renderReport(input: {
   const breakGlass: unknown[][] = [];
   const quarantined: unknown[][] = [];
   const others: unknown[][] = [];
+  const grants: unknown[][] = [];
+  const grantRevocations: unknown[][] = [];
   const stateOf = (subject: unknown): unknown => {
     const key = pyStr(subject);
     const value = Object.hasOwn(states, key) ? states[key] : undefined;
@@ -948,13 +961,23 @@ export function renderReport(input: {
     if (kind === 'execution') {
       changes.push([seq, kind, p['resource_id'], p['resource_action'], p['executed_at'], 'prior_decision',
         or(stateOf(p['decision_id']), 'recorded'), p['executor_sovereign_id']]);
+    } else if (kind === 'grant_execution') {
+      // v1.6.0: a change made under a grant, governed by it.
+      changes.push([seq, kind, p['resource_id'], p['resource_action'], p['executed_at'], 'grant', 'recorded',
+        p['executor_sovereign_id']]);
+    } else if (kind === 'grant') {
+      grants.push([seq, p['grant_id'], p['bearer_sovereign_id'], p['capabilities'], p['valid_from'], p['valid_until'],
+        p['max_uses']]);
+    } else if (kind === 'grant_revocation') {
+      grantRevocations.push([seq, p['grant_id'], p['reason'], p['revoked_at']]);
     } else if (kind === 'observation' || kind === 'break_glass') {
       const recordId = pyStr(or(p['observation_id'], p['break_glass_id']));
       const judgement = judgements.get(`${kind}\u0000${recordId}`);
       let state = judgement ? stateOf(judgement['judgement_id']) : undefined;
       if (state === undefined || state === null) {
         state = judgement === undefined ? 'observed'
-          : judgement['governed_by'] === 'prior_decision' && judgement['verdict'] !== 'deny' ? 'matched'
+          : (judgement['governed_by'] === 'prior_decision' || judgement['governed_by'] === 'grant')
+            && judgement['verdict'] !== 'deny' ? 'matched'
             : ({ allow: 'judged_allowed', deny: 'judged_denied' } as Record<string, string>)[pyStr(judgement['verdict'])]
               ?? 'indeterminate';
       }
@@ -995,6 +1018,11 @@ export function renderReport(input: {
     ['Quarantined records', ['Entry', 'Record kind', 'Resource', 'Rejection', 'At'], quarantined],
     ['Key successions and archives', ['Entry', 'Kind', 'ID', 'At'], others],
   ];
+  // v1.6.0: grants and their revocations, only in a pack that holds them (a pack without them renders as in 1.5).
+  if (grants.length > 0) {
+    sections.push(['Grants', ['Entry', 'Grant', 'Bearer', 'Capabilities', 'Valid from', 'Valid until', 'Budget'], grants]);
+  }
+  if (grantRevocations.length > 0) sections.push(['Grant revocations', ['Entry', 'Grant', 'Reason', 'Revoked at'], grantRevocations]);
   for (const [title, headers, rows] of sections) lines.push(`## ${title}`, '', ...table(headers, rows));
   const text = lines.join('\n');
   let end = text.length;
@@ -1185,7 +1213,7 @@ interface ChangeRecord {
 interface Group {
   group: string;
   members: ChangeRecord[];
-  /** The execution evidence or break-glass record when the group holds one, else its observation. */
+  /** The execution evidence, grant use or break-glass record when the group holds one, else its observation. */
   representative: ChangeRecord;
 }
 
@@ -1229,6 +1257,10 @@ function changeRecords(entries: readonly EvidenceEvent[], cited: readonly Eviden
       } else if (kind === 'execution' && truthy(p['resource_id'])) {
         const when = time(p['executed_at']);
         add(p['evidence_id'], p['resource_id'], p['resource_action'], when, when);
+      } else if (kind === 'grant_execution' && truthy(p['resource_id'])) {
+        // v1.6.0: a change made under a grant.
+        const when = time(p['executed_at']);
+        add(p['use_id'], p['resource_id'], p['resource_action'], when, when);
       }
     } catch {
       continue;

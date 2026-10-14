@@ -66,8 +66,14 @@ export function attestationDigest(attestation: MembershipAttestation): string {
   return canonicalDigest(without(attestation, ['signatures']));
 }
 
+/**
+ * Feed fields left out of the signed form when absent (v1.6.0; checked against
+ * the field registry): an NA without `EVIDENCE_GRANTS=on` keeps the 1.5 form.
+ */
+export const FEED_OMITTED_WHEN_ABSENT = ['revoked_grant_ids'] as const;
+
 export function revocationFeedCanonical(feed: SovereignRevocationFeed): string {
-  return canonicalJson(without(feed, ['signatures']));
+  return canonicalJson(without(feed, ['signatures'], FEED_OMITTED_WHEN_ABSENT));
 }
 
 /**

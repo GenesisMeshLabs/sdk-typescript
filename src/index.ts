@@ -10,6 +10,7 @@ import { PolicyClient } from './policy.js';
 import { EvidenceStoreClient } from './evidence_store.js';
 import { HealthClient } from './health.js';
 import { NetworkAuthorityClient } from './network_authority.js';
+import { GrantsClient } from './grants-client.js';
 
 export class GenesisMeshClient {
   readonly agreement: AgreementClient;
@@ -26,6 +27,8 @@ export class GenesisMeshClient {
   readonly health: HealthClient;
   /** The NA's own keys: its key history (v1.5.0). */
   readonly na: NetworkAuthorityClient;
+  /** Pre-issued grants, their time tokens and uses (v1.6.0, beta routes). */
+  readonly grants: GrantsClient;
 
   constructor(options: ClientOptions) {
     const http = new HttpTransport(options);
@@ -36,6 +39,7 @@ export class GenesisMeshClient {
     this.evidenceStore = new EvidenceStoreClient(http, options.outbox, options.recordOutbox);
     this.health        = new HealthClient(http);
     this.na            = new NetworkAuthorityClient(http);
+    this.grants        = new GrantsClient(http);
     this.attestation   = new AttestationClient(http);
     this.disclosure    = new DisclosureClient(http);
     this.consensus     = new ConsensusClient(http);
@@ -51,6 +55,7 @@ export { EvidenceClient } from './evidence.js';
 export { EvidenceStoreClient } from './evidence_store.js';
 export { HealthClient } from './health.js';
 export { NetworkAuthorityClient, KeyHistoryError } from './network_authority.js';
+export { GrantsClient } from './grants-client.js';
 export { AttestationClient } from './attestation.js';
 export { DisclosureClient } from './disclosure.js';
 export { ConsensusClient } from './consensus.js';
@@ -333,6 +338,95 @@ export type {
   UrgentActionResult,
 } from './governance.js';
 
+// Pre-issued grants (v1.6.0)
+export {
+  GRANT_CLOCK_SKEW_SECONDS,
+  GRANT_MAX_USES,
+  GRANT_MAX_USES_PER_TIME_TOKEN,
+  GRANT_MAX_VALIDITY_SECONDS,
+  GRANT_USE_REJECTION_CODES,
+  MAX_ENVELOPE_PARAMETERS,
+  MAX_ENVELOPE_VALUES,
+  MAX_GRANT_CAPABILITIES,
+  QUARANTINED_USE_CODES,
+  GrantRecordError,
+  checkGrantUse,
+  envelopeParameter,
+  envelopeProblem,
+  envelopeShapeProblem,
+  grantDigest,
+  grantRecordCanonical,
+  grantRecordDigest,
+  grantUseDigest,
+  grantUseRecord,
+  inRange,
+  nextPreviousUse,
+  normalizeNumber,
+  parameterValueProblem,
+  scalarEquals,
+  signGrantUse,
+  signTimeTokenRequest,
+  tokenSignatureValid,
+  useProblem,
+  useSecretProblem,
+  validGrant,
+  validGrantRevocation,
+  validGrantUse,
+  validTimeToken,
+  validTimeTokenRequest,
+  verifyCapabilityGrant,
+  verifyGrantRevocation,
+  verifyGrantUse,
+  verifyTimeToken,
+  verifyTimeTokenRequest,
+} from './grants.js';
+export type {
+  CapabilityGrant,
+  EnvelopeParameter,
+  EnvelopeParameterInput,
+  GrantBasisKind,
+  GrantExecutionEvidence,
+  GrantGateDecision,
+  GrantGateOutcome,
+  GrantNumber,
+  GrantPolicyBinding,
+  GrantRevocationReason,
+  GrantRevocationRecord,
+  GrantScalar,
+  GrantUseInput,
+  GrantUseOutcome,
+  GrantUseRejectionCode,
+  NumericRange,
+  PreviousUse,
+  TimeToken,
+  TimeTokenRequest,
+  TimeTokenRequestInput,
+  UseCheck,
+  UseProblem,
+} from './grants.js';
+
+export {
+  GRANT_FALLBACK_CODES,
+  GrantHolder,
+  GrantRefusedError,
+  GrantStateNotKeptError,
+  GrantUnusableError,
+} from './grant-holder.js';
+export type {
+  GrantAction,
+  GrantActParams,
+  GrantActResult,
+  GrantAuthority,
+  GrantFallback,
+  GrantFallbackResult,
+  GrantHolderClients,
+  GrantHolderOptions,
+  GrantHolderState,
+  GrantSyncResult,
+  GrantUnusableCode,
+  GrantUseResult,
+} from './grant-holder.js';
+
 // Remediation, reviews and emergency changes (v1.4.0)
 export {
   DEFAULT_REMEDIATION,
@@ -431,6 +525,7 @@ export type * from './evidence.js';
 export type * from './evidence_store.js';
 export type * from './health.js';
 export type * from './network_authority.js';
+export type * from './grants-client.js';
 export type * from './attestation.js';
 export type * from './disclosure.js';
 export type * from './consensus.js';

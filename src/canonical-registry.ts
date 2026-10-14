@@ -21,6 +21,9 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
     "break_glass",
     "decision",
     "execution",
+    "grant",
+    "grant_execution",
+    "grant_revocation",
     "judgement",
     "justification",
     "key_succession",
@@ -259,6 +262,41 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "outcome_detail"
       ]
     },
+    "CapabilityGrant": {
+      "fields": {
+        "basis_checks": {
+          "list": "GateResult"
+        },
+        "basis_digest": null,
+        "basis_id": null,
+        "basis_kind": null,
+        "bearer_key_id": null,
+        "bearer_public_key": null,
+        "bearer_sovereign_id": null,
+        "capabilities": null,
+        "grant_id": null,
+        "issued_at": "timestamp",
+        "issued_by": null,
+        "issuer_sovereign_id": null,
+        "max_uses": null,
+        "max_uses_per_time_token": null,
+        "parameter_envelope": {
+          "map": "EnvelopeParameter"
+        },
+        "policy_binding": {
+          "object": "GrantPolicyBinding"
+        },
+        "provider_sovereign_id": null,
+        "requester_sovereign_id": null,
+        "signature": {
+          "object": "Signature"
+        },
+        "valid_from": "timestamp",
+        "valid_until": "timestamp"
+      },
+      "root": true,
+      "signature_field": "signature"
+    },
     "ContextRecord": {
       "fields": {
         "agreement_id": null,
@@ -329,6 +367,16 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "justification_parameter": null,
         "max_lifetime_seconds": null,
         "stands_for": null
+      }
+    },
+    "EnvelopeParameter": {
+      "fields": {
+        "number_range": {
+          "object": "NumericRange"
+        },
+        "one_of": null,
+        "required": null,
+        "subset_of": null
       }
     },
     "EvidenceStoreEntry": {
@@ -480,6 +528,84 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
       "root": true,
       "signature_field": "signatures"
     },
+    "GrantExecutionEvidence": {
+      "fields": {
+        "capability": null,
+        "executed_at": "timestamp",
+        "execution_parameters": "open",
+        "executor_sovereign_id": null,
+        "grant_digest": null,
+        "grant_id": null,
+        "outcome": null,
+        "outcome_detail": null,
+        "prev_use_digest": null,
+        "request_parameters": "open",
+        "resource_action": null,
+        "resource_id": null,
+        "signature": {
+          "object": "Signature"
+        },
+        "time_token": {
+          "object": "TimeToken"
+        },
+        "use_id": null,
+        "use_sequence": null
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "prev_use_digest",
+        "resource_id",
+        "resource_action",
+        "outcome_detail"
+      ]
+    },
+    "GrantGateOutcome": {
+      "fields": {
+        "capability": null,
+        "detail": null,
+        "gate_id": null,
+        "gate_type": null,
+        "mode": null,
+        "outcome": null,
+        "policy_id": null,
+        "policy_version": null
+      }
+    },
+    "GrantPolicyBinding": {
+      "fields": {
+        "gate_outcomes": {
+          "list": "GrantGateOutcome"
+        },
+        "policies": {
+          "list": "AppliedPolicy"
+        },
+        "policy_set_digest": null,
+        "registry_gate_types": null
+      }
+    },
+    "GrantRevocationRecord": {
+      "fields": {
+        "detail": null,
+        "grant_digest": null,
+        "grant_id": null,
+        "issued_by": null,
+        "issuer_sovereign_id": null,
+        "reason": null,
+        "revocation_id": null,
+        "revoked_at": "timestamp",
+        "revoked_by": null,
+        "signature": {
+          "object": "Signature"
+        }
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "detail",
+        "revoked_by"
+      ]
+    },
     "JudgementRecord": {
       "fields": {
         "action": null,
@@ -592,6 +718,15 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "public_key": null,
         "valid_from": "timestamp",
         "valid_to": "timestamp"
+      }
+    },
+    "NumericRange": {
+      "fields": {
+        "exclusive_maximum": null,
+        "exclusive_minimum": null,
+        "maximum": null,
+        "minimum": null,
+        "number_type": null
       }
     },
     "ObservationRecord": {
@@ -888,13 +1023,17 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "issuer_sovereign_id": null,
         "revocation_reasons": "open",
         "revoked_attestation_ids": null,
+        "revoked_grant_ids": null,
         "sequence": null,
         "signatures": {
           "list": "Signature"
         }
       },
       "root": true,
-      "signature_field": "signatures"
+      "signature_field": "signatures",
+      "omit_when_none": [
+        "revoked_grant_ids"
+      ]
     },
     "StoreAnchor": {
       "fields": {
@@ -913,6 +1052,41 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
       "signature_field": "signature",
       "omit_when_none": [
         "previous_anchor_digest"
+      ]
+    },
+    "TimeToken": {
+      "fields": {
+        "grant_id": null,
+        "issued_at": "timestamp",
+        "issued_by": null,
+        "issuer_sovereign_id": null,
+        "signature": {
+          "object": "Signature"
+        },
+        "time_token_id": null,
+        "use_head_digest": null,
+        "use_sequence": null
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "use_head_digest"
+      ]
+    },
+    "TimeTokenRequest": {
+      "fields": {
+        "grant_id": null,
+        "requested_at": "timestamp",
+        "signature": {
+          "object": "Signature"
+        },
+        "use_head_digest": null,
+        "use_sequence": null
+      },
+      "root": true,
+      "signature_field": "signature",
+      "omit_when_none": [
+        "use_head_digest"
       ]
     }
   }
