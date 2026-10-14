@@ -91,10 +91,11 @@ From 1.6.0 the NA can authorise a change in advance: `gm.grants.issueGrant`
 asks it for a grant (one bearer key, its capabilities, a validity of at most
 24 hours, a budget and a closed parameter envelope, checked against every
 policy that applies). A `GrantHolder` acts within the grant while the NA
-cannot be reached: it checks the capability, the envelope, the budget, the
-validity, the revocation feed it holds and its time token offline, signs
-each use with the bearer key and keeps it in the record outbox, and
-`holder.sync()` uploads the uses when the NA is back. When the grant has
+cannot be reached: it checks the bearer key's resource prefix, the
+capability, the envelope, the budget, the validity, the revocation feed it
+holds and its time token offline, signs each use with the bearer key and
+keeps it in the record outbox, and `holder.sync()` uploads the uses when the
+NA is back (a use the NA quarantines keeps its place in the chain). When the grant has
 ended, is spent or is revoked, `holder.act` with a `fallback` goes through
 `governedAction` with break-glass naming the capability: the change is never
 blocked, and a DENY is never broken through. See

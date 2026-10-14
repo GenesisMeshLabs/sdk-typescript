@@ -43,9 +43,31 @@ const issued = await gm.grants.issueGrant({
 
 A refusal is a `422` naming the first problem (`grant_gate_may_deny`,
 `grant_undecidable_attributes`, ...; every problem in `error.details.problems`).
-`listGrants({ status, bearer_key_id, limit, before })` and `getGrant(id)`
-read grants (read tier); `revokeGrant(id, reason)` revokes one (privileged).
-Hand the device the signed grant and its first time token.
+A `409 grant_issuance_conflict` means what the grant rests on changed while
+the NA checked it: retry (`isRetryableConflict` says so). Hand the device the
+signed grant and its first time token.
+
+Reading (read tier):
+
+- `listGrants({ status, bearer_key_id, limit, before })`: newest first by
+  `issued_at`, then `grant_id`; `before` is the previous page's
+  `next_before`, the ID of its last grant. `status: 'active'` includes grants
+  whose summary says `scheduled` or `exhausted`;
+- `getGrant(id)`: the summary, `remaining_uses`, `chain_length` (the
+  positions of its use chain, admitted and quarantined), the signed grant,
+  its policy versions and its revocation;
+- `listGrantUses(id, { limit, before })` (beta): its use chain, newest first,
+  each use `admitted` or `quarantined` (a refused use that continued the
+  chain, with its `rejection_code`); `before` is a `use_sequence`;
+- `evidenceStore.search({ grant_id })`: a grant's uses and its revocation;
+  `evidenceStore.storedResourceHead(id)` names a resource's head, which may
+  be a grant use (`entry_kind`, `record_id`).
+
+`revokeGrant(id, reason)` revokes one (privileged): `reason` is stored as the
+revocation's `detail`, and the revocation's `reason` is `operator`. The NA
+also revokes a grant itself: `attestation_revoked`, `policy_deactivated`,
+`policy_activated`, `bearer_key_retired`, and `agreement_untrusted` when its
+agreement basis is no longer signed by parties the NA trusts.
 
 ## Holding a grant
 
@@ -62,6 +84,7 @@ const holder = new GrantHolder({
   signer: seedSigner(deviceSeed, 'site-7-device'), // the bearer key
   naPublicKeys: history,                            // a key list, or the NA's key history
   grant: issued.grant, timeToken: issued.time_token,
+  resourcePrefix: 'kv:site-7/',                    // the bearer key's registered resource_prefix, if any
   persist: state => saveJson('/var/lib/device/grant.json', state),
 });
 
@@ -82,13 +105,14 @@ checks each request offline, in this order:
 
 | Check | Refused as |
 |---|---|
+| No secret material in the request parameters | `grant_use_secret_material` |
+| The resource is within the bearer key's `resourcePrefix` (a use without a resource is not) | `grant_use_out_of_scope` |
 | The capability is one of the grant's | `grant_capability_mismatch` |
 | The request parameters are inside the closed envelope | `grant_envelope_mismatch` |
-| No secret material in the request parameters | `grant_use_secret_material` |
 | The budget, counting the holder's own uses | `grant_budget_exhausted` (fallback) |
 | The validity | `grant_expired` past its end (fallback); `grant_use_outside_validity` before its start |
 | The revocation feed it holds, and what the NA last answered | `grant_revoked` (fallback), or the NA's code |
-| The uses left on its time token | `grant_time_token_exhausted` (fallback), after asking the NA for a fresh token when it answers |
+| At most `max_uses_per_time_token` uses after the use its time token names | `grant_time_token_exhausted` (fallback), after asking the NA for a fresh token when it answers |
 
 A request outside the grant throws `GrantRefusedError` and runs nothing. A
 request within it runs `action` with `{ path: 'grant' }`; the use is signed
@@ -100,6 +124,14 @@ NA's dates the use at the token's time. An action that throws is recorded as
 a `failure` use and the error rethrown; metadata the secret guard refuses is
 left out of the use and named in `dropped`. Calls to one holder run one at a
 time, so two uses never take one place in the chain.
+
+Every use the holder signs takes the next place in its chain. A use the NA
+refuses for good is kept by the NA as a quarantine entry and becomes the
+chain's head, so it stays a dead letter in the record outbox and the uses
+after it are still uploaded, each judged on its own (the budget counts
+admitted uses only). The holder never signs a use the NA would refuse without
+storing it: secret material is checked first. A chain gap and a use dated
+ahead of the NA's clock (`grant_use_in_future`) are retried.
 
 Persist `holder.state` (the `persist` option is called after every change)
 together with the record outbox, and resume with `new GrantHolder({ ...,
@@ -163,7 +195,10 @@ digests a use names its grant and its previous use by. `signGrantUse` and
 `signTimeTokenRequest` build and sign the holder's records, refused first as
 the NA would refuse them (`grant_use_malformed`, `grant_use_secret_material`,
 `time_token_request_malformed`, or `StrictJsonError`); `useProblem` runs the
-NA's use rules in their order with what the caller holds.
+NA's use rules in their order with what the caller holds (the last admitted
+use, how many uses were admitted, the use the token names), and
+`continuesChain` says whether a use continues a chain's head. A `use_id` is a
+UUID in its canonical lowercase form.
 
 Numbers in an envelope follow one rule in every implementation:
 `envelopeParameter` reads a parameter as the NA does (an integral number is an
@@ -179,16 +214,22 @@ why request parameters are outside an envelope.
 
 - `grant` and `grant_revocation` entries are signed by the NA, a
   `grant_execution` entry by its grant's bearer key, a registered executor key
-  of its executor sovereign;
+  of its executor sovereign; a grant whose signature fails is not held;
+- the uses of a grant form a chain (`grant_use_chain_break`), whose head may
+  be a quarantined use (a `quarantine` entry of `record_kind`
+  `grant_execution`, signed by the bearer key) that continued it;
 - in a run from the store's start, a use and a revocation name a grant the run
-  holds (`grant_missing`; in an audit pack `cited_record_missing`), with its
-  digest (`grant_mismatch`); a use is signed by the grant's bearer key
-  (`grant_bearer_mismatch`), the uses of a grant form a chain
-  (`grant_use_chain_break`), and a grant is revoked once
-  (`duplicate_grant_revocation`);
+  holds (`grant_missing`; in an audit pack `cited_record_missing`); a use is
+  signed by the grant's bearer key (`grant_bearer_mismatch`), within that
+  key's `resource_prefix` (`grant_use_out_of_scope`), and names the grant's
+  digest (`grant_mismatch`); a grant is revoked once
+  (`duplicate_grant_revocation`); a `use_id` is not the ID of execution
+  evidence or a break-glass record (`duplicate_record`);
 - then each use is checked by the NA's use rules, with the admission codes
   (`grant_envelope_mismatch`, `grant_time_token_invalid`,
-  `grant_use_uploaded_late`, `grant_revoked`, ...);
+  `grant_use_uploaded_late`, `grant_revoked`, ...): the budget counts admitted
+  uses when the run holds the chain from its first use, and the order and time
+  rules compare a use with the last admitted one;
 - a use takes the next position of its resource's chain, which the NA assigns
   in the envelope (`resource_chain_break`); a use without a resource has none
   (`envelope_mismatch`), and the next execution evidence links to the use.
@@ -198,9 +239,15 @@ and a quarantine entry may keep a refused use (`record_kind:
 grant_execution`). `verifyRevocationFeedSignature` verifies a feed with or
 without `revoked_grant_ids`. `verifyAuditPack` checks a grant's policy
 binding and basis attestation as a decision's (`cited_policy_missing`,
-`cited_attestation_missing`, `cited_attestation_mismatch`), and `renderReport`
-lists uses as changes governed by the grant, with *Grants* and *Grant
-revocations* sections in a pack that holds them.
+`cited_attestation_missing`, `cited_attestation_mismatch`), and an agreement
+basis from the pack's `trust/agreements.jsonl` (a file a pack holds only when
+it holds a grant under an agreement): held (`cited_agreement_missing`), the
+one the grant's `basis_digest` names, between the grant's parties
+(`cited_agreement_mismatch`), and signed by both with keys the pack vouches
+for (`agreement_invalid_signature`). A pack cites the whole chain of a grant
+its range uses, quarantined uses too. `renderReport` lists uses as changes
+governed by the grant, with *Grants* and *Grant revocations* sections in a
+pack that holds them.
 
 The conformance suite `grants` runs every vector but the NA's issuance check
 (`issuance`), which an SDK does not run.
