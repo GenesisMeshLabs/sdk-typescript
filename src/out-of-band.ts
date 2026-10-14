@@ -35,8 +35,12 @@ import { MAX_METADATA_BYTES, secretMaterial } from './execution.js';
 import type { ReconciliationFinding, ReconciliationStatus } from './governance.js';
 import type { GateResult, PolicyBinding, ResourceAction, Signature } from './types.js';
 
-/** How the NA came to know a change: before it, through a decision, or after it, by a judgement. */
-export type GovernedBy = 'prior_decision' | 'after_the_fact';
+/**
+ * How the NA came to know a change: before it, through a decision, or after
+ * it, by a judgement. v1.6.0: `grant`, a change made under a grant the NA
+ * signed in advance (the judgement matched a grant use).
+ */
+export type GovernedBy = 'prior_decision' | 'after_the_fact' | 'grant';
 /** A judgement's verdict; `indeterminate` when the NA cannot tell what applied then. */
 export type Verdict = 'allow' | 'deny' | 'indeterminate';
 /** Why a controller broke the glass: an evaluation failure a later attempt can overcome. */
@@ -118,8 +122,8 @@ export interface JudgementRecord {
 /** An authentic record the NA refused after its action happened, kept with the refusal. */
 export interface QuarantineRecord {
   quarantine_id: string;
-  /** v1.4.0: also `remediation`, a refused remediation record. */
-  record_kind: 'execution' | 'observation' | 'break_glass' | 'remediation';
+  /** v1.4.0: also `remediation`, a refused remediation record; v1.6.0: `grant_execution`, a refused grant use. */
+  record_kind: 'execution' | 'observation' | 'break_glass' | 'remediation' | 'grant_execution';
   record: Record<string, unknown>;
   record_digest: string;
   rejection_code: string;

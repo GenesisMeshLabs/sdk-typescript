@@ -11,10 +11,15 @@ import {
   MemoryOutbox, MetadataRefusedError, executionDigest, ObservationRecorder,
   cancelByRotatingForward, urgentAction, reviewApprovalProblem, verifyReviewRecord, verifyRemediationRecord,
   auditPackFiles, verifyAuditPack, packReasons, verifyStoreAnchors, checkEventsAgainstAnchors, verifyArchiveRecord,
+  FileRecordOutbox, GrantHolder, verifyCapabilityGrant, verifyTimeToken, verifyGrantUse,
 } from '../src/index.js';
 import type {
   BoundaryPolicy, BoundaryPolicyIntent, BreakGlassResult, EvidenceEvent, GovernedActionParams, RecordOutboxEntry,
+  GrantFallbackResult, GrantUseResult, GovernedActionResult,
 } from '../src/index.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { generateTestKeyPair } from './helpers.js';
 
 const enabled = Boolean(process.env.GM_E2E_PYTHON || process.env.GM_E2E_BASE_URL);
@@ -29,6 +34,8 @@ suite('SDK against a live Python Network Authority', () => {
     remediation?: boolean; reviewer?: { keyId: string; signingKeyBase64: string };
     /** 1.5.0: the key history, audit packs and archives; `rootPublicKey` signed the genesis block. */
     audit?: boolean; rootPublicKey?: string;
+    /** 1.6.0: pre-issued grants (EVIDENCE_GRANTS=on); `control`: the NA stops and starts on request. */
+    grants?: boolean; control?: boolean;
   };
   let naPublicKey: string;
   let diagnostics = '';
@@ -546,4 +553,173 @@ suite('SDK against a live Python Network Authority', () => {
     expect(archives.archives.map(a => a.pack_id)).toContain(pack.manifest.pack_id);
     expect(archives.archived_through_sequence).toBe(pack.manifest.through_sequence);
   }, 60_000);
+  /** Stop or start the NA's server (its store and keys are kept), and wait until it is done (1.6.0). */
+  async function control(command: 'stop' | 'start'): Promise<void> {
+    const lines = createInterface({ input: child!.stdout });
+    const done = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`NA ${command} timed out: ${diagnostics}`)), 20_000);
+      lines.on('line', line => {
+        if (!line.includes('"control"')) return;
+        clearTimeout(timer);
+        lines.close();
+        resolve();
+      });
+    });
+    child!.stdin.write(`${command}\n`);
+    await done;
+  }
+
+  it('acts within a grant with the NA stopped, uploads every use on reconnect, refuses a revoked grant and falls back to break-glass past expiry (1.6.0)', async () => {
+    if (!config.grants || !config.control || !child) return; // a core before 1.6.0, or an NA this test cannot stop
+    const id = randomUUID();
+    const capability = `sdk.grant.${id}`;
+    const resource = `kv:grant-${id}/api-key`;
+    const window = { valid_from: new Date(Date.now() - 60_000).toISOString(), valid_until: new Date(Date.now() + 3600_000).toISOString() };
+    const attestation = await gm.attestation.issue({ subject_id: `vendor-${id}`, roles: ['role:client'], claims: { capabilities: [capability] } });
+    const intent: BoundaryPolicyIntent = {
+      policy_id: `grant-${id}`, ...window, selector: { capabilities: [capability] },
+      gates: [{ gate_id: 'lifetime', gate_type: 'max_value.v1', order: 0, config: { path: 'request_parameters.lifetime_days', max: 90 } }],
+    };
+    const policy = await gm.policy.publish(intent);
+    await gm.policy.activate(policy.policy_id, policy.version);
+    const device = generateTestKeyPair();
+    const deviceId = `device-${id}`;
+    await gm.evidenceStore.registerExecutorKey({ key_id: deviceId, public_key: device.pubBase64, executor_sovereign_id: `site-${id}` });
+    const signer = seedSigner(device.seedBase64, deviceId);
+    const envelope = { lifetime_days: { number_range: { number_type: 'integer' as const, minimum: 1, maximum: 60 } } };
+
+    // An envelope a policy could deny is not granted.
+    await expect(gm.grants.issueGrant({
+      bearer_key_id: deviceId, capabilities: [capability], attestation_id: attestation.attestation_id,
+      valid_until: new Date(Date.now() + 60_000), max_uses: 3,
+      parameter_envelope: { lifetime_days: { number_range: { number_type: 'integer', minimum: 1, maximum: 400 } } },
+    })).rejects.toMatchObject({ status: 422, code: 'grant_gate_may_deny' });
+
+    const issued = await gm.grants.issueGrant({
+      bearer_key_id: deviceId, capabilities: [capability], attestation_id: attestation.attestation_id,
+      valid_until: new Date(Date.now() + 1800_000), max_uses: 3, max_uses_per_time_token: 2, parameter_envelope: envelope,
+    });
+    expect(verifyCapabilityGrant(issued.grant, [naPublicKey])).toBe(true);
+    expect(verifyTimeToken(issued.time_token, [naPublicKey])).toBe(true);
+    expect(issued.grant.policy_binding.policies.map(p => p.policy_id)).toEqual([policy.policy_id]);
+    expect((await gm.grants.getGrant(issued.grant.grant_id))).toMatchObject({ status: 'active', remaining_uses: 3 });
+
+    const dir = await mkdtemp(join(tmpdir(), 'gm-sdk-grants-'));
+    try {
+      const device1 = new GenesisMeshClient({ ...config, recordOutbox: new FileRecordOutbox(dir) });
+      const holder = new GrantHolder({
+        clients: device1, signer, naPublicKeys: [naPublicKey], grant: issued.grant, timeToken: issued.time_token,
+      });
+      const verify = { operatorPublicKeys: [naPublicKey], expectedPolicies: [policy], expectedAttestation: attestation };
+      const rotate = (lifetime: number) => ({
+        capability, request_parameters: { lifetime_days: lifetime }, resource_id: resource, resource_action: 'rotate' as const,
+        fallback: { justification: 'the site is cut off and the key must rotate', verify },
+      });
+
+      // The NA stops: two rotations within the grant, each kept in the outbox.
+      await control('stop');
+      const cloud: string[] = [];
+      const uses: GrantUseResult<unknown>[] = [];
+      for (const version of ['v8', 'v9']) {
+        const result = await holder.act(rotate(30), async authority => {
+          expect(authority.path).toBe('grant');
+          cloud.push(version);
+          return { execution_parameters: { version_id: version } };
+        });
+        expect(result).toMatchObject({ path: 'grant', queued: { state: 'pending', kind: 'grant_execution' } });
+        uses.push(result as GrantUseResult<unknown>);
+      }
+      expect(verifyGrantUse(uses[1]!.use, device.pubBase64)).toBe(true);
+      expect(cloud).toEqual(['v8', 'v9']);
+
+      // It starts again: a fresh time token naming the chain's head, and every use admitted in order.
+      await control('start');
+      const synced = await holder.sync();
+      expect(synced).toMatchObject({ reachable: true, unusable: null, timeToken: { use_sequence: 2 } });
+      expect(synced.flushed?.admitted.map(e => e.id)).toEqual(uses.map(u => u.use.use_id));
+      expect(synced.flushed?.dead_lettered).toEqual([]);
+      expect(await device1.evidenceStore.recordOutbox!.list()).toEqual([]);
+      expect(await gm.grants.getGrant(issued.grant.grant_id)).toMatchObject({ uses: 2, remaining_uses: 1, chain_length: 2 });
+      const chain = await gm.grants.listGrantUses(issued.grant.grant_id, { limit: 1 });
+      expect(chain.uses.map(u => [u.use_id, u.state, u.resource_sequence])).toEqual([[uses[1]!.use.use_id, 'admitted', 2]]);
+      expect((await gm.grants.listGrantUses(issued.grant.grant_id, { before: chain.next_before! })).uses.map(u => u.use_sequence)).toEqual([1]);
+      expect(await gm.evidenceStore.storedResourceHead(resource)).toMatchObject({
+        resource_sequence: 2, entry_kind: 'grant_execution', record_id: uses[1]!.use.use_id,
+      });
+      expect((await gm.evidenceStore.search({ grant_id: issued.grant.grant_id })).entries.map(e => e.entry.record_id))
+        .toEqual(uses.map(u => u.use.use_id));
+      const changes = await gm.evidenceStore.resourceChanges(resource);
+      expect(changes.changes.map(c => [c.kind, c.governed_by])).toEqual([['grant_execution', 'grant'], ['grant_execution', 'grant']]);
+      expect((await gm.evidenceStore.resourceHistory(resource)).verification.verified).toBe(true);
+
+      // A stricter version of the policy replaces the one the grant is bound to: the NA revokes it.
+      const stricter = await gm.policy.publish({ ...intent, gates: [{ ...intent.gates![0]!, config: { path: 'request_parameters.lifetime_days', max: 20 } }] });
+      await gm.policy.activate(stricter.policy_id, stricter.version);
+      expect(await gm.grants.getGrant(issued.grant.grant_id)).toMatchObject({ status: 'revoked' });
+      const feed = await gm.attestation.revocationFeed();
+      expect(feed.revoked_grant_ids).toContain(issued.grant.grant_id);
+      expect(verifyRevocationFeedSignature(feed, [naPublicKey])).toBe(true);
+      expect(await holder.refreshRevocationFeed()).toBe(true);
+      const stricterVerify = { ...verify, expectedPolicies: [stricter] };
+      const revokedRotate = (lifetime: number) => ({ ...rotate(lifetime), fallback: { ...rotate(lifetime).fallback, verify: stricterVerify } });
+
+      // Revoked, with the NA up: the NA decides, and its DENY is never broken through.
+      const denied = jest.fn(async () => ({}));
+      const deny = await holder.act(revokedRotate(30), denied) as GrantFallbackResult<unknown>;
+      expect(deny).toMatchObject({ path: 'decision', unusable: 'grant_revoked', result: { authorized: false } });
+      expect(denied).not.toHaveBeenCalled();
+      // Revoked, with the NA down: break-glass naming the capability, recorded and judged afterwards.
+      await control('stop');
+      const broke = await holder.act(revokedRotate(10), async authority => {
+        expect(authority).toEqual({ path: 'break_glass' });
+        return { execution_parameters: { version_id: 'v10' } };
+      }) as GrantFallbackResult<unknown>;
+      expect(broke).toMatchObject({ path: 'break_glass', unusable: 'grant_revoked' });
+      expect((broke.result as BreakGlassResult<unknown>).record).toMatchObject({ capability, resource_id: resource });
+      await control('start');
+      expect((await holder.sync()).flushed?.admitted.map(e => e.kind)).toEqual(['break_glass']);
+
+      // A short grant under the stricter policy, used past its end with the NA down: break-glass again.
+      const short = await gm.grants.issueGrant({
+        bearer_key_id: deviceId, capabilities: [capability], attestation_id: attestation.attestation_id,
+        valid_until: new Date(Date.now() + 3_000), max_uses: 1,
+        parameter_envelope: { lifetime_days: { number_range: { number_type: 'integer', minimum: 1, maximum: 20 } } },
+      });
+      const device2 = new GenesisMeshClient({ ...config, recordOutbox: new MemoryOutbox<RecordOutboxEntry>() });
+      const second = new GrantHolder({ clients: device2, signer, naPublicKeys: [naPublicKey], grant: short.grant, timeToken: short.time_token });
+      await new Promise(resolve => setTimeout(resolve, Math.max(0, Date.parse(short.grant.valid_until) - Date.now() + 500)));
+      await control('stop');
+      const expired = await second.act({ ...revokedRotate(10) }, async () => ({ execution_parameters: { version_id: 'v11' } })) as GrantFallbackResult<unknown>;
+      expect(expired).toMatchObject({ path: 'break_glass', unusable: 'grant_expired', result: { brokeGlass: true, queued: { state: 'pending' } } });
+      await control('start');
+      const judged = (await second.sync()).flushed!;
+      expect(judged.admitted.map(e => e.kind)).toEqual(['break_glass']);
+      const kinds = (await gm.evidenceStore.resourceChanges(resource)).changes.map(c => [c.kind, c.governed_by]);
+      expect(kinds).toEqual([
+        ['grant_execution', 'grant'], ['grant_execution', 'grant'], ['break_glass', 'after_the_fact'], ['break_glass', 'after_the_fact'],
+      ]);
+      expect((deny.result as GovernedActionResult<unknown>).evaluation.decision.authorized).toBe(false);
+    } finally {
+      if (child.exitCode === null) child.stdin.write('start\n');
+      await rm(dir, { recursive: true, force: true });
+    }
+
+    // The whole store verifies offline: grants, uses at the NA's resource positions, the revocation.
+    const exported: EvidenceEvent[] = [];
+    for await (const event of gm.evidenceStore.exportAll()) exported.push(event);
+    const verification = verifyEvidenceEvents(exported, { naPublicKeys: [naPublicKey], executorKeys: await gm.evidenceStore.listExecutorKeys() });
+    expect(verification.failures).toEqual([]);
+    expect(verification.grants).toBeGreaterThanOrEqual(2);
+    expect(verification.grant_executions).toBeGreaterThanOrEqual(2);
+    expect(verification.grant_revocations).toBeGreaterThanOrEqual(1);
+    if (config.audit && config.rootPublicKey) {
+      // And so does an audit pack holding them: its report, its grants' policies and attestation.
+      await gm.evidenceStore.anchor();
+      const held = await gm.evidenceStore.allAnchors();
+      const pack = await gm.evidenceStore.auditPack();
+      const files = auditPackFiles(pack);
+      expect(packReasons(verifyAuditPack(files, { rootPublicKey: config.rootPublicKey, heldAnchors: held }))).toEqual([]);
+      expect(String(files['report.md'])).toContain('## Grants');
+    }
+  }, 120_000);
 });

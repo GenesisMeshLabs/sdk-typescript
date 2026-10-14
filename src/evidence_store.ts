@@ -64,6 +64,8 @@ export interface EvidenceSearchParams {
   outcome?: string;
   entry_kind?: EntryKind;
   decision_id?: string;
+  /** v1.6.0: a grant's uses and its revocation. */
+  grant_id?: string;
   /** ISO timestamps bounding `recorded_at`. */
   since?: string;
   until?: string;
@@ -93,7 +95,7 @@ export interface RegisterExecutorKeyParams {
 
 // ── Changes outside the controlled path (v1.3.0) ─────────────────────────────
 
-/** The NA's answer to an observation, break-glass record or (v1.4.0) remediation record. */
+/** The NA's answer to an observation, break-glass record, (v1.4.0) remediation record or (v1.6.0) grant use. */
 export interface RecordSubmission {
   /** `quarantined`: authentic but outside its time bounds; kept, not judged. */
   status: 'recorded' | 'duplicate' | 'quarantined';
@@ -104,6 +106,11 @@ export interface RecordSubmission {
   judgement?: JudgementSubmission | null;
   /** v1.4.0, for a remediation record just recorded: the subject's remediation state, now `remediated`. */
   remediation?: RemediationStatus;
+  /**
+   * v1.6.0, for a grant use just recorded: the position the NA assigned it in
+   * its resource's chain (null for a use without a resource).
+   */
+  resource_sequence?: number | null;
 }
 
 /** One observation's result in a batch, at its index in the request. */
@@ -148,7 +155,8 @@ export type ChangeState =
 /** One change to a resource, oldest first. */
 export interface ResourceChange {
   store_sequence: number;
-  kind: 'execution' | 'observation' | 'break_glass' | 'quarantine';
+  /** v1.6.0: `grant_execution`, a change made under a grant (`governed_by: grant`). */
+  kind: 'execution' | 'observation' | 'break_glass' | 'quarantine' | 'grant_execution';
   recorded_at: string;
   record_id: string | null;
   action: ResourceAction | null;
@@ -167,6 +175,9 @@ export interface ResourceChange {
   rejection_code?: string;
   /** v1.4.0: the remediation state, for a change a remediation or review concerns (its `state` too). */
   remediation?: RemediationStatus;
+  /** v1.6.0, for a grant use: its grant and its place in the grant's use chain. */
+  grant_id?: string;
+  use_sequence?: number;
 }
 
 export interface ResourceChanges {
@@ -205,6 +216,15 @@ export interface HolderChange {
   approved: boolean;
   approved_by?: string;
   registry_record_id?: string;
+}
+
+/** A resource's head as the NA names it (`GET /admin/evidence/resource-heads/<resource_id>`). */
+export interface StoredResourceHead extends ResourceHead {
+  resource_id: string;
+  /** v1.6.0: what the head is; absent from an NA before 1.6.0. */
+  entry_kind?: 'execution' | 'grant_execution' | 'retention_checkpoint';
+  /** v1.6.0: the head's `evidence_id` or `use_id`; null for a retention checkpoint. */
+  record_id?: string | null;
 }
 
 /** What became of a record handed to the record outbox. */
@@ -767,11 +787,11 @@ export class EvidenceStoreClient {
   }
 
   /**
-   * Keep a signed observation, break-glass record or (v1.4.0) remediation
-   * record in the record outbox and submit it. A failed submission does not
-   * throw: a transient error leaves it pending for `flushRecords`, and a
-   * refusal no retry can overcome keeps it as a dead letter. Throws only when
-   * the record outbox cannot store it.
+   * Keep a signed observation, break-glass record, (v1.4.0) remediation
+   * record or (v1.6.0) grant use in the record outbox and submit it. A failed
+   * submission does not throw: a transient error leaves it pending for
+   * `flushRecords`, and a refusal no retry can overcome keeps it as a dead
+   * letter. Throws only when the record outbox cannot store it.
    */
   async enqueueRecord(record: OutboxRecord): Promise<RecordDelivery> {
     const outbox = this.requireRecordOutbox();
@@ -790,8 +810,8 @@ export class EvidenceStoreClient {
 
   /**
    * Submit the record outbox's pending records: break-glass records first
-   * (1.3.1), then observations up to 100 at a time, then (v1.4.0) remediation
-   * records, each in the order they were added. A batch the NA refuses as a whole is split until the record
+   * (1.3.1), then (v1.6.0) grant uses, then observations up to 100 at a time,
+   * then (v1.4.0) remediation records, each in the order they were added. A batch the NA refuses as a whole is split until the record
    * it refuses is found; a batch it throttles (`429`) halves the batches that
    * follow, and the records wait as long as its `Retry-After` asks. Records
    * in backoff are skipped unless `ignoreBackoff`; a transient error ends the
@@ -882,8 +902,13 @@ export class EvidenceStoreClient {
         ? await this.submitObservation(entry.record as ObservationRecord)
         : entry.kind === 'remediation'
           ? await this.submitRemediation(entry.record as RemediationRecord)
-          : await this.submitBreakGlass(entry.record as BreakGlassRecord);
+          : entry.kind === 'grant_execution'
+            ? await this.http.publicPost<RecordSubmission>('/evidence/grant-executions', { evidence: entry.record }, true)
+            : await this.submitBreakGlass(entry.record as BreakGlassRecord);
     } catch (err) {
+      // v1.6.0: a grant use the NA refuses for good is a dead letter, and the NA quarantines it; when it
+      // continued the chain it is the chain's head, so the uses after it are still sent, each judged on
+      // its own. A chain gap and a use dated in the future are retried.
       return { queued: await this.recordFailed(outbox, entry, err) };
     }
     await this.removeRecord(outbox, entry.id);
@@ -920,11 +945,12 @@ export class EvidenceStoreClient {
     const result: RecordFlushResult = { admitted: [], quarantined: [], pending: [], dead_lettered: [] };
     const pending = (await outbox.list()).filter(e => e.state === 'pending');
     // 1.3.1: break-glass records first. They share the NA's submission rate with observations, and
-    // an observation of the same change then finds its break-glass record. v1.4.0: remediation
+    // an observation of the same change then finds its break-glass record. v1.6.0: grant uses next,
+    // in the order they were made, so an observation of the change finds its use. v1.4.0: remediation
     // records last, once the changes they remediate are recorded and judged.
+    const first = ['break_glass', 'grant_execution', 'observation'];
     const entries = [
-      ...pending.filter(e => e.kind === 'break_glass'), ...pending.filter(e => e.kind === 'observation'),
-      ...pending.filter(e => e.kind !== 'break_glass' && e.kind !== 'observation'),
+      ...first.flatMap(kind => pending.filter(e => e.kind === kind)), ...pending.filter(e => !first.includes(e.kind)),
     ];
     const due = (e: RecordOutboxEntry) => options.ignoreBackoff
       || (!(this.recordsPausedUntil > Date.now()) && !(Date.parse(e.next_attempt_at ?? '') > Date.now()));
@@ -1187,9 +1213,7 @@ export class EvidenceStoreClient {
    */
   async resourceHead(resourceId: string): Promise<ResourceHead | null> {
     try {
-      const head = await this.http.adminGet<ResourceHead & { resource_id: string }>(
-        `/admin/evidence/resource-heads/${resourcePath(resourceId)}`,
-      );
+      const head = await this.storedResourceHead(resourceId);
       return { resource_sequence: head.resource_sequence, record_digest: head.record_digest };
     } catch (err) {
       if (!(err instanceof NotFoundError)) throw err;
@@ -1197,6 +1221,16 @@ export class EvidenceStoreClient {
       // Route missing: an NA older than v0.63.1.
     }
     return this.resourceHeadFromHistory(resourceId);
+  }
+
+  /**
+   * The NA's answer for a resource's head (admin): its position and digest,
+   * and (v1.6.0) what the head is, `entry_kind` (`execution`, `grant_execution`
+   * or `retention_checkpoint`) and `record_id` (null for a checkpoint). Throws
+   * `NotFoundError` (`resource_not_found`) for a resource with no history.
+   */
+  storedResourceHead(resourceId: string): Promise<StoredResourceHead> {
+    return this.http.adminGet<StoredResourceHead>(`/admin/evidence/resource-heads/${resourcePath(resourceId)}`);
   }
 
   private async resourceHeadFromHistory(resourceId: string): Promise<ResourceHead | null> {

@@ -60,6 +60,9 @@ export const NA_RECORD_TIME_FIELDS: Readonly<Record<string, string>> = Object.fr
   AuditPackManifest: 'created_at',
   BoundaryDecision: 'decision_made_at',
   BoundaryPolicy: 'issued_at',
+  // v1.6.0: a grant, its revocation, and a time token (read alone, or nested in a use).
+  CapabilityGrant: 'issued_at',
+  GrantRevocationRecord: 'revoked_at',
   JudgementRecord: 'judged_at',
   JustificationProof: 'proof_issued_at',
   MembershipAttestation: 'issued_at',
@@ -69,6 +72,7 @@ export const NA_RECORD_TIME_FIELDS: Readonly<Record<string, string>> = Object.fr
   RetentionCheckpoint: 'created_at',
   ReviewRecord: 'decided_at',
   StoreAnchor: 'anchored_at',
+  TimeToken: 'issued_at',
 });
 
 /** The signed genesis block: the network's constitution, signed by the root key. */

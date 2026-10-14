@@ -525,6 +525,12 @@ export interface SovereignRevocationFeed {
   revocation_reasons: Record<string, string>;
   issued_by: string;
   signatures: Signature[];
+  /**
+   * v1.6.0: the grants the issuer revoked that are not yet past their end,
+   * sorted. Left out of every form when absent, as an NA without
+   * `EVIDENCE_GRANTS=on` writes the feed.
+   */
+  revoked_grant_ids?: string[];
 }
 
 // ── Disclosure ────────────────────────────────────────────────────────────────
@@ -740,7 +746,11 @@ export type EntryKind =
   | 'review'
   // v1.5.0: NA key successions and archives (never pruned: carried past retention).
   | 'key_succession'
-  | 'archive';
+  | 'archive'
+  // v1.6.0: pre-issued grants, their uses and revocations, written only with EVIDENCE_GRANTS=on.
+  | 'grant'
+  | 'grant_execution'
+  | 'grant_revocation';
 
 /** Store envelope; every entry commits to the previous one. */
 export interface EvidenceStoreEntry {
@@ -877,6 +887,10 @@ export interface EvidenceStoreVerification {
   /** v1.5.0, present when nonzero. */
   key_successions?: number;
   archives?: number;
+  /** v1.6.0, present when nonzero. */
+  grants?: number;
+  grant_executions?: number;
+  grant_revocations?: number;
   failures: EvidenceVerificationFailure[];
   /** Set by `checkEventsAgainstAnchors` (v1.5.0); absent otherwise. */
   anchors?: AnchorSummary;

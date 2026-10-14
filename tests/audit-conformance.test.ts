@@ -30,7 +30,8 @@ import type { BoundaryDecision, Change, ExecutorKeyInfo, NAKeyHistory, StoreAnch
  * anchors across a succession, a decision judged at its own time, audit packs
  * (valid and refused), the completeness check, and (after the 1.5.0 review
  * fixes) ranges with their cited entries, keys placed by the registry, report
- * cells, changes files and record times. Every vector runs.
+ * cells, changes files and record times (v1.6.0: also of a grant, a grant
+ * revocation and a time token). Every vector runs.
  */
 interface Vector {
   id: string;
@@ -161,10 +162,10 @@ function outcome(v: Vector): Record<string, unknown> {
 }
 
 describe('audit conformance suite (1.5.0)', () => {
-  it('is the 1.5.0 suite with its 105 vectors', () => {
+  it('is the 1.5.0 suite with its 108 vectors (three record times added in 1.6.0)', () => {
     expect(suite.suite).toBe('audit');
     expect(suite.version).toBe('1.5.0');
-    expect(suite.vectors).toHaveLength(105);
+    expect(suite.vectors).toHaveLength(108);
   });
 
   it.each(suite.vectors.map(v => [v.id, v] as const))('%s', (_id, v) => {

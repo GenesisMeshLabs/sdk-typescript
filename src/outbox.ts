@@ -11,9 +11,9 @@
  * must be durable and private.
  *
  * The record outbox (v1.3.0, `ClientOptions.recordOutbox`) keeps signed
- * observations and break-glass records (v1.4.0: and remediation records) the
- * same way, in a directory of its own; `EvidenceStoreClient.flushRecords`
- * submits them.
+ * observations and break-glass records (v1.4.0: and remediation records;
+ * v1.6.0: and grant uses) the same way, in a directory of its own;
+ * `EvidenceStoreClient.flushRecords` submits them.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
@@ -22,6 +22,7 @@ import { join } from 'node:path';
 import { canonicalJson, cloneJson, parseJson } from './auth.js';
 import { GenesisMeshError } from './errors.js';
 import { StrictJsonError } from './strict-json.js';
+import type { GrantExecutionEvidence } from './grants.js';
 import type { BreakGlassRecord, ObservationRecord } from './out-of-band.js';
 import type { RemediationRecord } from './remediation.js';
 import type { EvidenceSubmission, ExecutionEvidence } from './types.js';
@@ -51,18 +52,22 @@ export interface OutboxEntry {
   last_error: SubmissionFailure | null;
 }
 
-/** The kinds of record the record outbox keeps: observations and break-glass records (v1.3.0), remediation records (v1.4.0). */
-export type RecordOutboxKind = 'observation' | 'break_glass' | 'remediation';
+/**
+ * The kinds of record the record outbox keeps: observations and break-glass records (v1.3.0), remediation
+ * records (v1.4.0), grant uses (v1.6.0).
+ */
+export type RecordOutboxKind = 'observation' | 'break_glass' | 'remediation' | 'grant_execution';
 
 /** A signed record the record outbox keeps. */
-export type OutboxRecord = ObservationRecord | BreakGlassRecord | RemediationRecord;
+export type OutboxRecord = ObservationRecord | BreakGlassRecord | RemediationRecord | GrantExecutionEvidence;
 
 /**
- * One signed observation, break-glass record or (v1.4.0) remediation record
- * in the record outbox (v1.3.0). The Rust SDK reads and writes the same JSON.
+ * One signed observation, break-glass record, (v1.4.0) remediation record or
+ * (v1.6.0) grant use in the record outbox (v1.3.0). The Rust SDK reads and
+ * writes the same JSON.
  */
 export interface RecordOutboxEntry {
-  /** The record's `observation_id`, `break_glass_id` or `remediation_id`. */
+  /** The record's `observation_id`, `break_glass_id`, `remediation_id` or `use_id`. */
   id: string;
   kind: RecordOutboxKind;
   /** The signed record, exactly as it will be submitted. */
@@ -159,11 +164,14 @@ export const PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The NA's refusals of an observation, break-glass or (v1.4.0) remediation
- * record that no retry can overcome (v1.3.0). An unknown key is retried: it
- * may not be registered yet. So are a remediation's subject and forward
- * rotation the NA does not hold yet (`remediation_subject_not_found`,
- * `remediation_rotation_missing`), and `remediation_disabled`.
+ * The NA's refusals of an observation, break-glass, (v1.4.0) remediation or
+ * (v1.6.0) grant use record that no retry can overcome (v1.3.0). An unknown
+ * key is retried: it may not be registered yet. So are a remediation's
+ * subject and forward rotation the NA does not hold yet
+ * (`remediation_subject_not_found`, `remediation_rotation_missing`),
+ * `remediation_disabled`, a grant use whose predecessor the NA does not hold
+ * yet (`grant_use_chain_gap`), one dated ahead of the NA's clock
+ * (`grant_use_in_future`) and `grants_disabled`.
  */
 export const RECORD_PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
   // 1.3.1: refused by the NA's strict JSON reader; a batch so refused is split until the record is found.
@@ -199,6 +207,32 @@ export const RECORD_PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
   'remediation_not_due',
   'remediation_already_recorded',
   'remediation_conflict',
+  // v1.6.0: grant uses (`GRANT_USE_REJECTION_CODES`). The NA keeps an authentic use it refuses for good
+  // as a quarantine entry (`error.details.quarantine_id`). A chain gap is retried (the earlier uses go
+  // first), and so is a use dated in the future (`grant_use_in_future`: once the NA's clock reaches it).
+  'invalid_grant_use',
+  'grant_use_malformed',
+  'grant_not_found',
+  'grant_use_invalid_signature',
+  'grant_bearer_mismatch',
+  'grant_use_secret_material',
+  'grant_bearer_key_retired',
+  'grant_mismatch',
+  'grant_use_conflict',
+  'grant_use_chain_mismatch',
+  'grant_capability_mismatch',
+  'grant_envelope_mismatch',
+  'grant_budget_exhausted',
+  'grant_time_token_invalid',
+  'grant_time_token_mismatch',
+  'grant_time_token_regressed',
+  'grant_time_token_exhausted',
+  'grant_use_before_time_token',
+  'grant_use_out_of_order',
+  'grant_use_outside_validity',
+  'grant_use_uploaded_late',
+  'grant_revoked',
+  'grant_use_out_of_scope',
 ]);
 
 const FIRST_RETRY_MS = 5_000;
@@ -255,10 +289,14 @@ export function outboxEntry(evidence: ExecutionEvidence, now = new Date()): Outb
 function recordKind(record: OutboxRecord): { kind: RecordOutboxKind; id: string } {
   if ('observation_id' in record) return { kind: 'observation', id: record.observation_id };
   if ('remediation_id' in record) return { kind: 'remediation', id: record.remediation_id };
+  if ('use_id' in record) return { kind: 'grant_execution', id: record.use_id };
   return { kind: 'break_glass', id: (record as BreakGlassRecord).break_glass_id };
 }
 
-/** A new pending record outbox entry for a signed observation, break-glass record (v1.3.0) or remediation record (v1.4.0). */
+/**
+ * A new pending record outbox entry for a signed observation, break-glass record (v1.3.0), remediation
+ * record (v1.4.0) or grant use (v1.6.0).
+ */
 export function recordOutboxEntry(record: OutboxRecord, now = new Date()): RecordOutboxEntry {
   const { kind, id } = recordKind(record);
   return {
@@ -495,8 +533,9 @@ export class FileOutbox extends JsonFileOutbox<OutboxEntry> {
 
 /**
  * The default record outbox (v1.3.0): signed observations and break-glass
- * records (v1.4.0: and remediation records), stored as `FileOutbox` stores
- * execution records, in a directory of its own (`gm.evidence.record-outbox.v1`).
+ * records (v1.4.0: and remediation records; v1.6.0: and grant uses), stored
+ * as `FileOutbox` stores execution records, in a directory of its own
+ * (`gm.evidence.record-outbox.v1`).
  */
 export class FileRecordOutbox extends JsonFileOutbox<RecordOutboxEntry> {
   constructor(directory: string) {
@@ -506,7 +545,7 @@ export class FileRecordOutbox extends JsonFileOutbox<RecordOutboxEntry> {
 }
 
 /** The record kinds a record outbox file may hold. */
-const RECORD_KINDS: ReadonlySet<unknown> = new Set(['observation', 'break_glass', 'remediation']);
+const RECORD_KINDS: ReadonlySet<unknown> = new Set(['observation', 'break_glass', 'remediation', 'grant_execution']);
 
 /** A file-name-safe stem for an entry id: the id itself when it is a plain identifier. */
 function fileStem(id: string): string {

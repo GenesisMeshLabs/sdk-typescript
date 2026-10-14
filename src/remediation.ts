@@ -350,9 +350,13 @@ export function nextState(state: string, event: string, reviewPending = false): 
   throw new TransitionRefusedError(refusal(state, event), `${event} is not allowed in state ${state}`);
 }
 
-/** A judged change's Stage 2 state: where it enters the state table. */
+/**
+ * A judged change's Stage 2 state: where it enters the state table. v1.6.0: a
+ * change matched to a grant use is governed (`matched`), as one matched to
+ * execution evidence is.
+ */
 export function judgementState(verdict: string, governedBy: string): RemediationState {
-  if (governedBy === 'prior_decision') return verdict === 'deny' ? 'judged_denied' : 'matched';
+  if (governedBy === 'prior_decision' || governedBy === 'grant') return verdict === 'deny' ? 'judged_denied' : 'matched';
   return verdict === 'allow' ? 'judged_allowed' : verdict === 'deny' ? 'judged_denied' : 'indeterminate';
 }
 
