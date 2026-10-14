@@ -34,6 +34,8 @@ export interface SubmissionFailure {
   /** The NA's code; `network_error` when it could not be reached; `local_error` (1.3.1) for an exception before any request. */
   code: string;
   message: string;
+  /** The NA's quarantine entry, when it kept the refused record as one (`error.details.quarantine_id`). */
+  quarantine_id?: string;
 }
 
 /** One signed record in the outbox. The Rust SDK reads and writes the same JSON. */
@@ -244,7 +246,9 @@ export function classifySubmissionError(
   refusals: ReadonlySet<string> = PERMANENT_REFUSALS,
 ): { failure: SubmissionFailure; transient: boolean } {
   if (err instanceof GenesisMeshError) {
-    const failure = { status: err.status, code: err.code, message: err.message };
+    const failure: SubmissionFailure = { status: err.status, code: err.code, message: err.message };
+    const quarantineId = err.details['quarantine_id'];
+    if (typeof quarantineId === 'string') failure.quarantine_id = quarantineId;
     // 1.3.1: JSON this SDK refused to read is no refusal: the NA may have answered that it
     // admitted the record. Only the NA's own `invalid_json` (a 400) is final.
     const refused = !(err instanceof StrictJsonError) && refusals.has(err.code)

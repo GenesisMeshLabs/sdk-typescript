@@ -8,17 +8,22 @@
  * parameters (`grant_use_secret_material`), the bearer key's resource prefix
  * (`grant_use_out_of_scope`), the capability (`grant_capability_mismatch`),
  * the closed envelope (`grant_envelope_mismatch`), the budget counting its
- * own uses (`grant_budget_exhausted`), the validity (`grant_expired` past its
- * end, `grant_use_outside_validity` before its start), the revocation feed it
- * holds and what the NA last answered (`grant_revoked`, or the NA's code),
- * and the uses left on its time token, at most `max_uses_per_time_token`
- * after the use the token names (`grant_time_token_exhausted`, after asking
- * for a fresh token when the NA answers).
+ * own uses but those the NA has quarantined (`grant_budget_exhausted`), the
+ * validity (`grant_expired` past its end, `grant_use_outside_validity` before
+ * its start), the revocation feed it holds and what the NA last answered
+ * (`grant_revoked`, or the NA's code), and the uses left on its time token,
+ * at most `max_uses_per_time_token` after the use the token names
+ * (`grant_time_token_exhausted`, after asking for a fresh token when the NA
+ * answers).
  *
  * Every use the holder signs takes the next place in its chain: one the NA
  * refuses for good is quarantined and stays in the chain, so the uses after
- * it are judged on their own. The holder never signs a use the NA would
- * refuse without storing it (secret material is checked first).
+ * it are judged on their own. Offline the holder counts every use it signed
+ * against the budget; once the NA has quarantined one that continued the
+ * chain (a dead letter in the record outbox naming its quarantine entry),
+ * that use no longer counts, as the NA's budget counts admitted uses only.
+ * The holder never signs a use the NA would refuse without storing it (secret
+ * material is checked first).
  *
  * The public contract's `grant_fallback` rule: when the grant has ended, its
  * budget or time token is spent, or it is revoked, the holder does not block
@@ -199,6 +204,9 @@ export interface GrantSyncResult {
 
 /** The NA's answers to a time token request that end the grant for its holder. */
 const ENDED = new Set(['grant_expired', 'grant_revoked', 'grant_budget_exhausted', 'grant_bearer_key_retired']);
+
+/** The refusals of a quarantined use that did not continue the chain. */
+const OFF_CHAIN = new Set(['grant_use_conflict', 'grant_use_chain_mismatch']);
 
 const PROBE = 'genesis-mesh grant holder: bearer key check for grant ';
 
@@ -416,7 +424,7 @@ export class GrantHolder {
     }
     const at = timestampMicros(executedAt);
     let unusable: GrantUnusableCode | null = null;
-    if (sequence > grant.max_uses) unusable = 'grant_budget_exhausted';
+    if (sequence > grant.max_uses && sequence - await this.quarantinedUses() > grant.max_uses) unusable = 'grant_budget_exhausted';
     else if (at > timestampMicros(grant.valid_until)) unusable = 'grant_expired';
     else if (at < timestampMicros(grant.valid_from)) {
       throw new GrantRefusedError(`the grant is valid from ${grant.valid_from}`, 'grant_use_outside_validity');
@@ -490,6 +498,26 @@ export class GrantHolder {
       Object.assign(this.current, before);
       throw err;
     }
+  }
+
+  /**
+   * How many of the holder's uses the NA has quarantined after they continued the chain: the dead letters
+   * of this grant in the record outbox the NA answered with a quarantine entry, other than a conflict or a
+   * chain mismatch (which do not continue it). They keep their place in the chain but are never admitted,
+   * so the budget, which counts admitted uses, does not count them.
+   */
+  private async quarantinedUses(): Promise<number> {
+    const { grant, uses } = this.current;
+    const quarantined = new Set<number>();
+    for (const entry of await this.clients.evidenceStore.recordOutbox!.list()) {
+      const use = entry.record as GrantExecutionEvidence;
+      const failure = entry.last_error;
+      if (entry.kind === 'grant_execution' && entry.state === 'dead_letter' && use.grant_id === grant.grant_id
+        && use.use_sequence <= uses && typeof failure?.quarantine_id === 'string' && !OFF_CHAIN.has(failure.code)) {
+        quarantined.add(use.use_sequence);
+      }
+    }
+    return quarantined.size;
   }
 
   /** The token's uses are spent: a fresh one when the NA answers, else why the grant cannot be used. */
