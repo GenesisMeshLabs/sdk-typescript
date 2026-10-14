@@ -48,6 +48,7 @@ execution recording, evidence-store queries and offline verification.
 - [Changes outside the controlled path: observations and break-glass](docs/out-of-band-changes.md) (1.3.0)
 - [Remediation, reviews and urgent changes](docs/remediation-and-reviews.md) (1.4.0)
 - [Key succession, audit packs and independent verification](docs/audit-packs.md) (1.5.0)
+- [Pre-issued grants](docs/grants.md) (1.6.0)
 
 `governedAction` requires verification keys and explicit expected policies. It
 verifies the signed response and its request context before calling the supplied
@@ -81,6 +82,23 @@ NA keys are taken, so each record verifies with the key valid at its own
 time. An auditor asks for an audit pack (`evidenceStore.auditPack()`) and
 verifies it offline with `verifyAuditPack`, from the root key and the anchors
 it holds (`evidenceStore.allAnchors()`).
+
+### Pre-issued grants
+
+*Unreleased.*
+
+From 1.6.0 the NA can authorise a change in advance: `gm.grants.issueGrant`
+asks it for a grant (one bearer key, its capabilities, a validity of at most
+24 hours, a budget and a closed parameter envelope, checked against every
+policy that applies). A `GrantHolder` acts within the grant while the NA
+cannot be reached: it checks the capability, the envelope, the budget, the
+validity, the revocation feed it holds and its time token offline, signs
+each use with the bearer key and keeps it in the record outbox, and
+`holder.sync()` uploads the uses when the NA is back. When the grant has
+ended, is spent or is revoked, `holder.act` with a `fallback` goes through
+`governedAction` with break-glass naming the capability: the change is never
+blocked, and a DENY is never broken through. See
+[docs/grants.md](docs/grants.md).
 
 ## Sub-clients
 
@@ -266,7 +284,9 @@ agreements, data license policies and data access intents offline, and signs
 data access intents with `createDataAccessIntent`. See
 [docs/offline-verification.md](docs/offline-verification.md). From 1.5.0 it
 verifies the NA's key history, store anchors and audit packs too; see
-[docs/audit-packs.md](docs/audit-packs.md).
+[docs/audit-packs.md](docs/audit-packs.md). From 1.6.0 it verifies grants,
+time tokens, grant uses and grant revocations, alone and in exports and
+packs; see [docs/grants.md](docs/grants.md).
 
 ## Raw admin calls
 
