@@ -1,0 +1,41 @@
+name: API compatibility
+
+# The public API against the latest release: an incompatible change to the API report
+# (etc/genesis-mesh-sdk.api.md) that a pull request introduces, such as a removed export
+# or member, a changed signature or a new required member of an input type, fails unless
+# the Maintainer labels the pull request `breaking` and it adds a changelog fragment with
+# an `### Upgrading` section. The "Node" check keeps the report in step with the code
+# (npm run api:check), so this check reads the committed reports and needs no build.
+# The merge queue and pushes to main print the changes and pass: the pull request was checked.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    # Re-run when the labels change, not only on new commits.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  api-compat:
+    name: API compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The release tags and the base commit's report.
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22.x"
+      - name: Incompatible API changes need the breaking label and an Upgrading note
+        env:
+          EVENT: ${{ github.event_name }}
+          BREAKING: ${{ contains(github.event.pull_request.labels.*.name, 'breaking') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/api-compat.mjs check
