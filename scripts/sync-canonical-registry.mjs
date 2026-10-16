@@ -6,7 +6,9 @@
  *
  *   npm run sync:registry
  *
- * The conformance test fails while the embedded registry differs from the suite.
+ * It also writes ENTRY_KINDS, the registry's entry kinds as a constant tuple,
+ * from which EntryKind (src/types.ts) is derived. The conformance test fails
+ * while the embedded registry or ENTRY_KINDS differs from the suite.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +31,14 @@ function freeze<T>(value: T): T {
 }
 
 export const CANONICAL_REGISTRY: CanonicalRegistry = freeze(${JSON.stringify(suite.registry, null, 2)});
+
+/**
+ * The evidence store's entry kinds, in the registry's order. \`EntryKind\` (src/types.ts)
+ * is derived from this list and the verifier's kind tables are typed against it, so a
+ * kind the registry adds fails to compile until every table handles it.
+ */
+export const ENTRY_KINDS = freeze(${JSON.stringify(suite.registry.entry_kinds, null, 2)} as const);
 `;
 writeFileSync(fileURLToPath(new URL('../src/canonical-registry.ts', import.meta.url)), body.replace(/\r\n/g, '\n'));
-console.log(`src/canonical-registry.ts: ${Object.keys(suite.registry.models).length} models, version ${suite.registry.version}`);
+console.log(`src/canonical-registry.ts: ${Object.keys(suite.registry.models).length} models, `
+  + `${suite.registry.entry_kinds.length} entry kinds, version ${suite.registry.version}`);

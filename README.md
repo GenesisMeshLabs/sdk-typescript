@@ -85,8 +85,6 @@ it holds (`evidenceStore.allAnchors()`).
 
 ### Pre-issued grants
 
-*Unreleased.*
-
 From 1.6.0 the NA can authorise a change in advance: `gm.grants.issueGrant`
 asks it for a grant (one bearer key, its capabilities, a validity of at most
 24 hours, a budget and a closed parameter envelope, checked against every

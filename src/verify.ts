@@ -83,6 +83,7 @@ import type {
   BoundaryVerificationReason,
   ContextRecord,
   DecisionJustification,
+  EntryKind,
   EvidenceEvent,
   EvidenceStoreVerification,
   ExecutionEvidence,
@@ -642,7 +643,7 @@ export function verifyEvidenceEvents(
     }
     if (checked.unsigned.length > 0) warn(seq, 'unsigned_field', checked.unsigned.join(', '));
     if (checked.unsigned.length > 0
-      && (kind in OUT_OF_BAND_MODELS || kind === 'key_succession' || kind === 'retention_checkpoint')) {
+      && (isOutOfBand(kind) || kind === 'key_succession' || kind === 'retention_checkpoint')) {
       // v1.3.0: the reference stores these records exactly as signed; a field outside the
       // signature is no part of one (the reference refuses it as it reads the record).
       // v1.5.0: a retention checkpoint too.
@@ -689,14 +690,15 @@ export function verifyEvidenceEvents(
       return problem !== null;
     };
     // v1.3.1: a record's ID appears once per kind: a copy is a replay, still checked like any record.
-    const recordId = String(record[RECORD_ID[kind]!]);
+    const recordId = String(record[RECORD_ID[kind]]);
     const seen = recordIds.get(kind) ?? new Set<string>();
     if (seen.has(recordId)) fail(seq, 'duplicate_record', `${kind} ${recordId}`);
     recordIds.set(kind, seen.add(recordId));
     // v1.3.1: a Stage 2 entry's envelope names what its record says (an absent field is null).
-    const envelope = Object.hasOwn(ENVELOPE_FIELDS, kind) ? ENVELOPE_FIELDS[kind]! : {};
     const envelopeFields = entry as unknown as Record<string, unknown>;
-    const wrong = Object.keys(envelope).filter(field => (envelopeFields[field] ?? null) !== (payload[envelope[field]!] ?? null));
+    const wrong = Object.entries(ENVELOPE_FIELDS[kind])
+      .filter(([field, recordField]) => (envelopeFields[field] ?? null) !== (payload[recordField] ?? null))
+      .map(([field]) => field);
     if (wrong.length > 0) fail(seq, 'envelope_mismatch', `${kind}: ${wrong.join(', ')}`);
     // Checks that need a record's predecessors in the run; a pack's cited records are not a run.
     const chained = !citedRun;
@@ -804,7 +806,7 @@ export function verifyEvidenceEvents(
       case 'observation':
       case 'break_glass': {
         if (!misplaced(fittingKey(kind, payload, executorKeys))) {
-          signature(outOfBandSigned(kind, payload, allNaKeys, executorKeys), OUT_OF_BAND_MODELS[kind]!);
+          signature(outOfBandSigned(kind, payload, allNaKeys, executorKeys), OUT_OF_BAND_MODELS[kind]);
         }
         subjects.set(subjectKey(kind, recordId), { digest: entry.payload_digest, sequence: seq });
         const version = kind === 'observation' ? payload['version_id']
@@ -963,6 +965,9 @@ export function verifyEvidenceEvents(
         matchable.add(recordId);
         break;
       }
+      default:
+        // Every kind of the registry has a case: a kind added to ENTRY_KINDS fails to compile here.
+        kind satisfies never;
     }
   };
 
@@ -1286,7 +1291,7 @@ function subjectKey(kind: string, id: string): string {
 }
 
 /** Each known entry kind's payload check: the record in the shape the reference reads. */
-const PAYLOAD_CHECKS: Record<string, (payload: Record<string, unknown>) => boolean> = {
+const PAYLOAD_CHECKS: Readonly<Record<EntryKind, (payload: Record<string, unknown>) => boolean>> = {
   decision: payload => validDecision(payload['decision']),
   justification: validJustification,
   execution: validExecution,
@@ -1308,7 +1313,7 @@ const PAYLOAD_CHECKS: Record<string, (payload: Record<string, unknown>) => boole
 };
 
 /** v1.3.1: the field holding each kind's record ID, which appears once per kind in a run (`duplicate_record`). */
-const RECORD_ID: Record<string, string> = {
+const RECORD_ID: Readonly<Record<EntryKind, string>> = {
   decision: 'decision_id',
   justification: 'proof_id',
   execution: 'evidence_id',
@@ -1330,9 +1335,14 @@ const RECORD_ID: Record<string, string> = {
 /**
  * v1.3.1: envelope field -> record field, for the envelope fields the NA
  * derives from a Stage 2 record. The NA searches and matches on them, so each
- * must name what the signed record says (`envelope_mismatch`).
+ * must name what the signed record says (`envelope_mismatch`). Every kind is
+ * listed: the NA derives no envelope field from the records that came before Stage 2.
  */
-const ENVELOPE_FIELDS: Record<string, Record<string, string>> = {
+const ENVELOPE_FIELDS: Readonly<Record<EntryKind, Readonly<Record<string, string>>>> = {
+  decision: {},
+  justification: {},
+  execution: {},
+  retention_checkpoint: {},
   observation: {
     record_id: 'observation_id', resource_id: 'resource_id', resource_action: 'action', capability: 'capability',
     executor_sovereign_id: 'observer_sovereign_id',
@@ -1374,7 +1384,7 @@ const ENVELOPE_FIELDS: Record<string, Record<string, string>> = {
  * v1.3.0: the model each Stage 2 entry kind holds (v1.4.0: and each Stage 3 kind, v1.5.0: and an
  * archive record, v1.6.0: and each Stage 5 kind, stored exactly as signed too).
  */
-const OUT_OF_BAND_MODELS: Record<string, string> = {
+const OUT_OF_BAND_MODELS = {
   observation: 'ObservationRecord',
   break_glass: 'BreakGlassRecord',
   judgement: 'JudgementRecord',
@@ -1386,25 +1396,33 @@ const OUT_OF_BAND_MODELS: Record<string, string> = {
   grant: 'CapabilityGrant',
   grant_execution: 'GrantExecutionEvidence',
   grant_revocation: 'GrantRevocationRecord',
-};
+} as const satisfies Partial<Record<EntryKind, string>>;
+
+/** An entry kind whose record the store holds exactly as signed (a key of `OUT_OF_BAND_MODELS`). */
+type OutOfBandKind = keyof typeof OUT_OF_BAND_MODELS;
+
+function isOutOfBand(kind: EntryKind): kind is OutOfBandKind {
+  return Object.hasOwn(OUT_OF_BAND_MODELS, kind);
+}
 
 /**
- * Kinds signed by a registered key, and the role that key must have; the other Stage 2, 3 and 5 kinds are
- * signed by the NA. v1.6.0: a grant use is signed by its grant's bearer key, a registered executor key.
+ * Who signs each Stage 2, 3 and 5 kind: a registered key with the role named here, or the NA (`na`).
+ * v1.6.0: a grant use is signed by its grant's bearer key, a registered executor key.
  */
-const KEY_ROLES: Record<string, 'executor' | 'observer'> = {
+const KEY_ROLES: Readonly<Record<OutOfBandKind, 'executor' | 'observer' | 'na'>> = {
   observation: 'observer', break_glass: 'executor', remediation: 'executor', grant_execution: 'executor',
+  judgement: 'na', quarantine: 'na', registry: 'na', review: 'na', archive: 'na', grant: 'na', grant_revocation: 'na',
 };
 
 /** The keys that may sign a Stage 2 record: the registered key it names (with the right sovereign and role), or the NA's. */
 function outOfBandKeys(
-  kind: string,
+  kind: OutOfBandKind,
   payload: Record<string, unknown>,
   naPublicKeys: readonly string[],
   executorKeys: Record<string, ExecutorKeyInfo>,
 ): readonly string[] {
   const role = KEY_ROLES[kind];
-  if (role === undefined) return naPublicKeys;
+  if (role === 'na') return naPublicKeys;
   const signature = payload['signature'] as Signature | null | undefined;
   const key = keyNamed(executorKeys, signature?.key_id);
   const sovereign = kind === 'observation' ? payload['observer_sovereign_id'] : payload['executor_sovereign_id'];
@@ -1413,29 +1431,30 @@ function outOfBandKeys(
 
 /** The registered key that fits a key-signed Stage 2 or 3 record (its sovereign and role), or undefined. */
 function fittingKey(
-  kind: string,
+  kind: OutOfBandKind,
   payload: Record<string, unknown>,
   executorKeys: Record<string, ExecutorKeyInfo>,
 ): ExecutorKeyInfo | undefined {
   const role = KEY_ROLES[kind];
   const key = keyNamed(executorKeys, (payload['signature'] as Signature | null | undefined)?.key_id);
   const sovereign = kind === 'observation' ? payload['observer_sovereign_id'] : payload['executor_sovereign_id'];
-  return key && role && key.executor_sovereign_id === sovereign && (key.role ?? 'executor') === role ? key : undefined;
+  return key && role !== 'na' && key.executor_sovereign_id === sovereign && (key.role ?? 'executor') === role ? key : undefined;
 }
 
 /** Whether a Stage 2 record's signature covers it as received, under the key that may sign it. */
 function outOfBandSigned(
-  kind: string,
+  kind: OutOfBandKind,
   payload: Record<string, unknown>,
   naPublicKeys: readonly string[],
   executorKeys: Record<string, ExecutorKeyInfo>,
 ): boolean {
   return signedBy(outOfBandCanonical(payload), payload['signature'] as Signature | null | undefined,
     outOfBandKeys(kind, payload, naPublicKeys, executorKeys))
-    && unknownFields(OUT_OF_BAND_MODELS[kind]!, payload).length === 0;
+    && unknownFields(OUT_OF_BAND_MODELS[kind], payload).length === 0;
 }
 
-const PAYLOAD_MODELS: Record<string, string> = {
+/** The model each kind's payload holds; a decision's payload wraps its decision and context (checked apart). */
+const PAYLOAD_MODELS: Readonly<Record<Exclude<EntryKind, 'decision'>, string>> = {
   justification: 'JustificationProof',
   execution: 'ExecutionEvidence',
   retention_checkpoint: 'RetentionCheckpoint',
@@ -1457,7 +1476,7 @@ interface CheckedPayload {
  * `naPublicKeys` are every NA key; a key succession is also signed by the root key, when known.
  */
 function checkPayloadFields(
-  kind: string,
+  kind: EntryKind,
   payload: Record<string, unknown>,
   naPublicKeys: readonly string[],
   rootPublicKey: string | null,
@@ -1480,8 +1499,8 @@ function checkPayloadFields(
     return { signed: [], unsigned: [...unsigned, ...found], payload: cleaned };
   }
   const model = PAYLOAD_MODELS[kind];
-  const found = model ? unknownFields(model, payload) : [];
-  if (!model || found.length === 0) return { signed: [], unsigned: [], payload };
+  const found = unknownFields(model, payload);
+  if (found.length === 0) return { signed: [], unsigned: [], payload };
   let signedAsReceived = false;
   if (kind === 'execution') {
     const ev = payload as unknown as ExecutionEvidence;
@@ -1493,12 +1512,12 @@ function checkPayloadFields(
   } else if (kind === 'key_succession') {
     const newKey = typeof payload['new_public_key'] === 'string' ? [payload['new_public_key']] : [];
     signedAsReceived = signedAsReceivedBy(model, payload, [...naPublicKeys, ...(rootPublicKey ? [rootPublicKey] : []), ...newKey]);
-  } else if (kind in OUT_OF_BAND_MODELS) {
+  } else if (isOutOfBand(kind)) {
     // The key the signature names, whatever its role: an authentic record with a field this SDK
     // does not know is refused by name first, as the reference refuses it.
     const signature = payload['signature'] as Signature | null | undefined;
     const named = keyNamed(executorKeys, signature?.key_id);
-    const keys = KEY_ROLES[kind] === undefined ? naPublicKeys : named ? [named.public_key] : [];
+    const keys = KEY_ROLES[kind] === 'na' ? naPublicKeys : named ? [named.public_key] : [];
     signedAsReceived = signedBy(outOfBandCanonical(payload), signature, keys);
   } else {
     signedAsReceived = checkpointSigned(payload as unknown as RetentionCheckpoint, naPublicKeys);
