@@ -81,6 +81,22 @@ type BufferedResponse = Pick<Response, 'ok' | 'status' | 'text'> & { retryAfter?
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
+/**
+ * Refuse a request path with a dot segment (`.` or `..`, also percent-encoded as `%2e`),
+ * before anything is signed or sent (1.7.1). URL parsing resolves dot segments, so the
+ * request would reach another route: `encodeURIComponent` keeps `/`, `?`, `#` and `%`
+ * inside a caller's ID, but leaves `.` and `..` as they are.
+ */
+function checkPathSegments(path: string): void {
+  const segment = path.split('?')[0]!.split('/').find(s => /^(?:\.|%2e){1,2}$/i.test(s));
+  if (segment !== undefined) {
+    throw new GenesisMeshError(
+      `the request path ${JSON.stringify(path)} has the segment ${JSON.stringify(segment)}, which would address another route`,
+      'invalid_path_segment', 0,
+    );
+  }
+}
+
 /** The query parameters `buildPath` sends, as strings (undefined and null are not sent). */
 function sentQuery(query?: Query): Record<string, string> {
   const out: Record<string, string> = {};
@@ -204,6 +220,7 @@ export class HttpTransport {
   }
 
   private async _send(spec: RequestSpec): Promise<BufferedResponse> {
+    checkPathSegments(spec.path);
     // Idempotent requests may try every other endpoint once, plus the
     // configured retries (with backoff). Non-idempotent requests move to
     // another endpoint only when the connection was never established; after
@@ -264,6 +281,7 @@ export class HttpTransport {
 
   /** Unauthenticated GET against one specific endpoint (no failover), e.g. per-instance readiness. */
   async publicGetAt<T>(baseUrl: string, path: string): Promise<{ status: number; body: T }> {
+    checkPathSegments(path);
     const url = baseUrl.replace(/\/$/, '') + path;
     let response: Response;
     try {
