@@ -47,8 +47,9 @@ jobs:
       - name: Check package types (arethetypeswrong on the packed tarball)
         run: npm run check:types
 
-      - name: Run tests
-        run: npm test
+      # Unit, architecture and property tests, with the coverage floors in jest.config.cjs.
+      - name: Run tests with coverage floors
+        run: npm run test:coverage
 
   # One stable name for the ruleset: fails unless every Node version above passed.
   node:
