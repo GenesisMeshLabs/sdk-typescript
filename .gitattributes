@@ -1,0 +1,11 @@
+# Generated files and copies of the core's vectors: collapsed in pull request diffs
+# (linguist-generated), so a review shows the code. Regenerate them, never edit by hand.
+
+# The core's conformance vectors and the Python fixtures (scripts/generate_vectors.py).
+tests/fixtures/** linguist-generated=true
+# The field registry, from npm run sync:registry.
+src/canonical-registry.ts linguist-generated=true
+# A release's API report kept only as the compatibility baseline (scripts/api-compat.mjs).
+# etc/genesis-mesh-sdk.api.md is generated too, but stays expanded: its diff is the API review.
+etc/baseline/** linguist-generated=true
+package-lock.json linguist-generated=true

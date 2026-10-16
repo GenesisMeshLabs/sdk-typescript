@@ -366,6 +366,10 @@ npm run test:package # validate ESM and CommonJS entry points after building
 npm run test:e2e    # disposable local Python NA (see verification guide)
 ```
 
+Contributing: see [CONTRIBUTING.md](CONTRIBUTING.md) and the
+[architecture guide](docs/architecture.md) (module map, layers, and where a
+change goes).
+
 ## License
 
 MIT

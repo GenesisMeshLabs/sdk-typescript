@@ -31,29 +31,27 @@ npm run typecheck
 npm run build
 npm run test:package   # the ESM and CJS entry points, from the built package
 npm run check:types    # arethetypeswrong on the packed tarball
-npm test
+npm run api:check      # the committed API report matches the build
+npm run test:coverage  # the tests, with the coverage floors
 ```
+
+A public API change updates the API report: run `npm run api:update` after
+`npm run build` and commit `etc/genesis-mesh-sdk.api.md` (see
+[docs/architecture.md](docs/architecture.md#ratchets)).
 
 ---
 
 ## Project structure
 
-Read [AGENT.md](AGENT.md) for the module map and the layer rule before adding
-or changing source files. The short version:
-
-| Layer | Files |
-|-------|-------|
-| Types and errors | `src/types.ts` (interfaces only), `src/errors.ts` |
-| Protocol, no HTTP | `src/auth.ts` (signing), `canonical.ts`, `strict*.ts`, `validation.ts`, `execution.ts`, `out-of-band.ts`, `remediation.ts`, `grants.ts`, `key-history.ts`, `anchors.ts`, `verify.ts`, `audit-pack.ts`, `outbox.ts` |
-| Transport and sub-clients | `src/client.ts` (HTTP only), one `src/{domain}.ts` per route group; `evidence_store.ts` also flushes the outboxes |
-| Orchestration | `src/governance.ts`, `src/grant-holder.ts` |
-| Public entry | `src/index.ts` |
+[docs/architecture.md](docs/architecture.md) is the map: what each module of `src/`
+holds, the layers and the direction imports may point (enforced by
+`tests/architecture.test.ts`), how a call and a verification flow through the
+code, and **where a change goes**: the files a new record kind, route, error
+code, vector update or holder change touches, and the check that fails if one
+is missed. Read it before adding or changing source files.
 
 `src/canonical-registry.ts` is generated: run `npm run sync:registry` after
 copying the core's `field_registry.json` into `tests/fixtures/conformance/`.
-
-Do not mix layers. A sub-client file must not contain crypto primitives.
-The protocol modules must not make HTTP calls.
 
 ---
 
