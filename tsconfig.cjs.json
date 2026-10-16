@@ -5,7 +5,7 @@
     "moduleResolution": "Node",
     "outDir": "./dist/cjs",
     "rootDir": "./src",
-    "declaration": false,
+    "declaration": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
