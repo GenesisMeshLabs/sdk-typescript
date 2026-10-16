@@ -9,9 +9,10 @@ the development environment, run tests, and submit changes.
 
 | Tool | Minimum version |
 |------|----------------|
-| Node.js | 20 LTS |
-| npm | 9 |
-| TypeScript | 5.0 (installed via `npm ci`) |
+| Node.js | 22 (`engines`; CI runs 22 and 24) |
+| npm | 10 |
+| TypeScript | installed via `npm ci` |
+| Python | 3.12 with the core installed, for `npm run test:e2e` only |
 
 ---
 
@@ -23,10 +24,13 @@ cd sdk-typescript
 npm ci
 ```
 
-Verify the build and tests pass before making any changes:
+Verify the checks pass before making any changes (CI runs the same):
 
 ```sh
+npm run typecheck
 npm run build
+npm run test:package   # the ESM and CJS entry points, from the built package
+npm run check:types    # arethetypeswrong on the packed tarball
 npm test
 ```
 
@@ -34,19 +38,22 @@ npm test
 
 ## Project structure
 
-Read [AGENT.md](AGENT.md) for the enforced layer rule before adding or changing
-source files. The short version:
+Read [AGENT.md](AGENT.md) for the module map and the layer rule before adding
+or changing source files. The short version:
 
-| File | What goes here |
-|------|---------------|
-| `src/auth.ts` | Crypto only — canonical JSON, Ed25519 signing, admin headers |
-| `src/client.ts` | HTTP transport only — fetch, timeout, error mapping |
-| `src/errors.ts` | Typed error classes only |
-| `src/types.ts` | Protocol interfaces only — no functions, no classes |
-| `src/{domain}.ts` | Sub-client — thin wrapper over HttpTransport |
+| Layer | Files |
+|-------|-------|
+| Types and errors | `src/types.ts` (interfaces only), `src/errors.ts` |
+| Protocol, no HTTP | `src/auth.ts` (signing), `canonical.ts`, `strict*.ts`, `validation.ts`, `execution.ts`, `out-of-band.ts`, `remediation.ts`, `grants.ts`, `key-history.ts`, `anchors.ts`, `verify.ts`, `audit-pack.ts`, `outbox.ts` |
+| Transport and sub-clients | `src/client.ts` (HTTP only), one `src/{domain}.ts` per route group; `evidence_store.ts` also flushes the outboxes |
+| Orchestration | `src/governance.ts`, `src/grant-holder.ts` |
+| Public entry | `src/index.ts` |
+
+`src/canonical-registry.ts` is generated: run `npm run sync:registry` after
+copying the core's `field_registry.json` into `tests/fixtures/conformance/`.
 
 Do not mix layers. A sub-client file must not contain crypto primitives.
-The auth module must not make HTTP calls.
+The protocol modules must not make HTTP calls.
 
 ---
 
@@ -101,6 +108,9 @@ import { jest } from '@jest/globals';
 import { generateTestKeyPair, mockFetch, buildTransport } from './helpers.js';
 ```
 
+A bug fix comes with the test that fails without it: say in the pull request
+which test it is and that you saw it fail on the parent commit.
+
 Run the full suite:
 
 ```sh
@@ -124,26 +134,37 @@ Before adding a new sub-client method, check the constraints table in
 ## Pull requests
 
 - Keep PRs focused — one feature or fix per PR
-- Include a test for every changed behaviour
-- Ensure `npm run build` and `npm test` pass locally before opening the PR
-- Fill in the PR template — the checklist exists for a reason
+- Include a test for every changed behaviour. A `fix:` pull request that
+  changes source files must change a test (the "Regression test" check),
+  unless the Maintainer labels it `no-test-needed`
+- Add a changelog fragment, `changelog.d/<version>/<short-name>.md` (see
+  [changelog.d/README.md](changelog.d/README.md)); never edit `CHANGELOG.md`,
+  which only a `release/<version>` pull request changes. A breaking change, or
+  one callers must act on, gets an `### Upgrading` note
+- Run the checks above locally before opening the PR
+- Fill in the PR template. Changes to workflows, vectors, signing and
+  verification, the public API or `SECURITY.md` need the Maintainer's merge
 
 If your change adds a new NA constraint discovered during testing, add it to
 the **Known constraints** table in `AGENT.md`.
 
 ---
 
-## Smoke testing against a live NA
+## Testing against a live NA
 
-The unit tests mock HTTP. To run against a real Network Authority:
+The unit tests mock HTTP. `npm run test:e2e` runs the SDK against a disposable
+local Network Authority that `scripts/e2e_na.py` starts from the core. It uses
+the core checkout next to this one (`../genesismesh/.venv`) or the interpreter
+in `GM_E2E_PYTHON`:
 
 ```sh
-cd ../sandbox/sdk-smoke
-npm install
-npm run smoke   # requires NA on http://127.0.0.1:9443
+GM_E2E_PYTHON=/path/to/python npm run test:e2e
 ```
 
-See `sandbox/sdk-smoke/smoke.ts` for setup instructions.
+The HA failover test also needs `GM_E2E_HA_DATABASE_URL` (an empty PostgreSQL
+database) and nginx; without them it is skipped. CI sets `GM_E2E_REQUIRED=1`,
+which makes a live test that cannot run, or a core feature the NA lacks, fail
+instead of passing as skipped.
 
 ---
 

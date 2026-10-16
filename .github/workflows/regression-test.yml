@@ -1,0 +1,68 @@
+name: Regression test
+
+# A fix carries the test that fails without it: a pull request titled `fix: ...` or
+# `fix(scope): ...` that changes source files (anything but docs, CI, changelog fragments
+# and tests or vectors) must also add or modify a tests/**/*.test.ts file (a deleted test,
+# a fixture or a vector does not count), unless the Maintainer labels
+# it `no-test-needed`. Other pull requests, and the merge queue, pass.
+on:
+  pull_request:
+    branches: [main]
+    # Re-run when the title or the labels change, not only on new commits.
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  regression-test:
+    name: Regression test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+      - name: A fix changes a test
+        env:
+          EVENT: ${{ github.event_name }}
+          TITLE: ${{ github.event.pull_request.title }}
+          NO_TEST_NEEDED: ${{ contains(github.event.pull_request.labels.*.name, 'no-test-needed') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ]; then
+            echo "Merge queue: the pull request was checked before it was queued."
+            exit 0
+          fi
+          case "$TITLE" in
+            fix:*|fix\(*|fix!:*) ;;
+            *) echo "Not a fix (the title does not start with fix: or fix(): no regression test required."; exit 0 ;;
+          esac
+          if [ "$NO_TEST_NEEDED" = true ]; then
+            echo "Labelled no-test-needed by the Maintainer: no regression test required."
+            exit 0
+          fi
+          # Source changes count deletions too; a test counts only when a *.test.ts file under tests/
+          # is added or modified (a deleted test, a fixture or a vector does not).
+          changed="$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA")"
+          kept="$(git diff --no-renames --name-only --diff-filter=d "$BASE_SHA...$HEAD_SHA")"
+          source="$(grep -Ev '^(docs/|\.github/|changelog\.d/|tests/)|\.md$' <<< "$changed" || true)"
+          tests="$(grep -E '^tests/.*\.test\.ts$' <<< "$kept" || true)"
+          if [ -z "$source" ]; then
+            echo "A fix that changes no source file (docs, CI, fragments, tests or vectors only): passes."
+            exit 0
+          fi
+          if [ -z "$tests" ]; then
+            echo "Source files changed:"
+            echo "$source"
+            echo "::error::A fix: pull request that changes source files must add or modify a test (tests/**/*.test.ts): the test that fails without the fix. If no test can show the bug, ask the Maintainer for the no-test-needed label."
+            exit 1
+          fi
+          echo "Source files changed:"
+          echo "$source"
+          echo "Test files changed:"
+          echo "$tests"

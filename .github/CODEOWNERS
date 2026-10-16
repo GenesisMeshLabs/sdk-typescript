@@ -1,9 +1,46 @@
-# Global owner — all files require review from a maintainer
+# Code owners by area. The last matching pattern wins, so the default comes first.
 * @GenesisMeshLabs/maintainers
 
-# Auth and crypto layer — extra scrutiny
-src/auth.ts @GenesisMeshLabs/maintainers
+# Signing, canonical forms and offline verification: security-critical.
+/src/auth.ts @GenesisMeshLabs/maintainers
+/src/canonical.ts @GenesisMeshLabs/maintainers
+/src/strict.ts @GenesisMeshLabs/maintainers
+/src/strict-json.ts @GenesisMeshLabs/maintainers
+/src/validation.ts @GenesisMeshLabs/maintainers
+/src/verify.ts @GenesisMeshLabs/maintainers
+/src/audit-pack.ts @GenesisMeshLabs/maintainers
+/src/anchors.ts @GenesisMeshLabs/maintainers
+/src/key-history.ts @GenesisMeshLabs/maintainers
+/src/execution.ts @GenesisMeshLabs/maintainers
+/src/out-of-band.ts @GenesisMeshLabs/maintainers
+/src/remediation.ts @GenesisMeshLabs/maintainers
+/src/grants.ts @GenesisMeshLabs/maintainers
+/src/grant-holder.ts @GenesisMeshLabs/maintainers
+/src/outbox.ts @GenesisMeshLabs/maintainers
+/SECURITY.md @GenesisMeshLabs/maintainers
 
-# Public API surface
-src/index.ts @GenesisMeshLabs/maintainers
-src/types.ts @GenesisMeshLabs/maintainers
+# Conformance vectors and the registry generated from them (copies of the core's).
+/tests/fixtures/ @GenesisMeshLabs/maintainers
+/src/canonical-registry.ts @GenesisMeshLabs/maintainers
+/scripts/generate_vectors.py @GenesisMeshLabs/maintainers
+/scripts/sync-canonical-registry.mjs @GenesisMeshLabs/maintainers
+
+# Public API surface.
+/src/index.ts @GenesisMeshLabs/maintainers
+/src/types.ts @GenesisMeshLabs/maintainers
+
+# Workflows, templates and repository settings.
+/.github/ @GenesisMeshLabs/maintainers
+
+# Packaging and release.
+/package.json @GenesisMeshLabs/maintainers
+/package-lock.json @GenesisMeshLabs/maintainers
+/VERSION @GenesisMeshLabs/maintainers
+/tsconfig*.json @GenesisMeshLabs/maintainers
+/scripts/finish_cjs.mjs @GenesisMeshLabs/maintainers
+/scripts/check_package.mjs @GenesisMeshLabs/maintainers
+/scripts/check-version.mjs @GenesisMeshLabs/maintainers
+/scripts/release-docs.mjs @GenesisMeshLabs/maintainers
+/scripts/changelog.py @GenesisMeshLabs/maintainers
+/scripts/e2e_na.py @GenesisMeshLabs/maintainers
+/scripts/run_e2e.mjs @GenesisMeshLabs/maintainers

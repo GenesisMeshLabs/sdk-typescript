@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
 
 permissions:
   contents: read
@@ -43,8 +44,25 @@ jobs:
       - name: Check package entry points
         run: npm run test:package
 
+      - name: Check package types (arethetypeswrong on the packed tarball)
+        run: npm run check:types
+
       - name: Run tests
         run: npm test
+
+  # One stable name for the ruleset: fails unless every Node version above passed.
+  node:
+    name: Node
+    needs: build-and-test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every Node version passed
+        env:
+          RESULT: ${{ needs.build-and-test.result }}
+        run: |
+          echo "Node matrix: $RESULT"
+          test "$RESULT" = success
 
   sdk-e2e:
     name: SDK against core main
@@ -100,6 +118,8 @@ jobs:
         env:
           GM_E2E_PYTHON: python
           GM_E2E_HA_DATABASE_URL: postgresql://genesis:genesis@localhost:5432/gm_sdk_ha
+          # Skipped is not green: a live test that cannot run, or a core feature the NA lacks, fails.
+          GM_E2E_REQUIRED: "1"
 
   release-train:
     runs-on: ubuntu-latest

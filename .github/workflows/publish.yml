@@ -62,6 +62,12 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Check package entry points
+        run: npm run test:package
+
+      - name: Check package types (arethetypeswrong on the packed tarball)
+        run: npm run check:types
+
       - name: Run tests
         run: npm test
 

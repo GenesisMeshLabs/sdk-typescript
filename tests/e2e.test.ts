@@ -23,7 +23,21 @@ import { join } from 'node:path';
 import { generateTestKeyPair } from './helpers.js';
 
 const enabled = Boolean(process.env.GM_E2E_PYTHON || process.env.GM_E2E_BASE_URL);
+/** Skipped is not green: with GM_E2E_REQUIRED=1 (CI), a live run that cannot start fails instead of skipping. */
+const required = process.env.GM_E2E_REQUIRED === '1';
+if (required && !enabled) {
+  throw new Error('GM_E2E_REQUIRED=1, but neither GM_E2E_PYTHON nor GM_E2E_BASE_URL is set: the live tests would be skipped.');
+}
 const suite = enabled ? describe : describe.skip;
+
+/**
+ * A test whose core feature the NA under test lacks (an older core) returns early through this.
+ * With GM_E2E_REQUIRED=1 it fails instead, so a renamed core switch or an NA without the feature
+ * cannot turn the test into a pass that checked nothing.
+ */
+function lacks(what: string): void {
+  if (required) throw new Error(`GM_E2E_REQUIRED=1, but the NA under test lacks ${what}: this test would pass without running.`);
+}
 
 suite('SDK against a live Python Network Authority', () => {
   let child: ChildProcessWithoutNullStreams | undefined;
@@ -201,7 +215,7 @@ suite('SDK against a live Python Network Authority', () => {
   }, 30_000);
 
   it('records and judges changes made outside the controlled path, and verifies the export (1.3.0)', async () => {
-    if (!config.outOfBand) return; // a core before 1.3.0
+    if (!config.outOfBand) return lacks('out-of-band changes (core 1.3.0)');
     const id = randomUUID();
     const capability = `sdk.oob.${id}`;
     const resource = `kv:oob-${id}/secret`;
@@ -311,7 +325,7 @@ suite('SDK against a live Python Network Authority', () => {
   }
 
   it('cancels a denied change by rotating forward, tells its actor, and verifies the export (1.4.0)', async () => {
-    if (!config.remediation) return; // a core before 1.4.0
+    if (!config.remediation) return lacks('remediations and reviews (core 1.4.0)');
     const x = await remediationSetup({ remediation: { lifetime: { mode: 'cancel', grace_seconds: 3600 } } });
     const resource = `kv:rem-${x.id}/secret`;
     // Someone rotates the secret in the console to v2 with a 400-day lifetime.
@@ -363,7 +377,7 @@ suite('SDK against a live Python Network Authority', () => {
   }, 30_000);
 
   it('reviews a judged change with a second holder, whose approval verifies offline (1.4.0)', async () => {
-    if (!config.remediation) return; // a core before 1.4.0
+    if (!config.remediation) return lacks('remediations and reviews (core 1.4.0)');
     const x = await remediationSetup();
     const seen = await gm.evidenceStore.submitObservation(await x.observer.record({
       resource_id: `kv:rev-${x.id}/secret`, action: 'rotate', capability: x.capability, changed_at: new Date(),
@@ -423,7 +437,7 @@ suite('SDK against a live Python Network Authority', () => {
     }
 
     it('NA up with an ordinary DENY: the emergency capability decides before the change, and it is reviewed', async () => {
-      if (!config.remediation) return;
+      if (!config.remediation) return lacks('remediations and reviews (core 1.4.0)');
       const x = await urgent();
       const result = await urgentAction(
         new GenesisMeshClient({ ...config, recordOutbox: new MemoryOutbox<RecordOutboxEntry>() }), x.recorder, x.params, x.action);
@@ -442,7 +456,7 @@ suite('SDK against a live Python Network Authority', () => {
       ['NA answering 503', 'server_error', () => new Response(JSON.stringify({ error: { code: 'service_unavailable', message: 'down' } }), { status: 503 })],
       ['NA answering 429', 'rate_limited', () => new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'slow down' } }), { status: 429 })],
     ])('%s: break-glass names the emergency capability and is judged under its policy', async (_case, failure, answer) => {
-      if (!config.remediation) return;
+      if (!config.remediation) return lacks('remediations and reviews (core 1.4.0)');
       const x = await urgent();
       const outage: typeof fetch = async (input, init) =>
         (String(input).endsWith('/admin/boundary/evaluate') ? answer() : fetch(input, init));
@@ -495,7 +509,7 @@ suite('SDK against a live Python Network Authority', () => {
   }, 30_000);
 
   it('verifies the key history from the root key, an audit pack offline, and records its archive (1.5.0)', async () => {
-    if (!config.audit || !config.rootPublicKey) return; // a core before 1.5.0
+    if (!config.audit || !config.rootPublicKey) return lacks('key history and audit packs (core 1.5.0)');
     // The key history, rebuilt from the root key held out of band.
     const view = await gm.na.getKeyHistory();
     expect(view.handover_seconds).toBe(300);
@@ -570,7 +584,8 @@ suite('SDK against a live Python Network Authority', () => {
   }
 
   it('acts within a grant with the NA stopped, uploads every use on reconnect, refuses a revoked grant and falls back to break-glass past expiry (1.6.0)', async () => {
-    if (!config.grants || !config.control || !child) return; // a core before 1.6.0, or an NA this test cannot stop
+    // A core before 1.6.0, or an NA this test cannot stop (an external one).
+    if (!config.grants || !config.control || !child) return lacks('pre-issued grants (core 1.6.0) on a local NA it can stop');
     const id = randomUUID();
     const capability = `sdk.grant.${id}`;
     const resource = `kv:grant-${id}/api-key`;
