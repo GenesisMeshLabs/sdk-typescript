@@ -10,10 +10,18 @@ import { buildTransport, mockFetch } from './helpers.js';
 /**
  * Property tests (fast-check) for the strict JSON reader, the canonical form and the path
  * segments the clients build. Each property runs GM_PROPERTY_RUNS cases (default 200, a few
- * seconds in all); a failure prints the seed and the shrunk counterexample to replay it.
+ * seconds in all) from a fixed seed, so CI is deterministic: GM_PROPERTY_SEED overrides it
+ * with another number, or `random` for a new seed each run (to look for failures locally).
+ * A failure prints the seed and the shrunk counterexample to replay it.
  */
 const RUNS = Number(process.env.GM_PROPERTY_RUNS ?? 200);
-const params = { numRuns: RUNS };
+const SEED_SETTING = process.env.GM_PROPERTY_SEED ?? '20261016';
+if (SEED_SETTING !== 'random' && !Number.isSafeInteger(Number(SEED_SETTING))) {
+  throw new Error(`GM_PROPERTY_SEED is a whole number or "random", not ${JSON.stringify(SEED_SETTING)}`);
+}
+const params: fc.Parameters<unknown> = SEED_SETTING === 'random'
+  ? { numRuns: RUNS }
+  : { numRuns: RUNS, seed: Number(SEED_SETTING) };
 
 const MIN_I64 = -(2n ** 63n);
 const MAX_U64 = 2n ** 64n - 1n;
@@ -151,7 +159,7 @@ describe('strict JSON (parseJson) properties', () => {
       const close = objects ? '}' : ']';
       const nested = open.repeat(depth) + '0' + close.repeat(depth);
       expect(refusal(nested)).toBe(depth > MAX_DEPTH ? 'invalid_json' : null);
-    }), { numRuns: Math.min(RUNS, 100) });
+    }), { ...params, numRuns: Math.min(RUNS, 100) });
   });
 });
 
@@ -174,12 +182,14 @@ describe('canonical form (canonicalJson) properties', () => {
 
   it('does not depend on key order, and sorts keys by code point', () => {
     const entries = fc.uniqueArray(fc.tuple(text, json), { selector: ([key]) => key, maxLength: 8 });
-    fc.assert(fc.property(entries, fc.nat(), (pairs, seed) => {
-      const rotated = pairs.map((_, i) => pairs[(i + seed) % pairs.length]!);
+    fc.assert(fc.property(entries, fc.nat(), (pairs, shift) => {
+      const rotated = pairs.map((_, i) => pairs[(i + shift) % pairs.length]!);
       const canonical = canonicalJson(Object.fromEntries(pairs));
       expect(canonicalJson(Object.fromEntries(rotated))).toBe(canonical);
-      const keys = Object.keys(JSON.parse(canonical) as object);
-      expect(keys).toEqual([...keys].sort(compareCodePoints));
+      // The order is read from the canonical text itself: a parsed object would list
+      // integer-like keys ("0") first, whatever order the text has.
+      const sorted = [...pairs].sort(([a], [b]) => compareCodePoints(a, b));
+      expect(canonical).toBe(`{${sorted.map(([key, value]) => `${canonicalJson(key)}:${canonicalJson(value)}`).join(',')}}`);
     }), params);
   });
 
@@ -192,7 +202,7 @@ describe('canonical form (canonicalJson) properties', () => {
 });
 
 describe('path segment properties', () => {
-  /** IDs a caller may pass, except the dot segments `.` and `..` (see below). */
+  /** IDs a caller may pass, except the dot segments `.` and `..`, which the transport refuses. */
   const id = fc.string({ unit: 'grapheme', minLength: 1, maxLength: 24 }).filter(s => s !== '.' && s !== '..');
 
   async function requested(call: (fetch: jest.Mock) => Promise<unknown>): Promise<URL> {
@@ -213,7 +223,7 @@ describe('path segment properties', () => {
 
   it('sends a resource ID as its own segments under the resource route', async () => {
     // A resource ID is a path (`vaults/kv/secrets/name`): each segment is encoded, `/` is kept.
-    // Dot segments are left out: `new URL` (and fetch) would resolve them away.
+    // Dot segments are left out: the transport refuses them (tests/path-segments.test.ts).
     const segment = fc.string({ unit: 'grapheme', minLength: 1, maxLength: 8 })
       .filter(s => !s.includes('/') && s !== '.' && s !== '..');
     await fc.assert(fc.asyncProperty(fc.array(segment, { minLength: 1, maxLength: 4 }), async parts => {
