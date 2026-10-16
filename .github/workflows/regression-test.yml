@@ -2,7 +2,8 @@ name: Regression test
 
 # A fix carries the test that fails without it: a pull request titled `fix: ...` or
 # `fix(scope): ...` that changes source files (anything but docs, CI, changelog fragments
-# and tests or vectors) must also change a file under tests/, unless the Maintainer labels
+# and tests or vectors) must also add or modify a tests/**/*.test.ts file (a deleted test,
+# a fixture or a vector does not count), unless the Maintainer labels
 # it `no-test-needed`. Other pull requests, and the merge queue, pass.
 on:
   pull_request:
@@ -45,9 +46,12 @@ jobs:
             echo "Labelled no-test-needed by the Maintainer: no regression test required."
             exit 0
           fi
-          changed="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          # Source changes count deletions too; a test counts only when a *.test.ts file under tests/
+          # is added or modified (a deleted test, a fixture or a vector does not).
+          changed="$(git diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA")"
+          kept="$(git diff --no-renames --name-only --diff-filter=d "$BASE_SHA...$HEAD_SHA")"
           source="$(grep -Ev '^(docs/|\.github/|changelog\.d/|tests/)|\.md$' <<< "$changed" || true)"
-          tests="$(grep -E '^tests/' <<< "$changed" || true)"
+          tests="$(grep -E '^tests/.*\.test\.ts$' <<< "$kept" || true)"
           if [ -z "$source" ]; then
             echo "A fix that changes no source file (docs, CI, fragments, tests or vectors only): passes."
             exit 0
@@ -55,7 +59,7 @@ jobs:
           if [ -z "$tests" ]; then
             echo "Source files changed:"
             echo "$source"
-            echo "::error::A fix: pull request that changes source files must change a test under tests/: the test that fails without the fix. If no test can show the bug, ask the Maintainer for the no-test-needed label."
+            echo "::error::A fix: pull request that changes source files must add or modify a test (tests/**/*.test.ts): the test that fails without the fix. If no test can show the bug, ask the Maintainer for the no-test-needed label."
             exit 1
           fi
           echo "Source files changed:"
