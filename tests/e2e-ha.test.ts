@@ -16,6 +16,10 @@ import { generateTestKeyPair } from './helpers.js';
  * C collation), plus nginx on PATH.
  */
 const enabled = Boolean(process.env.GM_E2E_PYTHON && process.env.GM_E2E_HA_DATABASE_URL);
+// Skipped is not green: with GM_E2E_REQUIRED=1 (CI), a run that cannot start fails instead of skipping.
+if (process.env.GM_E2E_REQUIRED === '1' && !enabled) {
+  throw new Error('GM_E2E_REQUIRED=1, but GM_E2E_PYTHON and GM_E2E_HA_DATABASE_URL are not both set: the HA test would be skipped.');
+}
 const suite = enabled ? describe : describe.skip;
 
 interface ClusterInfo {
