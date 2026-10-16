@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { adminSigningPayload, buildAdminHeaders, canonicalJson, verifyBytes } from '../src/auth.js';
 import { TEST_KEY } from './helpers.js';
+import { conformanceReceipt } from './receipts.js';
 
 describe('canonicalJson', () => {
   it('produces compact output with no whitespace', () => {
@@ -108,6 +109,7 @@ describe('admin signature conformance vectors', () => {
   const suite = JSON.parse(raw) as { vectors: Array<{ id: string; input: Record<string, any>; expected: Record<string, string> }> };
   // Seed "a" of the reference suite: bytes 0..31.
   const seedA = Buffer.from(Array.from({ length: 32 }, (_, i) => i)).toString('base64');
+  const receipt = conformanceReceipt('admin_auth', 'auth', 'tests/auth.test.ts:admin signature conformance vectors');
 
   it.each(suite.vectors.map(v => [v.id, v] as const))('%s', (_id, v) => {
     const i = v.input;
@@ -115,5 +117,6 @@ describe('admin signature conformance vectors', () => {
     expect(adminSigningPayload(request, i.key_id, i.timestamp, i.nonce)).toBe(v.expected.payload);
     const headers = buildAdminHeaders(request, i.key_id, seedA, { timestamp: i.timestamp, nonce: i.nonce });
     expect(headers['X-Admin-Signature']).toBe(v.expected.signature_b64);
+    receipt.ran(v);
   });
 });

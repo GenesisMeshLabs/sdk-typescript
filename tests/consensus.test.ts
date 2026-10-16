@@ -4,6 +4,7 @@ import { ConsensusClient } from '../src/consensus.js';
 import { UnauthorizedError, ValidationError } from '../src/errors.js';
 import { buildTransport, mockFetch } from './helpers.js';
 import type { ConsensusProof, JustificationProof, ValidatorVote } from '../src/types.js';
+import { conformanceReceipt } from './receipts.js';
 
 const J_PROOF: JustificationProof = {
   proof_id: 'jp-001',
@@ -58,6 +59,10 @@ describe('consensus wire contract', () => {
     vectors: { input: { proof: ConsensusProof } }[];
   };
   const proof = vectors.vectors[0]!.input.proof;
+  // The SDK has no offline consensus verifier (the NA verifies proofs), so the suite's
+  // vectors are not run: their proof is only the reference for the wire field names.
+  const receipt = conformanceReceipt('consensus', 'consensus', 'tests/consensus.test.ts:consensus wire contract');
+  for (const vector of vectors.vectors) receipt.notRun(vector);
 
   it('ConsensusProof has exactly the fields of a Python-signed proof', () => {
     expect(Object.keys(proof).sort()).toEqual([...proofKeys].sort());
