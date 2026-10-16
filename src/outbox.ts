@@ -25,7 +25,7 @@ import { StrictJsonError } from './strict-json.js';
 import type { GrantExecutionEvidence } from './grants.js';
 import type { BreakGlassRecord, ObservationRecord } from './out-of-band.js';
 import type { RemediationRecord } from './remediation.js';
-import type { EvidenceSubmission, ExecutionEvidence } from './types.js';
+import type { EntryKind, EvidenceSubmission, ExecutionEvidence } from './types.js';
 
 /** Why the NA, or the transport, refused a submission. */
 export interface SubmissionFailure {
@@ -55,10 +55,17 @@ export interface OutboxEntry {
 }
 
 /**
+ * The record kinds a record outbox file may hold, each an entry kind: observations and break-glass records
+ * (v1.3.0), remediation records (v1.4.0), grant uses (v1.6.0).
+ */
+const RECORD_OUTBOX_KINDS = ['observation', 'break_glass', 'remediation', 'grant_execution'] as const satisfies
+  readonly EntryKind[];
+
+/**
  * The kinds of record the record outbox keeps: observations and break-glass records (v1.3.0), remediation
  * records (v1.4.0), grant uses (v1.6.0).
  */
-export type RecordOutboxKind = 'observation' | 'break_glass' | 'remediation' | 'grant_execution';
+export type RecordOutboxKind = (typeof RECORD_OUTBOX_KINDS)[number];
 
 /** A signed record the record outbox keeps. */
 export type OutboxRecord = ObservationRecord | BreakGlassRecord | RemediationRecord | GrantExecutionEvidence;
@@ -549,7 +556,7 @@ export class FileRecordOutbox extends JsonFileOutbox<RecordOutboxEntry> {
 }
 
 /** The record kinds a record outbox file may hold. */
-const RECORD_KINDS: ReadonlySet<unknown> = new Set(['observation', 'break_glass', 'remediation', 'grant_execution']);
+const RECORD_KINDS: ReadonlySet<unknown> = new Set(RECORD_OUTBOX_KINDS);
 
 /** A file-name-safe stem for an entry id: the id itself when it is a plain identifier. */
 function fileStem(id: string): string {

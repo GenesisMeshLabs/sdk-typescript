@@ -1091,3 +1091,27 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
     }
   }
 });
+
+/**
+ * The evidence store's entry kinds, in the registry's order. `EntryKind` (src/types.ts)
+ * is derived from this list and the verifier's kind tables are typed against it, so a
+ * kind the registry adds fails to compile until every table handles it.
+ */
+export const ENTRY_KINDS = freeze([
+  "archive",
+  "break_glass",
+  "decision",
+  "execution",
+  "grant",
+  "grant_execution",
+  "grant_revocation",
+  "judgement",
+  "justification",
+  "key_succession",
+  "observation",
+  "quarantine",
+  "registry",
+  "remediation",
+  "retention_checkpoint",
+  "review"
+] as const);

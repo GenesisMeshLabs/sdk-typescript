@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkReleaseDocs } from './release-docs.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const releaseVersion = readFileSync(resolve(root, 'VERSION'), 'utf8').trim();
@@ -23,5 +24,10 @@ const releaseTag = process.env.RELEASE_TAG;
 if (releaseTag && releaseTag.replace(/^v/, '') !== releaseVersion) {
   throw new Error(`release tag ${releaseTag} does not match package version ${releaseVersion}`);
 }
+
+// A release (the publish workflow's tag, or a release/<version> pull request) ships no
+// documentation that still marks a feature "Unreleased".
+const releaseBranch = (process.env.GITHUB_HEAD_REF ?? '').startsWith('release/');
+if (releaseTag || releaseBranch) checkReleaseDocs(root);
 
 console.log(`TypeScript SDK release version verified: ${releaseVersion}`);
