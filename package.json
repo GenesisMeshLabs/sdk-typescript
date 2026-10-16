@@ -59,6 +59,8 @@
     "test:e2e": "node scripts/run_e2e.mjs",
     "test:package": "node scripts/check_package.mjs",
     "check:types": "attw --pack .",
+    "api:check": "api-extractor run",
+    "api:update": "api-extractor run --local",
     "sync:registry": "node scripts/sync-canonical-registry.mjs"
   },
   "devDependencies": {

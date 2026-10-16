@@ -1,0 +1,29 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/api-extractor/v7/api-extractor.schema.json",
+  "newlineKind": "lf",
+  "mainEntryPointFilePath": "<projectFolder>/dist/types/index.d.ts",
+  "apiReport": {
+    "enabled": true,
+    "includeForgottenExports": true,
+    "reportFileName": "genesis-mesh-sdk",
+    "reportFolder": "<projectFolder>/etc/",
+    "reportTempFolder": "<projectFolder>/dist/api-extractor/"
+  },
+  "docModel": { "enabled": false },
+  "dtsRollup": { "enabled": false },
+  "tsdocMetadata": { "enabled": false },
+  "messages": {
+    "compilerMessageReporting": {
+      "default": { "logLevel": "warning" }
+    },
+    "extractorMessageReporting": {
+      "default": { "logLevel": "warning" },
+      "ae-missing-release-tag": { "logLevel": "none" },
+      "ae-forgotten-export": { "logLevel": "none", "addToApiReportFile": true },
+      "ae-internal-missing-underscore": { "logLevel": "none" }
+    },
+    "tsdocMessageReporting": {
+      "default": { "logLevel": "none" }
+    }
+  }
+}
