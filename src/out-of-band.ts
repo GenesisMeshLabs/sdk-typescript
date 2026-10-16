@@ -32,8 +32,7 @@ import {
   validReview,
 } from './validation.js';
 import { MAX_METADATA_BYTES, secretMaterial } from './metadata.js';
-import type { ReconciliationFinding, ReconciliationStatus } from './governance.js';
-import type { GateResult, PolicyBinding, ResourceAction, Signature } from './types.js';
+import type { GateResult, PolicyBinding, ReconciliationFinding, ReconciliationStatus, ResourceAction, Signature } from './types.js';
 
 /**
  * How the NA came to know a change: before it, through a decision, or after

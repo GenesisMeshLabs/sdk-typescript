@@ -50,6 +50,7 @@ import type {
   ResourceAction,
   ResourceHead,
   ResourceHistory,
+  ResourceState,
   RetentionCheckpoint,
   RetentionResult,
   VendorHistory,
@@ -357,22 +358,7 @@ export interface ArchiveResult {
   archived_through_sequence: number;
 }
 
-export interface ResourceState {
-  resource_id: string;
-  /** The newest execution record's position on the resource chain; 0 when it has only break-glass records. */
-  resource_sequence: number;
-  /** The newest execution record's digest; empty when it has only break-glass records. */
-  record_digest: string;
-  last_action: string | null;
-  last_outcome: string;
-  last_success_action: string | null;
-  last_success_parameters: Record<string, unknown> | null;
-  last_executed_at: string;
-  /** The newest execution record's decision; empty when it has only break-glass records. */
-  last_decision_id: string;
-  /** The break-glass record of the latest change, when it was one (1.3.1). */
-  last_break_glass_id?: string;
-}
+export type { ResourceState } from './types.js';
 
 const MAX_PAGE = 1000;
 
