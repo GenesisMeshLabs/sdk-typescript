@@ -47,8 +47,14 @@ jobs:
       - name: Check package types (arethetypeswrong on the packed tarball)
         run: npm run check:types
 
-      - name: Run tests
-        run: npm test
+      # The committed API report (etc/genesis-mesh-sdk.api.md) must match the build: a
+      # public API change shows up in review as a diff of the report (npm run api:update).
+      - name: Check the public API report (api-extractor)
+        run: npm run api:check
+
+      # Unit, architecture and property tests, with the coverage floors in jest.config.cjs.
+      - name: Run tests with coverage floors
+        run: npm run test:coverage
 
   # One stable name for the ruleset: fails unless every Node version above passed.
   node:

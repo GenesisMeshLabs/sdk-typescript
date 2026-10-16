@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 
 import { canonicalJson, checkSignable } from './auth.js';
 import type { BoundaryClient, EvaluateParams } from './boundary.js';
-import type { EvidenceStoreClient, RecordSubmission, ResourceState } from './evidence_store.js';
+import type { EvidenceStoreClient, RecordSubmission } from './evidence_store.js';
 import { GenesisMeshError, NetworkError } from './errors.js';
 import {
   checkMetadataOnly, MAX_METADATA_BYTES, SecretMaterialError, type ExecutionRecorder, type PriorResource,
@@ -30,7 +30,11 @@ import type {
   EvidenceSubmission,
   ExecutionEvidence,
   ExecutionOutcome,
+  ObservedResource,
+  ReconciliationFinding,
+  ReconciliationStatus,
   ResourceAction,
+  ResourceState,
 } from './types.js';
 
 // ── Decision summary ──────────────────────────────────────────────────────────
@@ -840,36 +844,7 @@ export async function urgentAction<T>(
 
 // ── Reconciliation ────────────────────────────────────────────────────────────
 
-/** One resource as seen in the cloud (Key Vault, Entra, Secret Manager, ...). */
-export interface ObservedResource {
-  resource_id: string;
-  /** False when the resource was looked up and is gone. */
-  exists: boolean;
-  /** The version seen in the cloud, compared with the recorded version parameter. */
-  version?: string;
-  /** Anything the controller wants back with the finding (never secret values). */
-  metadata?: Record<string, unknown>;
-}
-
-export type ReconciliationStatus =
-  /** Exists in the cloud with no governed history. */
-  | 'unmanaged'
-  /** The cloud version differs from the last governed change. */
-  | 'drifted'
-  /** Still present after a governed revoke or delete. */
-  | 'present_after_revoke'
-  /** Governed as live, but missing from the cloud. */
-  | 'missing'
-  /** Matches the last governed change. */
-  | 'in_sync';
-
-export interface ReconciliationFinding {
-  resource_id: string;
-  status: ReconciliationStatus;
-  observed: ObservedResource | null;
-  recorded: ResourceState | null;
-  detail: string;
-}
+export type { ObservedResource, ReconciliationFinding, ReconciliationStatus } from './types.js';
 
 export interface ReconcileOptions {
   /** execution_parameters key holding the version the controller recorded. Default "secret_version". */

@@ -1085,3 +1085,53 @@ export type HaConflictCode =
   | 'boundary_policy_version_conflict'
   | 'crl_publish_contention'
   | 'retention_in_progress';
+
+// ── Governed resources and reconciliation ─────────────────────────────────────
+
+export interface ResourceState {
+  resource_id: string;
+  /** The newest execution record's position on the resource chain; 0 when it has only break-glass records. */
+  resource_sequence: number;
+  /** The newest execution record's digest; empty when it has only break-glass records. */
+  record_digest: string;
+  last_action: string | null;
+  last_outcome: string;
+  last_success_action: string | null;
+  last_success_parameters: Record<string, unknown> | null;
+  last_executed_at: string;
+  /** The newest execution record's decision; empty when it has only break-glass records. */
+  last_decision_id: string;
+  /** The break-glass record of the latest change, when it was one (1.3.1). */
+  last_break_glass_id?: string;
+}
+
+/** One resource as seen in the cloud (Key Vault, Entra, Secret Manager, ...). */
+export interface ObservedResource {
+  resource_id: string;
+  /** False when the resource was looked up and is gone. */
+  exists: boolean;
+  /** The version seen in the cloud, compared with the recorded version parameter. */
+  version?: string;
+  /** Anything the controller wants back with the finding (never secret values). */
+  metadata?: Record<string, unknown>;
+}
+
+export type ReconciliationStatus =
+  /** Exists in the cloud with no governed history. */
+  | 'unmanaged'
+  /** The cloud version differs from the last governed change. */
+  | 'drifted'
+  /** Still present after a governed revoke or delete. */
+  | 'present_after_revoke'
+  /** Governed as live, but missing from the cloud. */
+  | 'missing'
+  /** Matches the last governed change. */
+  | 'in_sync';
+
+export interface ReconciliationFinding {
+  resource_id: string;
+  status: ReconciliationStatus;
+  observed: ObservedResource | null;
+  recorded: ResourceState | null;
+  detail: string;
+}

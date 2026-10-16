@@ -54,16 +54,21 @@
     "build:esm": "tsc -p tsconfig.json",
     "build:cjs": "tsc -p tsconfig.cjs.json && node scripts/finish_cjs.mjs",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.cjs",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --config jest.config.cjs --coverage",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json",
     "test:e2e": "node scripts/run_e2e.mjs",
     "test:package": "node scripts/check_package.mjs",
     "check:types": "attw --pack .",
+    "api:check": "api-extractor run",
+    "api:update": "api-extractor run --local",
     "sync:registry": "node scripts/sync-canonical-registry.mjs"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
+    "@microsoft/api-extractor": "7.59.4",
     "@types/jest": "30.0.0",
     "@types/node": "22.20.4",
+    "fast-check": "4.10.2",
     "jest": "30.5.2",
     "ts-jest": "29.4.14",
     "typescript": "5.9.3"

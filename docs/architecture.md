@@ -226,4 +226,6 @@ line when its import goes.
 - `tests/properties.test.ts` uses fast-check on strict JSON, the canonical form and the
   path segments.
 - `GM_PROPERTY_RUNS` sets the number of cases (default 200).
+- The seed is fixed (20261016), so CI is deterministic. `GM_PROPERTY_SEED` sets another
+  seed, or `random` for a new one each run, to look for failures locally.
 - A failure prints the seed to replay it.
