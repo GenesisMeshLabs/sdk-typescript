@@ -8,3 +8,13 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  # The development dependencies (the package has no runtime dependencies), pinned
+  # exactly in package.json; one grouped pull request a month.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      npm-development:
+        dependency-type: development
+        patterns: ["*"]
