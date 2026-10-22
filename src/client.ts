@@ -208,7 +208,10 @@ export class HttpTransport {
     return response.text();
   }
 
-  /** Unauthenticated POST. Verification routes are idempotent; pass `true` to allow retries. */
+  /**
+   * Unauthenticated POST. Not retried unless `idempotent` is set: every verification route
+   * (and `disclosure/prove`, which reads no NA state) and every record submission passes `true`.
+   */
   async publicPost<T>(path: string, body: unknown, idempotent = false): Promise<T> {
     const response = await this._send({ method: 'POST', path, body, admin: false, idempotent });
     return this._parse<T>(response);

@@ -149,7 +149,8 @@ change also needs a changelog fragment (`changelog.d/<version>/<name>.md`).
 2. Add the request and response interfaces to `types.ts`, and export them from
    `index.ts`.
 3. Add a row to the route table in `tests/sdk-routes.test.ts`, which checks the method,
-   path, admin signing and body. Add method tests in `tests/<domain>.test.ts`.
+   path, admin signing, body and whether the request is retried and failed over
+   (`idempotent`: only when a replay cannot change state twice). Add method tests in `tests/<domain>.test.ts`.
 4. Run `npm run api:update` and commit the API report.
 5. Update the README section of the sub-client.
 

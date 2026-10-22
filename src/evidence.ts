@@ -22,6 +22,6 @@ export class EvidenceClient {
 
   /** Verify trust evidence signatures (unauthenticated). */
   verify(params: VerifyEvidenceParams): Promise<EvidenceVerification> {
-    return this.http.publicPost<EvidenceVerification>('/trust-evidence/verify', params);
+    return this.http.publicPost<EvidenceVerification>('/trust-evidence/verify', params, true);
   }
 }

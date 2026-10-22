@@ -1148,7 +1148,10 @@ export class EvidenceStoreClient {
     return anchors;
   }
 
-  /** Sign the store's current head now (admin, read tier; v1.2.0). */
+  /**
+   * Sign the store's current head now (admin, read tier; v1.2.0). Retried and failed over
+   * like a read: the NA signs only a head not yet anchored, so a replay answers `unchanged`.
+   */
   anchor(): Promise<AnchorResult> {
     return this.http.adminPost<AnchorResult>('/admin/evidence/anchors', {}, true);
   }
@@ -1175,7 +1178,7 @@ export class EvidenceStoreClient {
    * Record that a pack was written to immutable storage at `location` and read back intact
    * (admin, privileged; v1.5.0). The NA checks the manifest is its own, ends at its anchor of
    * the last entry and continues the archives without a gap, then appends a signed archive record.
-   * The same manifest again answers `duplicate`.
+   * The same manifest again answers `duplicate`, so the request is retried and failed over.
    */
   recordArchive(manifest: AuditPackManifest, location: string): Promise<ArchiveResult> {
     return this.http.adminPost<ArchiveResult>('/admin/evidence/archives', { manifest, location }, true);

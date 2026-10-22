@@ -49,6 +49,6 @@ export class DataUsageClient {
 
   /** Verify a data access intent against a policy (unauthenticated). */
   verify(params: VerifyDataUsageParams): Promise<DataUsageVerification> {
-    return this.http.publicPost<DataUsageVerification>('/data-usage/verify', params);
+    return this.http.publicPost<DataUsageVerification>('/data-usage/verify', params, true);
   }
 }
