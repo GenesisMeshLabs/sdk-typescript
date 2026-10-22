@@ -25,6 +25,11 @@ Vulnerabilities in scope:
 - Canonical JSON producing incorrect output that could allow signature bypass
 - Admin header building that leaks the signing key or produces forgeable headers
 - Error handling that leaks internal server details to callers
+- An offline verifier (decisions, exports, anchors, key history, audit packs,
+  grants) that accepts a record the reference refuses
+- A grant holder that acts outside its grant
+- An outbox that loses or exposes a signed record
+- A request that reaches a route other than the one the client meant
 - Dependency vulnerabilities in the published package
 
 Out of scope (report to the main repo instead):
@@ -43,8 +48,10 @@ Use GitHub's private vulnerability reporting:
 2. Click **Report a vulnerability**
 3. Fill in the report form
 
-You will receive a response within 72 hours. We aim to release a fix within
-14 days for critical issues and 30 days for moderate issues.
+You should receive acknowledgement within **5 business days**. Expect a
+remediation plan within **30 days** for confirmed issues, longer for
+cryptographic findings that require a redesign. These are the core's
+response times.
 
 Please include:
 

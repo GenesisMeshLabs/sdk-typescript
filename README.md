@@ -16,25 +16,31 @@ npm install genesis-mesh-sdk
 import { GenesisMeshClient } from 'genesis-mesh-sdk';
 import { readFileSync } from 'node:fs';
 
-// Load operator key seed (32 bytes, base64-encoded, from operator.key file)
-const signingKeyBase64 = readFileSync('/path/to/keys/operator.key', 'utf-8')
+// The key file holds comment lines and the base64 Ed25519 seed.
+const signingKeyBase64 = readFileSync('/path/to/keys/controller.key', 'utf8')
   .split('\n')
-  .find(l => !l.startsWith('#'))!
-  .trim();
+  .map((line) => line.trim())
+  .find((line) => line && !line.startsWith('#'))!;
 
 const client = new GenesisMeshClient({
   baseUrl: 'http://127.0.0.1:9443',
   signingKeyBase64,
-  keyId: 'operator-local',   // must match the NA's registered operator key
+  keyId: 'controller', // a standard-tier key registered with the NA
 });
 ```
+
+Use the privileged key (`operator-local`) only for setup: policies,
+attestations and executor keys.
 
 ## Local Network Authority
 
 To develop against a governed Network Authority on your machine (policies
 required, a privileged key for setup and a standard key for your controller),
 see [Develop Against a Local Network Authority](https://docs.genesismesh.org/sdk/local-network-authority.html).
-It needs `genesis-mesh` 1.1.0 or later from PyPI.
+The guide needs `genesis-mesh` 1.1.0 or later. Use the NA release with the
+same version as the SDK: the features from 1.3.0 on need that version and
+their switches (`EVIDENCE_OUT_OF_BAND`, `EVIDENCE_REMEDIATION`,
+`EVIDENCE_GRANTS`).
 
 ## Governed lifecycle SDK
 
@@ -47,7 +53,7 @@ execution recording, evidence-store queries and offline verification.
 - [High availability: failover, readiness and conflicts](docs/high-availability.md)
 - [Changes outside the controlled path: observations and break-glass](docs/out-of-band-changes.md) (1.3.0)
 - [Remediation, reviews and urgent changes](docs/remediation-and-reviews.md) (1.4.0)
-- [Key succession, audit packs and independent verification](docs/audit-packs.md) (1.5.0)
+- [Key succession, audit packs and offline verification](docs/audit-packs.md) (1.5.0)
 - [Pre-issued grants](docs/grants.md) (1.6.0)
 
 `governedAction` requires verification keys and explicit expected policies. It
@@ -101,6 +107,26 @@ blocked, and a DENY is never broken through. See
 
 ## Sub-clients
 
+The client has 12 sub-clients. The examples below cover `agreement`,
+`boundary`, `evidence`, `attestation`, `disclosure`, `consensus` and
+`dataUsage`. The other five have guides:
+
+- `client.policy`: validate, publish, list, activate, deactivate and verify
+  boundary policies. See [docs/evidence-store.md](docs/evidence-store.md#attestations-and-policies).
+- `client.evidenceStore`: the execution evidence store, executor keys,
+  anchors, retention, observations, break-glass, remediations and reviews.
+  See [docs/evidence-store.md](docs/evidence-store.md),
+  [docs/out-of-band-changes.md](docs/out-of-band-changes.md) and
+  [docs/remediation-and-reviews.md](docs/remediation-and-reviews.md).
+- `client.health`: liveness, readiness and per-instance probes. See
+  [docs/high-availability.md](docs/high-availability.md#readiness).
+- `client.na`: the NA's key history, read and verified from the root key
+  (1.5.0, beta route). See [docs/audit-packs.md](docs/audit-packs.md).
+- `client.grants`: issue, list, read and revoke pre-issued grants, and ask for
+  time tokens (1.6.0, beta routes). See [docs/grants.md](docs/grants.md).
+
+Routes marked beta in the core's public contract are marked "(beta)" below.
+
 ### agreement
 
 > **Note:** `accept` requires the NA to have a recognition treaty for the
@@ -136,12 +162,16 @@ console.log(check.accepted); // true | false
 
 ### boundary
 
+`evaluate` asks for a policy decision under one basis, an `attestation_id` or
+an `agreement`, and returns `{ decision, justification_proof }`. A denial is a
+signed decision with `authorized: false`, not an error.
+
 ```typescript
-// Issue a boundary decision (admin)
-const decision = await client.boundary.decide({
-  agreement,
-  requested_capability: 'read:data',
-  context: { session_id: 'sess-123' },
+// Ask for a policy decision (admin)
+const { decision } = await client.boundary.evaluate({
+  attestation_id: attestationId,   // an attestation the NA issued
+  requested_capability: 'secret.rotate',
+  context: { request_parameters: { app_id: 'app-1' } },
 });
 console.log(decision.authorized); // true | false
 
@@ -150,10 +180,27 @@ const v = await client.boundary.verify({ decision });
 console.log(v.accepted, v.authorized);
 ```
 
-### evidence
+`decide` is the legacy route (beta). An NA that requires policies refuses it
+with `409 boundary_policy_required`.
 
 ```typescript
-// Build signed trust evidence (admin)
+// Legacy agreement-only decision, without policy (admin, beta)
+const legacy = await client.boundary.decide({
+  agreement,
+  requested_capability: 'read:data',
+  context: { session_id: 'sess-123' },
+});
+```
+
+To run a governed action end to end (evaluate, verify, act and record), see
+[docs/governance.md](docs/governance.md).
+
+### evidence
+
+`build` uses a beta route (`/admin/trust-evidence`).
+
+```typescript
+// Build signed trust evidence (admin, beta)
 // verdict must be one of: "allow" | "block" | "escalate" | "warn"
 const evidence = await client.evidence.build({
   decision: {
@@ -182,6 +229,11 @@ const att = await client.attestation.issue({
   claims: { department: 'engineering' },
 });
 
+// Read one, list them, or verify one against a recognition policy
+const record = await client.attestation.get(att.attestation_id);
+const page = await client.attestation.list({ subject_id: 'node-xyz', status: 'active' });
+const verified = await client.attestation.verify({ attestation: att });
+
 // Revoke an attestation (admin)
 await client.attestation.revoke(att.attestation_id, { reason: 'key compromised' });
 
@@ -194,7 +246,9 @@ await client.attestation.savePolicy({
 });
 ```
 
-### disclosure
+### disclosure (beta)
+
+Every disclosure route is beta in the core's public contract.
 
 ```typescript
 // Commit to a set of capabilities (admin)
@@ -219,7 +273,9 @@ const dv = await client.disclosure.verify({ proof, commitment });
 console.log(dv.valid);
 ```
 
-### consensus
+### consensus (beta)
+
+Every consensus route is beta in the core's public contract.
 
 ```typescript
 // Cast a validator vote (admin)
@@ -337,6 +393,13 @@ try {
 }
 ```
 
+`ForbiddenError` (403), `ConflictError` (409) and `ServiceUnavailableError`
+(503) are typed too; any other status is a `GenesisMeshError`. Every error has
+`code`, `status`, `details`, `requestId` and `retryAfterSeconds`.
+
+An ID of `.` or `..`, or a resource ID with such a segment, fails with
+`invalid_path_segment` before any request is signed or sent (1.7.1).
+
 ## Admin authentication
 
 Admin routes are authenticated with four HTTP headers generated from an Ed25519 operator key:
@@ -365,6 +428,9 @@ npm test            # unit tests and Python-vector verification
 npm run test:package # validate ESM and CommonJS entry points after building
 npm run test:e2e    # disposable local Python NA (see verification guide)
 ```
+
+CI runs more checks (`check:version`, `check:types`, `api:check`,
+`test:coverage`); [CONTRIBUTING.md](CONTRIBUTING.md#set-up) lists them all.
 
 Contributing: see [CONTRIBUTING.md](CONTRIBUTING.md) and the
 [architecture guide](docs/architecture.md) (module map, layers, and where a

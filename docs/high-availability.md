@@ -39,7 +39,8 @@ request was sent.
 const r = await gm.health.readiness();
 // { ready, status, instance, ha_mode, rate_limiter,
 //   database: { backend, writable, schema_version, expected_schema_version, error? },
-//   signing_key: { key_id, provider, fingerprint } }
+//   signing_key: { key_id, provider, fingerprint },
+//   na_key: { state, key_sequence?, signs_from? } }
 
 for (const e of await gm.health.endpoints()) {
   console.log(e.base_url, e.reachable, e.ready, e.readiness?.signing_key.fingerprint);
@@ -52,6 +53,9 @@ It is meant for monitoring and for spotting an instance with a different key:
 every instance of one NA reports the same fingerprint. `liveness()` and
 `health()` wrap `/healthz` and `/health`.
 
+From 1.5.0 an instance whose NA key is `pending` or `stopped` is not ready
+(`na_key.state`); only `signing` is.
+
 ## Conflicts between instances
 
 Some operations are decided by the database across instances. The request
@@ -63,6 +67,7 @@ that loses a race gets `409` and changed nothing, so it can be retried:
 | `boundary_policy_version_conflict` | concurrent publishes of one policy kept taking the next version |
 | `crl_publish_contention` | concurrent revocations kept taking the next CRL sequence |
 | `retention_in_progress` | evidence retention is already running on another instance |
+| `grant_issuance_conflict` | what a grant rests on changed while the NA checked it (1.6.0) |
 
 ```typescript
 try {

@@ -33,7 +33,7 @@ history, verified from the root key: each record then verifies only with the
 key valid at its own time (`na_key_not_valid_at_time` otherwise), across key
 successions. A list of keys keeps the behaviour before 1.5.0. Anchors, audit
 packs and the key history are described in
-[Key succession, audit packs and independent verification](audit-packs.md).
+[Key succession, audit packs and offline verification](audit-packs.md).
 
 Executor keys include
 `key_id`, `public_key` and `executor_sovereign_id`. Retired keys remain useful for
@@ -139,7 +139,7 @@ Python accepts TypeScript-signed evidence.
 
 Alternatively, set `GM_E2E_BASE_URL`, `GM_E2E_OPERATOR_SEED`,
 `GM_E2E_NA_PUBLIC_KEY` and optionally `GM_E2E_OPERATOR_KEY_ID` to use an isolated
-NA prepared for these tests. It must allow privileged setup and sufficient
-requests. Tests create attestations, policies and evidence and update the active
+NA prepared for these tests ([Develop Against a Local Network Authority](https://docs.genesismesh.org/sdk/local-network-authority.html)
+sets one up). It must allow privileged setup and sufficient requests. Tests create attestations, policies and evidence and update the active
 recognition policy, so use a disposable instance. The ordinary unit-test command
 skips live tests unless one of the E2E environment variables enables them.

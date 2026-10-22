@@ -16,8 +16,8 @@ The NA must run with `EVIDENCE_REMEDIATION=on` (which needs
 `404 remediation_disabled`, remediation records in the record outbox wait, and
 a policy with the sections below is refused (`policy_remediation_disabled`).
 The operator's side is described in *Remediation and Reviews* and *Emergency
-Changes and Break-Glass* in the NA runbooks. The routes are beta until 1.5.0;
-the records' signed forms are stable.
+Changes and Break-Glass* in the NA runbooks. The routes were beta in 1.4 and
+are stable from 1.5.0; the records' signed forms are stable.
 
 ## Policies
 
@@ -87,7 +87,9 @@ const one = await gm.evidenceStore.remediation(subjectId);     // with its revie
 `after` is the previous page's `next_after`). `state` is a stored state
 (`STORED_STATES`) or `review_pending`, every change with a pending review
 whatever its state; without it the queue lists the due, overdue and waived
-changes and those with a pending review. `remediation(subjectId)` returns
+changes and the others with a pending review, except remediated ones (an NA
+from 1.5.0; 1.4 also listed a remediated change whose review was pending).
+`remediation(subjectId)` returns
 the newest 100 reviews and stored records, with `reviews_truncated` and
 `records_truncated` when there are more.
 `markNotified` records that the controller told the actor: an audit event and,

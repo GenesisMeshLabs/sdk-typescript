@@ -17,7 +17,8 @@ export class HealthClient {
 
   /**
    * Readiness (`GET /readyz`): database writable at the expected schema, key
-   * loaded, shared state in HA mode. A not-ready NA (503 `service_not_ready`)
+   * loaded, shared state in HA mode, and from 1.5.0 the NA key in its `signing`
+   * state (`na_key`; `pending` or `stopped` is not ready). A not-ready NA (503 `service_not_ready`)
    * is returned as `ready: false` with the failing checks, not thrown. With
    * several `baseUrls`, a not-ready instance is skipped for the next one.
    */
