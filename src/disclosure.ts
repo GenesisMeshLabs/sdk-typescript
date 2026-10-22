@@ -44,11 +44,11 @@ export class DisclosureClient {
 
   /** Generate a Merkle membership proof (unauthenticated). */
   prove(params: ProveParams): Promise<CapabilityMembershipProof> {
-    return this.http.publicPost<CapabilityMembershipProof>('/disclosure/prove', params);
+    return this.http.publicPost<CapabilityMembershipProof>('/disclosure/prove', params, true);
   }
 
   /** Verify a capability membership proof (unauthenticated). */
   verify(params: VerifyDisclosureParams): Promise<DisclosureVerification> {
-    return this.http.publicPost<DisclosureVerification>('/disclosure/verify', params);
+    return this.http.publicPost<DisclosureVerification>('/disclosure/verify', params, true);
   }
 }

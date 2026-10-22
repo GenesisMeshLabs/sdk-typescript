@@ -68,9 +68,14 @@ propagate without fallback or key caching.
 
 Retries are disabled by default. Configure `retry: { attempts: 2, baseDelayMs: 200 }`
 for bounded exponential backoff on network failures and HTTP 429, 502, 503 or 504.
-GETs, public verification and evidence submission are eligible. State-creating
-admin POSTs, including evaluation, issuance and policy publication, are not
-retried. Admin retry attempts receive fresh signatures and nonces.
+Eligible are GETs, every verification route (and `disclosure.prove`), record
+submissions (evidence, observations, break-glass, remediations, grant uses),
+time tokens, and the admin POSTs the NA answers the same way when replayed:
+`judgeObservation`, `judgeBreakGlass`, `anchor` and `recordArchive`. Other
+admin POSTs, including evaluation, issuance, policy publication and audit
+packs, are not retried. Admin retry attempts receive fresh signatures and
+nonces. Before 1.7.1 the agreement, trust-evidence, consensus, disclosure and
+data-usage verification routes were not retried.
 
 HTTP 403, 409 and 503 map to `ForbiddenError`, `ConflictError` and
 `ServiceUnavailableError`. Errors expose `code`, `status`, `details` and

@@ -40,6 +40,6 @@ export class ConsensusClient {
 
   /** Verify consensus proof signature and threshold (unauthenticated). */
   verify(params: VerifyConsensusParams): Promise<ConsensusVerification> {
-    return this.http.publicPost<ConsensusVerification>('/consensus/verify', params);
+    return this.http.publicPost<ConsensusVerification>('/consensus/verify', params, true);
   }
 }

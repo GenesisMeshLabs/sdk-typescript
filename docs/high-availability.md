@@ -19,9 +19,11 @@ const gm = new GenesisMeshClient({
 
 Requests go to one instance at a time.
 
-- **Idempotent requests** (every GET, public verification and evidence
-  submission) move to the next instance on a transport failure or
-  502/503/504, then use `retry` with backoff.
+- **Idempotent requests** (every GET, every verification route, record
+  submissions, and the admin POSTs a replay cannot repeat: judgements,
+  `anchor`, `recordArchive`) move to the next instance on a transport failure
+  or 502/503/504, then use `retry` with backoff. `tests/sdk-routes.test.ts`
+  pins which routes these are.
 - **Non-idempotent requests** (evaluate, issue, publish, revoke) move to the
   next instance only when the connection could not be made (refused,
   unresolvable, unreachable), because the request never reached the NA. After

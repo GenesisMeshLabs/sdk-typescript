@@ -58,6 +58,6 @@ export class AgreementClient {
 
   /** Verify agreement signatures (unauthenticated). */
   verify(params: VerifyAgreementParams): Promise<AgreementVerification> {
-    return this.http.publicPost<AgreementVerification>('/agreements/verify', params);
+    return this.http.publicPost<AgreementVerification>('/agreements/verify', params, true);
   }
 }
