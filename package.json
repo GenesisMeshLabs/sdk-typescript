@@ -1,7 +1,7 @@
 {
   "name": "genesis-mesh-sdk",
   "version": "1.7.0",
-  "description": "TypeScript client for the Genesis Mesh Network Authority API - sovereign trust, attestation, and capability enforcement",
+  "description": "TypeScript client for the Genesis Mesh Network Authority API: attestations, policy decisions, execution evidence and offline verification",
   "type": "module",
   "license": "MIT",
   "author": "Genesis Mesh Labs",
@@ -20,7 +20,6 @@
     "sovereign",
     "network-authority",
     "ed25519",
-    "zero-trust",
     "capability"
   ],
   "engines": {

@@ -3,8 +3,10 @@
 `governedAction` composes evaluation, offline verification, a caller-supplied
 callback and signed execution evidence. It does not implement cloud operations.
 The NA needs evidence storage enabled, active policies, a privileged operator
-for setup and a registered executor key. Give the client an evidence outbox so
-no signed record is lost when the NA is unreachable after an action.
+for setup and a registered executor key. To run one locally, see
+[Develop Against a Local Network Authority](https://docs.genesismesh.org/sdk/local-network-authority.html).
+Give the client an evidence outbox so no signed record is lost when the NA is
+unreachable after an action.
 
 ```typescript
 import { FileOutbox, GenesisMeshClient, ExecutionRecorder, governedAction, seedSigner } from 'genesis-mesh-sdk';

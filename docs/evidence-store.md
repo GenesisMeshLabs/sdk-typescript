@@ -33,7 +33,7 @@ not judged yet, and with out-of-band records on the registry's health
 (`policy_history_started`, `registry_healthy`, `registry_problems`). From
 1.5.0 every store read accepts a read-tier key, so an auditor's key can ask
 for anchors and audit packs; see
-[Key succession, audit packs and independent verification](audit-packs.md).
+[Key succession, audit packs and offline verification](audit-packs.md).
 
 Search uses `after_sequence` and returns `next_after_sequence`. Export uses
 `since_sequence`; `exportAll` follows the last returned store sequence. Page sizes

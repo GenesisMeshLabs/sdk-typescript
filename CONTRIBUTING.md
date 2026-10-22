@@ -79,9 +79,9 @@ test(consensus): add negative test for threshold below vote count
 chore(deps): update ts-jest to 29.4
 ```
 
-Scope is the primary area: `auth`, `transport`, `types`, `agreement`,
-`boundary`, `evidence`, `attestation`, `disclosure`, `consensus`,
-`data-usage`, `sdk`, `ci`, `docs`.
+Scope is the module or area changed: a module of `src/` (see the module table
+in [docs/architecture.md](docs/architecture.md)), such as `policy`,
+`evidence-store`, `grants` or `outbox`, or `sdk`, `ci` or `docs`.
 
 ### Code style
 
@@ -92,12 +92,12 @@ Scope is the primary area: `auth`, `transport`, `types`, `agreement`,
 
 ### Tests
 
-Every public method needs four tests in `tests/{domain}.test.ts`:
+A client method gets a row in the route table (`tests/sdk-routes.test.ts`),
+which checks the method, the path, admin signing and the body, and tests in
+`tests/{domain}.test.ts`:
 
 1. Happy-path — mocked response returns the correct shape
-2. URL — method calls the correct route path
-3. Auth — admin methods send the four `X-Admin-*` headers
-4. Error — NA 4xx → typed SDK error with correct `.code`
+2. Error — NA 4xx → typed SDK error with correct `.code`
 
 Use `helpers.ts`:
 

@@ -1,4 +1,4 @@
-# Key succession, audit packs and independent verification
+# Key succession, audit packs and offline verification
 
 From Genesis Mesh 1.5.0 the Network Authority (NA) can replace its signing
 key without breaking anything it signed before, and a security team can check
@@ -7,6 +7,11 @@ itself: the root public key and its own copies of the store anchors. This
 page covers the SDK side. The operator's side is described in *Governed
 changes and audit*, *Key succession* and *Audit packs* in the NA runbooks; the
 pack layout is the core's *Audit Pack Format* reference.
+
+The key history, succession, anchor, archive and audit pack routes are beta;
+the records' signed forms and the pack format are stable from 1.5.0. The
+verifier is part of this SDK and follows the Python reference; it proves a
+pack against keys and anchors you hold, without asking the NA.
 
 ## The key history
 
