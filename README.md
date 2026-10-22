@@ -56,6 +56,12 @@ execution recording, evidence-store queries and offline verification.
 - [Key succession, audit packs and offline verification](docs/audit-packs.md) (1.5.0)
 - [Pre-issued grants](docs/grants.md) (1.6.0)
 
+Walkthroughs against a local NA, each with a script in `examples/` and a
+recorded run:
+
+- [A governed rotation](docs/walkthroughs/governed-rotation.md)
+- [Acting while the NA is down: a grant, then break-glass](docs/walkthroughs/acting-while-the-na-is-down.md)
+
 `governedAction` requires verification keys and explicit expected policies. It
 verifies the signed response and its request context before calling the supplied
 action. Attestation-backed ALLOWs also require the expected attestation. With an

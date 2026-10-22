@@ -38,6 +38,9 @@ const result = await governedAction(gm, recorder, {
 }, async () => ({ execution_parameters: { secret_version: 'version-2' } }));
 ```
 
+[A governed rotation](walkthroughs/governed-rotation.md) runs this end to end
+against a local NA, from the setup to the offline verification of the export.
+
 Use a trusted NA public key. `verify` and explicit `expectedPolicies` are
 required. An empty policy list explicitly requires an empty policy binding.
 An ALLOW under an attestation also requires `expectedAttestation`. Agreement
