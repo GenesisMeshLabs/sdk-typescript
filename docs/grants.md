@@ -13,6 +13,8 @@ This page covers the SDK side: issuing grants, holding one, verifying the
 records. The operator's side, the issuance rules and the limits of offline
 trust are in *Pre-Issued Grants* in the NA runbooks, with a worked example.
 The routes are beta; the records' signed forms are stable from 1.6.0.
+[Acting while the NA is down](walkthroughs/acting-while-the-na-is-down.md)
+runs a grant and the break-glass fallback against a local NA.
 
 The NA must run with `EVIDENCE_GRANTS=on` (which needs
 `EVIDENCE_OUT_OF_BAND=on`); until then every grant route answers

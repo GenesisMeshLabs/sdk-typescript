@@ -6,7 +6,8 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "paths": { "genesis-mesh-sdk": ["./src/index.ts"] }
   },
-  "include": ["src", "tests"]
+  "include": ["src", "tests", "examples"]
 }

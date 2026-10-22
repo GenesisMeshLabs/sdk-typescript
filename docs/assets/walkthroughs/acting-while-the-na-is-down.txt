@@ -1,0 +1,37 @@
+==> A local NA (docs.genesismesh.org/sdk/local-network-authority)
+$ mkdir local
+$ genesis-mesh init --config local/genesis-mesh.toml --home local/.genesis-mesh --network-name MY-PROJECT-DEV --na-endpoint http://127.0.0.1:18441 --na-port 18441 --env-file local/na.env > local/setup.log 2>&1
+$ genesis-mesh keygen operator --output local/.genesis-mesh/keys/controller --key-id controller --tier standard --env-file local/na.env >> local/setup.log 2>&1
+$ printf 'EVIDENCE_OUT_OF_BAND=on\nEVIDENCE_GRANTS=on\n' >> local/na.env
+$ genesis-mesh na start --env-file local/na.env > local/na.log 2>&1 &
+$ curl -s http://127.0.0.1:18441/healthz
+{"status":"ok"}
+
+$ node "$SDK/examples/act-while-na-down.ts" setup local/.genesis-mesh
+==> Setup with the privileged key (operator-local)
+policy edge-rotation-0411c757 v1 active; device key device-0411c757 registered
+grant 5c309346-d2be-462a-9681-1153dae717d0: secret.rotate, max_uses 2, lifetime_days 1..60, until 2026-10-22T01:02:52.574000Z
+device state and record outbox saved in local/device
+==> Stop the NA
+$ kill $NA_PID
+$ curl -s http://127.0.0.1:18441/healthz || echo 'NA unreachable'
+NA unreachable
+$ node "$SDK/examples/act-while-na-down.ts" act local/.genesis-mesh
+==> Three rotations with the NA down
+!ok use 1: under the grant (use 1), kept in the record outbox: pending
+!ok use 2: under the grant (use 2), kept in the record outbox: pending
+use 3: grant unusable (grant_budget_exhausted), fallback took the break_glass path
+record outbox: grant_execution, grant_execution, break_glass
+==> Start the NA again
+$ genesis-mesh na start --env-file local/na.env > local/na.log 2>&1 &
+$ curl -s http://127.0.0.1:18441/healthz
+{"status":"ok"}
+
+$ node "$SDK/examples/act-while-na-down.ts" sync local/.genesis-mesh
+==> The NA is back: sync
+sync: reachable true, admitted break_glass, grant_execution, grant_execution, dead-lettered 0
+grant exhausted: uses 2, remaining_uses 0
+==> resourceChanges
+#7   break_glass     governed_by after_the_fact state judged_allowed verdict allow
+#9   grant_execution governed_by grant          state recorded
+#10  grant_execution governed_by grant          state recorded

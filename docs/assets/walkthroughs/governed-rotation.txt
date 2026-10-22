@@ -1,0 +1,22 @@
+==> A local NA (docs.genesismesh.org/sdk/local-network-authority)
+$ mkdir local
+$ genesis-mesh init --config local/genesis-mesh.toml --home local/.genesis-mesh --network-name MY-PROJECT-DEV --na-endpoint http://127.0.0.1:18441 --na-port 18441 --env-file local/na.env > local/setup.log 2>&1
+$ genesis-mesh keygen operator --output local/.genesis-mesh/keys/controller --key-id controller --tier standard --env-file local/na.env >> local/setup.log 2>&1
+$ genesis-mesh na start --env-file local/na.env > local/na.log 2>&1 &
+$ curl -s http://127.0.0.1:18441/healthz
+{"status":"ok"}
+
+$ node "$SDK/examples/governed-rotation.ts" local/.genesis-mesh
+==> Setup with the privileged key (operator-local)
+attestation 9c7d88d3-1131-4179-b1ec-b89a9812975e for rotation-controller-d36a93b8
+policy secret-rotation-d36a93b8 v1 active: app_id from the attestation, lifetime_days at most 90
+executor key executor-d36a93b8 registered
+==> The controller key runs governedAction
+!ok ALLOW  lifetime_days=30: decision e13178d6-c23c-4a8e-ab66-55bb2913a05e verified, action ran: true, evidence recorded
+!no DENY   lifetime_days=400: decision 1ae662f8-19f6-4c02-b5d8-3c9e2562333c verified, action ran: false, failed gate: secret-rotation-d36a93b8/lifetime
+==> The evidence outbox
+flushPending: admitted 0, pending 0, dead-lettered 0
+outbox entries: 0
+==> Export and verify offline
+exported 5 entries; NA keys in the history: 1
+!ok verified: true

@@ -46,7 +46,8 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
-    "docs"
+    "docs",
+    "!docs/assets"
   ],
   "scripts": {
     "check:version": "node scripts/check-version.mjs",
