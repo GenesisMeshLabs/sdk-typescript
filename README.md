@@ -404,7 +404,7 @@ try {
 `code`, `status`, `details`, `requestId` and `retryAfterSeconds`.
 
 An ID of `.` or `..`, or a resource ID with such a segment, fails with
-`invalid_path_segment` before any request is signed or sent (1.7.1).
+`invalid_path_segment` before any request is signed or sent (1.8.0).
 
 ## Admin authentication
 

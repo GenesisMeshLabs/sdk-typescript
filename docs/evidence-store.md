@@ -74,7 +74,7 @@ time tokens, and the admin POSTs the NA answers the same way when replayed:
 `judgeObservation`, `judgeBreakGlass`, `anchor` and `recordArchive`. Other
 admin POSTs, including evaluation, issuance, policy publication and audit
 packs, are not retried. Admin retry attempts receive fresh signatures and
-nonces. Before 1.7.1 the agreement, trust-evidence, consensus, disclosure and
+nonces. Before 1.8.0 the agreement, trust-evidence, consensus, disclosure and
 data-usage verification routes were not retried.
 
 HTTP 403, 409 and 503 map to `ForbiddenError`, `ConflictError` and

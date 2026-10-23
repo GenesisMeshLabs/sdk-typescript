@@ -83,7 +83,7 @@ const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
 /**
  * Refuse a request path with a dot segment (`.` or `..`, also percent-encoded as `%2e`),
- * before anything is signed or sent (1.7.1). URL parsing resolves dot segments, so the
+ * before anything is signed or sent (1.8.0). URL parsing resolves dot segments, so the
  * request would reach another route: `encodeURIComponent` keeps `/`, `?`, `#` and `%`
  * inside a caller's ID, but leaves `.` and `..` as they are.
  */
