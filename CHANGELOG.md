@@ -7,6 +7,98 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [1.8.0] - 2026-10-23
+
+### Security
+
+- **A caller-supplied ID can no longer address another NA route.** The
+  clients put IDs in request paths with `encodeURIComponent`, which keeps
+  `/`, `?`, `#` and `%` inside the segment but leaves `.` and `..` as they
+  are, and URL parsing resolves dot segments: `attestation.get('..')`
+  requested `/`, `grants.revokeGrant('..')` requested `/admin/revoke`, and a
+  resource ID such as `vaults/../../grants/x` requested `/admin/grants/x`.
+  An admin request was still refused (its signature covers the path the SDK
+  meant, not the one sent), but a public read reached another route. The
+  transport now refuses any request path with a `.` or `..` segment (also
+  percent-encoded), before it signs or sends anything, with a
+  `GenesisMeshError` whose code is `invalid_path_segment`.
+
+### Added
+
+- **Two walkthroughs with runnable scripts.** "A governed rotation" sets up
+  a local NA with the privileged key, runs `governedAction` with the
+  standard controller key and an evidence outbox (one ALLOW, one DENY), and
+  verifies the export offline from the root key
+  (`examples/governed-rotation.ts`). "Acting while the NA is down" issues a
+  grant, uses it twice with the NA stopped, falls back to break-glass past
+  its budget, and syncs when the NA is back
+  (`examples/act-while-na-down.ts`). Each page has a GIF of a real run,
+  with its transcript and the script that records it
+  (`docs/assets/walkthroughs/`). The examples are type-checked with the
+  tests, and `docs/assets/` is left out of the npm package.
+
+### Changed
+
+- **Every record kind the verifier knows is checked at compile time.**
+  `EntryKind` is now derived from `ENTRY_KINDS`, which `npm run
+  sync:registry` generates into `src/canonical-registry.ts` from the core's
+  field registry, and the verifier's kind tables (payload checks, record-ID
+  fields, envelope maps, payload models, signer roles) are typed against
+  it, as is the record outbox's `RecordOutboxKind`. A table that misses a
+  kind, or a kind the registry adds, now fails to compile instead of
+  skipping that kind's envelope or record-ID check. `EntryKind` and
+  `RecordOutboxKind` name the same kinds as before; verification results do
+  not change.
+
+### Fixed
+
+- **The README and the guides match the code and the NA again.** The quick
+  start uses a standard-tier `controller` key, as the local NA guide does,
+  and reads a key file with blank lines. The boundary example uses
+  `evaluate`; `decide` is marked as the legacy route an NA that requires
+  policies refuses. The README lists all 12 sub-clients, marks the beta
+  routes, names the NA release and switches the later features need, the
+  typed errors, and the 1.7.1 `invalid_path_segment` refusal. The
+  remediation guide gives the 1.5.0 default queue (a remediated change with
+  a pending review is no longer listed) and says the routes are stable from
+  1.5.0. The high-availability guide lists `grant_issuance_conflict` and the
+  1.5.0 `na_key` readiness check. The audit-pack guide says which routes are
+  beta, and is retitled "Key succession, audit packs and offline
+  verification". `SECURITY.md` takes the core's response times and covers
+  the verifiers, the grant holder, the outboxes and request paths. The npm
+  description no longer says "capability enforcement".
+- **TypeScript resolves the package's types through the right condition, for
+  ESM and CommonJS.** The `exports` map listed `types` after `import` and
+  `require`, so TypeScript found the declarations only through a fallback
+  (a TypeScript bug the compiler may stop honouring), and a CommonJS
+  consumer got ESM declarations for a CommonJS module. Each condition now
+  names its declarations first, and `require` gets CommonJS declarations
+  (`dist/cjs/*.d.cts`). The JavaScript, the entry points and the ESM
+  declarations are unchanged. `npm run check:types` runs arethetypeswrong on
+  the packed tarball (node10, node16 from CJS and ESM, bundler).
+- **The README and the grants and audit-pack guides no longer call shipped
+  features unreleased.** The npm package carried "*Unreleased.*" on the
+  pre-issued grants (1.6.0) and key succession and audit packs (1.5.0)
+  sections. A release now refuses the marker: `npm run check:version` fails
+  on a `release/<version>` pull request and in the publish workflow when
+  `README.md` or `docs/` still marks a feature "Unreleased"
+  (`scripts/release-docs.mjs`).
+- **Every verification route is retried and failed over.** The agreement,
+  trust-evidence, consensus, disclosure (`prove` and `verify`) and data-usage
+  verification requests were sent as non-idempotent, so `retry` and
+  `baseUrls` failover skipped them on a 502, 503 or 504, although the guides
+  said public verification was eligible. They now behave like the boundary,
+  attestation and policy verification routes. The route table test pins
+  which routes are retried. The guides now also say which admin POSTs are
+  retried (judgements, `anchor`, `recordArchive`), because the NA answers a
+  replay with the existing record.
+
+### Upgrading
+
+- An ID of `.` or `..`, or a resource ID with such a segment, now fails with
+  `invalid_path_segment` instead of sending a request. No NA record has such
+  an ID.
+
 ## [1.7.0] - 2026-10-15
 
 ### Fixed
