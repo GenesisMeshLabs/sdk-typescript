@@ -2904,6 +2904,7 @@ export interface KeyHistoryView {
     sovereign_id: string;
     // (undocumented)
     successions: KeySuccessionRecord[];
+    vouching_grace_seconds?: number;
 }
 
 // @public
@@ -3034,7 +3035,13 @@ export class MetadataRefusedError<T = unknown> extends GenesisMeshError {
 }
 
 // @public
+export function modelAccepts(model: string, record: unknown): boolean;
+
+// @public
 export const NA_RECORD_TIME_FIELDS: Readonly<Record<string, string>>;
+
+// @public
+export const NA_VOUCHING_TIME_FIELDS: Readonly<Record<string, string>>;
 
 // @public
 export interface NAKey {
@@ -3053,7 +3060,8 @@ export interface NAKey {
 
 // @public
 export class NAKeyHistory {
-    constructor(sovereign_id: string, root_public_key: string | null, keys: readonly NAKey[], successions?: readonly KeySuccessionRecord[]);
+    constructor(sovereign_id: string, root_public_key: string | null, keys: readonly NAKey[], successions?: readonly KeySuccessionRecord[],
+    vouching_grace_seconds?: number);
     allKeys(): string[];
     // (undocumented)
     keyFor(publicKey: string): NAKey | undefined;
@@ -3069,6 +3077,9 @@ export class NAKeyHistory {
     readonly sovereign_id: string;
     // (undocumented)
     readonly successions: readonly KeySuccessionRecord[];
+    vouchesUntilMicros(publicKey: string): number | null;
+    readonly vouching_grace_seconds: number;
+    withVouchingGrace(graceSeconds: number | null | undefined): NAKeyHistory;
 }
 
 // @public
@@ -3076,6 +3087,17 @@ export type NAKeys = readonly string[] | NAKeyHistory;
 
 // @public
 export function naKeysAt(keys: NAKeys, time: string | Date | null): string[];
+
+// @public
+export function naKeysVouchingAt(keys: NAKeys, time: string | Date | null, now: string | Date): string[];
+
+// @public
+export type NARecordRefusal = 'unknown_field' | 'non_canonical_form' | 'na_key_not_valid_at_time' | 'invalid_signature' | 'record_malformed' | 'outlives_key';
+
+// @public
+export function naRecordRefusal(model: string, raw: unknown, history: NAKeyHistory, options?: {
+    now?: string | Date;
+}): NARecordRefusal | null;
 
 // @public
 export function naSignatureAt(signedBy: (keys: readonly string[]) => boolean, keys: NAKeys, time: string | Date | null): 'ok' | 'na_key_not_valid_at_time' | 'invalid_signature';
@@ -3924,6 +3946,9 @@ export function recordOutboxEntry(record: OutboxRecord, now?: Date): RecordOutbo
 export type RecordOutboxKind = (typeof RECORD_OUTBOX_KINDS)[number];
 
 // @public
+export function recordOutlivesKey(keys: NAKeys, publicKey: string, now: string | Date): boolean;
+
+// @public
 export interface RecordSubmission {
     // (undocumented)
     entry: EvidenceStoreEntry;
@@ -4588,6 +4613,9 @@ export type ReviewVerdict = 'uphold' | 'deny' | 'waive_until';
 // @public (undocumented)
 export function revocationFeedCanonical(feed: SovereignRevocationFeed): string;
 
+// @public
+export function revocationFeedSigner(feed: SovereignRevocationFeed, publicKeys: NAKeys): string | undefined;
+
 // @public (undocumented)
 export interface RevokeAttestationParams {
     // (undocumented)
@@ -4818,6 +4846,9 @@ export const SUCCESSION_HANDOVER_SECONDS = 300;
 
 // @public
 export const SUCCESSION_MIN_LEAD_SECONDS = 60;
+
+// @public
+export const SUCCESSION_VOUCHING_GRACE_SECONDS = 86400;
 
 // @public
 export function successionCanonical(record: KeySuccessionRecord): string;
@@ -5140,7 +5171,7 @@ export interface VerifyAttestationParams {
 }
 
 // @public
-export function verifyAttestationSignature(attestation: MembershipAttestation, publicKeys: NAKeys): boolean;
+export function verifyAttestationSignature(attestation: MembershipAttestation, publicKeys: NAKeys, options?: VouchingOptions): boolean;
 
 // @public
 export function verifyAuditPack(files: Record<string, Uint8Array | string>, options: VerifyAuditPackOptions): PackVerification;
@@ -5174,7 +5205,9 @@ export function verifyBytes(message: Buffer, signatureBase64: string, publicKeyB
 export function verifyCanonical(canonical: string, sig: string, publicKeys: readonly string[]): boolean;
 
 // @public
-export function verifyCapabilityGrant(grant: CapabilityGrant, naPublicKeys: NAKeys): boolean;
+export function verifyCapabilityGrant(grant: CapabilityGrant, naPublicKeys: NAKeys, options?: {
+    now?: string | Date;
+}): boolean;
 
 // @public (undocumented)
 export interface VerifyConsensusParams {
@@ -5289,7 +5322,7 @@ export function verifyRetentionCheckpoint(checkpoint: RetentionCheckpoint, publi
 export function verifyReviewRecord(review: ReviewRecord, naPublicKeys: NAKeys): boolean;
 
 // @public
-export function verifyRevocationFeedSignature(feed: SovereignRevocationFeed, publicKeys: NAKeys): boolean;
+export function verifyRevocationFeedSignature(feed: SovereignRevocationFeed, publicKeys: NAKeys, options?: VouchingOptions): boolean;
 
 // @public
 export function verifyStoreAnchors(anchors: readonly StoreAnchor[], options: VerifyAnchorsOptions): AnchorVerification;
@@ -5301,7 +5334,7 @@ export function verifyTimeToken(token: TimeToken, naPublicKeys: NAKeys): boolean
 export function verifyTimeTokenRequest(request: TimeTokenRequest, bearerPublicKey: string): boolean;
 
 // @public
-export function verifyTreatySignature(treaty: RecognitionTreaty, publicKeys: NAKeys): boolean;
+export function verifyTreatySignature(treaty: RecognitionTreaty, publicKeys: NAKeys, options?: VouchingOptions): boolean;
 
 // @public (undocumented)
 export interface VoteParams {
@@ -5311,6 +5344,11 @@ export interface VoteParams {
     reason?: string;
     // (undocumented)
     vote: boolean;
+}
+
+// @public
+export interface VouchingOptions {
+    now?: string | Date;
 }
 
 // @public

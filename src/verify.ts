@@ -157,6 +157,7 @@ export function verifyDecisionSignature(decision: BoundaryDecision, publicKeys: 
  * (`naKeysVouchingAt`); without it the record is judged at its own time.
  */
 export interface VouchingOptions {
+  /** The time the record is judged at; absent, it is judged at its own time only. */
   now?: string | Date;
 }
 
