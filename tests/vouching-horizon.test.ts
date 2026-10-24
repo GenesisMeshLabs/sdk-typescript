@@ -47,7 +47,7 @@ function twoKeys(oldKey: string, newKey: string, graceSeconds = 3600): NAKeyHist
     { key_sequence: 2, key_id: 'na-2', public_key: newKey, valid_from: iso(SUCCEEDED), succeeded_at: null,
       valid_to: iso(SUCCEEDED + 365 * 86_400_000), valid_to_enforced: true },
   ];
-  return new NAKeyHistory('TEST', null, keys, [], graceSeconds);
+  return new NAKeyHistory('TEST', null, keys, []).withVouchingGrace(graceSeconds);
 }
 
 describe('the horizon helpers', () => {
@@ -80,8 +80,7 @@ describe('the horizon helpers', () => {
     expect(h.withVouchingGrace(7200).vouching_grace_seconds).toBe(3600);
     expect(h.withVouchingGrace(-5).vouching_grace_seconds).toBe(0);
     expect(h.withVouchingGrace(null)).toBe(h);
-    expect(() => twoKeys('a', 'b', 86_401)).toThrow(RangeError);
-    expect(() => twoKeys('a', 'b', -1)).toThrow(RangeError);
+    expect(new NAKeyHistory('TEST', null, []).vouching_grace_seconds).toBe(SUCCESSION_VOUCHING_GRACE_SECONDS);
   });
 
   it("the NA's unsigned hint in the key history view only shortens the grace", () => {

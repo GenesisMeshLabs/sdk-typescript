@@ -3060,8 +3060,7 @@ export interface NAKey {
 
 // @public
 export class NAKeyHistory {
-    constructor(sovereign_id: string, root_public_key: string | null, keys: readonly NAKey[], successions?: readonly KeySuccessionRecord[],
-    vouching_grace_seconds?: number);
+    constructor(sovereign_id: string, root_public_key: string | null, keys: readonly NAKey[], successions?: readonly KeySuccessionRecord[]);
     allKeys(): string[];
     // (undocumented)
     keyFor(publicKey: string): NAKey | undefined;
@@ -3078,7 +3077,7 @@ export class NAKeyHistory {
     // (undocumented)
     readonly successions: readonly KeySuccessionRecord[];
     vouchesUntilMicros(publicKey: string): number | null;
-    readonly vouching_grace_seconds: number;
+    get vouching_grace_seconds(): number;
     withVouchingGrace(graceSeconds: number | null | undefined): NAKeyHistory;
 }
 

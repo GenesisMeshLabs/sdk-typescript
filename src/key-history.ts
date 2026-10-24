@@ -190,19 +190,23 @@ function signs(w: Window, when: number): boolean {
  */
 export class NAKeyHistory {
   private readonly windows: readonly Window[];
+  private grace: number = SUCCESSION_VOUCHING_GRACE_SECONDS;
 
   constructor(
     readonly sovereign_id: string,
     readonly root_public_key: string | null,
     readonly keys: readonly NAKey[],
     readonly successions: readonly KeySuccessionRecord[] = [],
-    /** The vouching horizon's grace (1.8.0): 0 to `SUCCESSION_VOUCHING_GRACE_SECONDS`. */
-    readonly vouching_grace_seconds: number = SUCCESSION_VOUCHING_GRACE_SECONDS,
   ) {
-    if (!(vouching_grace_seconds >= 0 && vouching_grace_seconds <= SUCCESSION_VOUCHING_GRACE_SECONDS)) {
-      throw new RangeError(`vouching_grace_seconds must be 0 to ${SUCCESSION_VOUCHING_GRACE_SECONDS}`);
-    }
     this.windows = keys.map(windowOf);
+  }
+
+  /**
+   * The vouching horizon's grace (1.8.0): `SUCCESSION_VOUCHING_GRACE_SECONDS`
+   * unless shortened with `withVouchingGrace`.
+   */
+  get vouching_grace_seconds(): number {
+    return this.grace;
   }
 
   /**
@@ -212,8 +216,9 @@ export class NAKeyHistory {
    */
   withVouchingGrace(graceSeconds: number | null | undefined): NAKeyHistory {
     if (graceSeconds === null || graceSeconds === undefined || Number.isNaN(graceSeconds)) return this;
-    const grace = Math.min(Math.max(graceSeconds, 0), SUCCESSION_VOUCHING_GRACE_SECONDS, this.vouching_grace_seconds);
-    return new NAKeyHistory(this.sovereign_id, this.root_public_key, this.keys, this.successions, grace);
+    const shorter = new NAKeyHistory(this.sovereign_id, this.root_public_key, this.keys, this.successions);
+    shorter.grace = Math.min(Math.max(graceSeconds, 0), this.grace);
+    return shorter;
   }
 
   /**
