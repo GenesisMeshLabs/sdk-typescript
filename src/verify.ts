@@ -47,7 +47,8 @@ import {
   type UseChainHead,
 } from './grants.js';
 import {
-  NAKeyHistory, RECORD_TIME_TOLERANCE_SECONDS, SUCCESSION_MIN_LEAD_SECONDS, decisionOutlivesKey, naKeysAt, naSignatureAt,
+  NAKeyHistory, RECORD_TIME_TOLERANCE_SECONDS, SUCCESSION_MIN_LEAD_SECONDS, decisionOutlivesKey, naKeysAt,
+  naKeysVouchingAt, naSignatureAt,
   successionDigest, successionSignedBy, type KeySuccessionRecord, type NAKeys,
 } from './key-history.js';
 import {
@@ -151,12 +152,28 @@ export function verifyDecisionSignature(decision: BoundaryDecision, publicKeys: 
 }
 
 /**
- * True when any attestation signature verifies under the issuer keys (v1.5.0:
- * given the NA's key history, the key valid at `issued_at`).
+ * 1.8.0: judging a record for the present. With `now` and the NA's key
+ * history, a key whose vouching horizon has passed by `now` no longer counts
+ * (`naKeysVouchingAt`); without it the record is judged at its own time.
  */
-export function verifyAttestationSignature(attestation: MembershipAttestation, publicKeys: NAKeys): boolean {
+export interface VouchingOptions {
+  now?: string | Date;
+}
+
+function keysFor(publicKeys: NAKeys, time: string, options: VouchingOptions): string[] {
+  return options.now === undefined ? naKeysAt(publicKeys, time) : naKeysVouchingAt(publicKeys, time, options.now);
+}
+
+/**
+ * True when any attestation signature verifies under the issuer keys (v1.5.0:
+ * given the NA's key history, the key valid at `issued_at`; 1.8.0: with
+ * `options.now`, a key still vouching then).
+ */
+export function verifyAttestationSignature(
+  attestation: MembershipAttestation, publicKeys: NAKeys, options: VouchingOptions = {},
+): boolean {
   return unknownFields('MembershipAttestation', attestation).length === 0
-    && anySigned(attestationCanonical(attestation), attestation.signatures, naKeysAt(publicKeys, attestation.issued_at));
+    && anySigned(attestationCanonical(attestation), attestation.signatures, keysFor(publicKeys, attestation.issued_at, options));
 }
 
 /** v1.5.0: given the NA's key history, signed by the key valid at the policy's `issued_at`. */
@@ -171,10 +188,20 @@ export function verifyJustificationSignature(proof: DecisionJustification, publi
     && signedBy(justificationCanonical(proof), proof.signature, naKeysAt(publicKeys, proof.proof_issued_at));
 }
 
-/** v1.5.0: given the NA's key history, signed by the key valid at the feed's `issued_at`. */
-export function verifyRevocationFeedSignature(feed: SovereignRevocationFeed, publicKeys: NAKeys): boolean {
+/**
+ * v1.5.0: given the NA's key history, signed by the key valid at the feed's
+ * `issued_at`; 1.8.0: with `options.now`, by a key still vouching then.
+ */
+export function verifyRevocationFeedSignature(
+  feed: SovereignRevocationFeed, publicKeys: NAKeys, options: VouchingOptions = {},
+): boolean {
   return unknownFields('SovereignRevocationFeed', feed).length === 0
-    && anySigned(revocationFeedCanonical(feed), feed.signatures, naKeysAt(publicKeys, feed.issued_at));
+    && anySigned(revocationFeedCanonical(feed), feed.signatures, keysFor(publicKeys, feed.issued_at, options));
+}
+
+/** The NA key that signed a revocation feed at its `issued_at` (1.8.0), or `undefined`. */
+export function revocationFeedSigner(feed: SovereignRevocationFeed, publicKeys: NAKeys): string | undefined {
+  return naKeysAt(publicKeys, feed.issued_at).find(k => anySigned(revocationFeedCanonical(feed), feed.signatures, [k]));
 }
 
 function checkpointSigned(checkpoint: RetentionCheckpoint, publicKeys: readonly string[]): boolean {
@@ -216,10 +243,13 @@ export function treatyCanonical(treaty: RecognitionTreaty): string {
 /**
  * True when a treaty signature verifies under the issuer keys (v1.5.0): given
  * the NA's key history, the key valid at the treaty's `issued_at`, so a key
- * succession leaves every treaty signed before it vouching.
+ * succession leaves every treaty signed before it vouching at its own time.
+ * 1.8.0: with `options.now`, only while that key still vouches.
  */
-export function verifyTreatySignature(treaty: RecognitionTreaty, publicKeys: NAKeys): boolean {
-  return anySigned(treatyCanonical(treaty), treaty.signatures, naKeysAt(publicKeys, treaty.issued_at));
+export function verifyTreatySignature(
+  treaty: RecognitionTreaty, publicKeys: NAKeys, options: VouchingOptions = {},
+): boolean {
+  return anySigned(treatyCanonical(treaty), treaty.signatures, keysFor(publicKeys, treaty.issued_at, options));
 }
 
 /** True when the record's signature verifies under the executor's public key. */

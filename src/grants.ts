@@ -35,7 +35,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { checkSignable, compareCodePoints, signCanonical, verifyCanonical, type Signer } from './auth.js';
 import { GenesisMeshError } from './errors.js';
-import { naKeysAt, type NAKeys } from './key-history.js';
+import { naKeysAt, naKeysVouchingAt, type NAKeys } from './key-history.js';
 import { metadataProblem, outOfBandCanonical, timeOf, wire } from './out-of-band.js';
 import {
   nonCanonicalFields, receivedCanonical, signedAsReceived, unknownFields, withoutUnknownFields,
@@ -557,13 +557,20 @@ const grantFields = shape({
   signature: signatureShape,
 });
 
-/** A grant in the shape the reference reads: a validity of at most 24 hours, each envelope parameter readable. */
+/**
+ * A grant in the shape the reference reads: a validity of at most 24 hours,
+ * each envelope parameter readable, and (1.8.0) a start within 24 hours of its
+ * issue: `issued_at` minus the clock skew to `issued_at` plus 24 hours and the
+ * skew, as the NA issues them.
+ */
 export const validGrant: Check = v => {
   if (!grantFields(v)) return false;
   const r = v as Record<string, unknown>;
   const from = timestampMicros(r['valid_from'] as string);
   const until = timestampMicros(r['valid_until'] as string);
-  return from < until && until - from <= GRANT_MAX_VALIDITY_SECONDS * 1_000_000;
+  const issued = timestampMicros(r['issued_at'] as string);
+  return from < until && until - from <= GRANT_MAX_VALIDITY_SECONDS * 1_000_000
+    && issued - SKEW_MICROS <= from && from <= issued + GRANT_MAX_VALIDITY_SECONDS * 1_000_000 + SKEW_MICROS;
 };
 
 const headFields = (v: Record<string, unknown>) => (own(v, 'use_sequence') === 0) === absent(own(v, 'use_head_digest'));
@@ -646,19 +653,25 @@ function signedForm(model: string, record: Record<string, unknown>, keys: readon
 }
 
 /** A record signed by one of the NA keys valid at its own time (`field`), in the reference's form, with no unknown field. */
-function naSigned(model: string, valid: Check, field: string, record: unknown, naPublicKeys: NAKeys): boolean {
+function naSigned(
+  model: string, valid: Check, field: string, record: unknown, naPublicKeys: NAKeys, now?: string | Date,
+): boolean {
   if (!valid(record)) return false;
   const at = (record as Record<string, unknown>)[field] as string;
-  return signedForm(model, record as Record<string, unknown>, naKeysAt(naPublicKeys, at));
+  const keys = now === undefined ? naKeysAt(naPublicKeys, at) : naKeysVouchingAt(naPublicKeys, at, now);
+  return signedForm(model, record as Record<string, unknown>, keys);
 }
 
 /**
  * True when a grant is well formed and signed by the NA over the grant as
  * received (given the NA's key history, by the key valid at its `issued_at`),
- * in the reference's form and with no field this SDK does not know.
+ * in the reference's form and with no field this SDK does not know. 1.8.0:
+ * with `options.now`, only while that key still vouches (the horizon).
  */
-export function verifyCapabilityGrant(grant: CapabilityGrant, naPublicKeys: NAKeys): boolean {
-  return naSigned('CapabilityGrant', validGrant, 'issued_at', grant, naPublicKeys);
+export function verifyCapabilityGrant(
+  grant: CapabilityGrant, naPublicKeys: NAKeys, options: { now?: string | Date } = {},
+): boolean {
+  return naSigned('CapabilityGrant', validGrant, 'issued_at', grant, naPublicKeys, options.now);
 }
 
 /** As `verifyCapabilityGrant`, for a time token (read alone, at its `issued_at`). */

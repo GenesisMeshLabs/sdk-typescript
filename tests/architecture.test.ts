@@ -19,7 +19,7 @@ const LAYERS: readonly (readonly [string, readonly string[]])[] = [
   // Canonical forms, validation, signing and offline verification of protocol records; outboxes. No HTTP.
   ['protocol', [
     'canonical.ts', 'strict.ts', 'validation.ts', 'execution.ts', 'data_intent.ts', 'out-of-band.ts',
-    'remediation.ts', 'grants.ts', 'key-history.ts', 'anchors.ts', 'verify.ts', 'audit-pack.ts', 'outbox.ts',
+    'remediation.ts', 'grants.ts', 'key-history.ts', 'vouching.ts', 'anchors.ts', 'verify.ts', 'audit-pack.ts', 'outbox.ts',
   ]],
   // HTTP transport and the sub-clients, one per NA route group.
   ['transport', [

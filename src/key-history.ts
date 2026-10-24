@@ -17,6 +17,12 @@
  * - a succeeded key is still accepted for records dated up to 300 seconds
  *   after the next key took effect (the hand-over).
  *
+ * The vouching horizon (1.8.0): judged for the present, a record signed by a
+ * key that has ended vouches only until that key's end, the hand-over and a
+ * grace of at most 24 hours (`recordOutlivesKey`, `naKeysVouchingAt`). The
+ * Network Authority re-issues what is still valid under the new key. Judged at
+ * its own time, as audit packs and exports judge it, a record is unchanged.
+ *
  * Pure functions; no network access.
  */
 
@@ -42,6 +48,14 @@ export const SUCCESSION_MIN_LEAD_SECONDS = 60;
  * stays valid past that end, the hand-over and this lifetime.
  */
 export const MAX_DECISION_LIFETIME_SECONDS = 300;
+
+/**
+ * The vouching horizon's grace (1.8.0, seconds): how long past its end and
+ * the hand-over a record of a key that has ended still vouches for the
+ * present. Also the most any verifier allows; `withVouchingGrace` only
+ * shortens it.
+ */
+export const SUCCESSION_VOUCHING_GRACE_SECONDS = 86_400;
 
 /**
  * How far an export entry's `recorded_at` may fall behind an earlier entry's
@@ -182,8 +196,38 @@ export class NAKeyHistory {
     readonly root_public_key: string | null,
     readonly keys: readonly NAKey[],
     readonly successions: readonly KeySuccessionRecord[] = [],
+    /** The vouching horizon's grace (1.8.0): 0 to `SUCCESSION_VOUCHING_GRACE_SECONDS`. */
+    readonly vouching_grace_seconds: number = SUCCESSION_VOUCHING_GRACE_SECONDS,
   ) {
+    if (!(vouching_grace_seconds >= 0 && vouching_grace_seconds <= SUCCESSION_VOUCHING_GRACE_SECONDS)) {
+      throw new RangeError(`vouching_grace_seconds must be 0 to ${SUCCESSION_VOUCHING_GRACE_SECONDS}`);
+    }
     this.windows = keys.map(windowOf);
+  }
+
+  /**
+   * This history with a shorter grace (1.8.0): a longer one is clamped to the
+   * current grace, and `null` or `undefined` keeps it. Use it for the NA's
+   * unsigned `vouching_grace_seconds` hint, which may only shorten the grace.
+   */
+  withVouchingGrace(graceSeconds: number | null | undefined): NAKeyHistory {
+    if (graceSeconds === null || graceSeconds === undefined || Number.isNaN(graceSeconds)) return this;
+    const grace = Math.min(Math.max(graceSeconds, 0), SUCCESSION_VOUCHING_GRACE_SECONDS, this.vouching_grace_seconds);
+    return new NAKeyHistory(this.sovereign_id, this.root_public_key, this.keys, this.successions, grace);
+  }
+
+  /**
+   * Until when a record signed by `publicKey` vouches for the present
+   * (1.8.0, microseconds since the epoch): its end, the hand-over and the
+   * grace. `null` for a key with no end, or not in this history.
+   */
+  vouchesUntilMicros(publicKey: string): number | null {
+    const index = this.keys.findIndex(k => k.public_key === publicKey);
+    if (index < 0) return null;
+    const w = this.windows[index]!;
+    const ends = [w.succeeded, w.to].filter((t): t is number => t !== null);
+    if (ends.length === 0) return null;
+    return Math.min(...ends) + HANDOVER_MICROS + this.vouching_grace_seconds * 1_000_000;
   }
 
   /** Keys valid at every time: a list of NA keys as verifiers took them before 1.5.0. */
@@ -247,6 +291,25 @@ export function decisionOutlivesKey(keys: NAKeys, publicKey: string, validUntil:
     .filter((t): t is string => t !== null).map(at);
   if (ends.length === 0) return false;
   return at(validUntil) > Math.min(...ends) + HANDOVER_MICROS + MAX_DECISION_LIFETIME_SECONDS * 1_000_000;
+}
+
+/**
+ * True when a record signed by `publicKey` no longer vouches for the present
+ * at `now` (1.8.0): its key ended more than the hand-over and the grace ago.
+ * The dynamic twin of `decisionOutlivesKey`; a list of keys has no ends.
+ */
+export function recordOutlivesKey(keys: NAKeys, publicKey: string, now: string | Date): boolean {
+  if (!(keys instanceof NAKeyHistory)) return false;
+  const until = keys.vouchesUntilMicros(publicKey);
+  return until !== null && at(now) >= until;
+}
+
+/**
+ * The NA keys a record dated `time` may be signed with and that still vouch
+ * at `now` (1.8.0): `naKeysAt` without the keys whose horizon has passed.
+ */
+export function naKeysVouchingAt(keys: NAKeys, time: string | Date | null, now: string | Date): string[] {
+  return naKeysAt(keys, time).filter(k => !recordOutlivesKey(keys, k, now));
 }
 
 /**
@@ -457,6 +520,11 @@ export interface KeyHistoryView {
   successions: KeySuccessionRecord[];
   keys: Array<NAKey & { current: boolean }>;
   signing_key_sequence: number | null;
+  /**
+   * 1.8.0: the NA's vouching grace (`NA_SUCCESSION_VOUCHING_GRACE_SECONDS`).
+   * Unsigned: `verifyKeyHistoryView` takes it only to shorten the grace.
+   */
+  vouching_grace_seconds?: number;
 }
 
 /**
@@ -466,5 +534,11 @@ export interface KeyHistoryView {
  */
 export function verifyKeyHistoryView(view: KeyHistoryView, rootPublicKey: string): KeyHistoryVerification {
   const successions = isObject(view) && Array.isArray(view.successions) ? view.successions : [];
-  return verifyKeyHistory(isObject(view) ? view.genesis : undefined, successions, rootPublicKey);
+  const result = verifyKeyHistory(isObject(view) ? view.genesis : undefined, successions, rootPublicKey);
+  // 1.8.0: the NA's grace hint, unsigned, can only shorten the grace (a missing or unreadable one keeps it).
+  const hint = isObject(view) ? (view as unknown as Record<string, unknown>)['vouching_grace_seconds'] : undefined;
+  if (result.history !== null && typeof hint === 'number' && Number.isFinite(hint) && hint >= 0) {
+    result.history = result.history.withVouchingGrace(hint);
+  }
+  return result;
 }

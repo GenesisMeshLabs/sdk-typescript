@@ -130,13 +130,14 @@ export {
   verifyDataAccessIntent,
   treatyCanonical,
   verifyTreatySignature,
+  revocationFeedSigner,
   CARRIED_KINDS,
   carriedSequences,
   isoMicros,
   keyPlacementProblem,
 } from './verify.js';
 export type {
-  VerifyDecisionOptions, VerifyEvidenceOptions, ExecutorKeyInfo, RecognitionTreaty,
+  VerifyDecisionOptions, VerifyEvidenceOptions, ExecutorKeyInfo, RecognitionTreaty, VouchingOptions,
   AgreementVerification, AgreementVerificationReason, DataIntentVerification, DataUsageViolationDetail, DataUsageViolationType,
 } from './verify.js';
 
@@ -148,10 +149,13 @@ export {
   RECORD_TIME_TOLERANCE_SECONDS,
   SUCCESSION_HANDOVER_SECONDS,
   SUCCESSION_MIN_LEAD_SECONDS,
+  SUCCESSION_VOUCHING_GRACE_SECONDS,
   decisionOutlivesKey,
   genesisRefusal,
   naKeysAt,
+  naKeysVouchingAt,
   naSignatureAt,
+  recordOutlivesKey,
   successionCanonical,
   successionDigest,
   successionRefusal,
@@ -170,6 +174,10 @@ export type {
   NAKeys,
   SuccessionContext,
 } from './key-history.js';
+
+// The vouching horizon for NA-signed records (1.8.0)
+export { NA_VOUCHING_TIME_FIELDS, modelAccepts, naRecordRefusal } from './vouching.js';
+export type { NARecordRefusal } from './vouching.js';
 
 // Store anchors (offline, v1.5.0)
 export {

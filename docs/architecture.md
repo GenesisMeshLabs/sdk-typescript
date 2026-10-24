@@ -15,7 +15,7 @@ Imports point down the table or stay inside a layer. They never point up.
 | Rank | Layer | Modules |
 |---|---|---|
 | 1 | leaf | `types.ts`, `errors.ts`, `strict-json.ts`, `auth.ts`, `metadata.ts`, `canonical-registry.ts` |
-| 2 | protocol | `canonical.ts`, `strict.ts`, `validation.ts`, `execution.ts`, `data_intent.ts`, `out-of-band.ts`, `remediation.ts`, `grants.ts`, `key-history.ts`, `anchors.ts`, `verify.ts`, `audit-pack.ts`, `outbox.ts` |
+| 2 | protocol | `canonical.ts`, `strict.ts`, `validation.ts`, `execution.ts`, `data_intent.ts`, `out-of-band.ts`, `remediation.ts`, `grants.ts`, `key-history.ts`, `vouching.ts`, `anchors.ts`, `verify.ts`, `audit-pack.ts`, `outbox.ts` |
 | 3 | transport | `client.ts`, and one sub-client per NA route group: `agreement.ts`, `attestation.ts`, `boundary.ts`, `consensus.ts`, `data_usage.ts`, `disclosure.ts`, `evidence.ts`, `health.ts`, `network_authority.ts`, `policy.ts`, `grants-client.ts`, `evidence_store.ts` |
 | 4 | orchestration | `governance.ts`, `grant-holder.ts` |
 | 5 | entry | `index.ts` |
@@ -60,7 +60,8 @@ Within the layers, three more rules hold. Nothing tests them, so review them:
 | `out-of-band.ts` | Observations, break-glass, judgements, quarantine and the registry (1.3.0). |
 | `remediation.ts` | Remediations, reviews and emergency changes (1.4.0). |
 | `grants.ts` | Pre-issued grants: records, envelopes, use chains and their rules (1.6.0). |
-| `key-history.ts` | The NA's key history and key successions (1.5.0). |
+| `key-history.ts` | The NA's key history and key successions (1.5.0), and the vouching horizon helpers (1.8.0). |
+| `vouching.ts` | `naRecordRefusal`: an NA-signed record judged at its own time and for the present, the `vouching` suite (1.8.0). |
 | `anchors.ts` | Store anchors and retention checkpoints, verified offline. |
 | `verify.ts` | Offline verification of artifacts and evidence exports. Holds the per-kind tables, typed against `EntryKind`. |
 | `audit-pack.ts` | Audit packs and archives, verified offline from files (1.5.0). |
