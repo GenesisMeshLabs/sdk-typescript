@@ -91,7 +91,10 @@ blocked, and always judged.
 From 1.5.0 the NA can replace its key: verify its key history from the root
 key you hold (`gm.na.verifiedKeyHistory(rootPublicKey)`) and pass it wherever
 NA keys are taken, so each record verifies with the key valid at its own
-time. An auditor asks for an audit pack (`evidenceStore.auditPack()`) and
+time. From 1.8.0 pass `{ now }` to judge an attestation, treaty, revocation
+feed or grant for the present: a record of a succeeded key stops vouching
+once that key's horizon has passed (see
+[the vouching horizon](docs/audit-packs.md#the-vouching-horizon-180)). An auditor asks for an audit pack (`evidenceStore.auditPack()`) and
 verifies it offline with `verifyAuditPack`, from the root key and the anchors
 it holds (`evidenceStore.allAnchors()`).
 

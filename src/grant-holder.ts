@@ -9,7 +9,8 @@
  * (`grant_use_out_of_scope`), the capability (`grant_capability_mismatch`),
  * the closed envelope (`grant_envelope_mismatch`), the budget counting its
  * own uses but those the NA has quarantined (`grant_budget_exhausted`), the
- * validity (`grant_expired` past its end, `grant_use_outside_validity` before
+ * validity (`grant_expired` past its end, or once the NA key that signed it
+ * has passed its vouching horizon, 1.8.0; `grant_use_outside_validity` before
  * its start), the revocation feed it holds and what the NA last answered
  * (`grant_revoked`, or the NA's code), and the uses left on its time token,
  * at most `max_uses_per_time_token` after the use the token names
@@ -49,13 +50,13 @@ import {
   envelopeProblem, GrantRecordError, grantUseDigest, signGrantUse, signTimeTokenRequest, verifyCapabilityGrant,
   verifyTimeToken, type CapabilityGrant, type GrantExecutionEvidence, type GrantUseOutcome, type TimeToken,
 } from './grants.js';
-import type { NAKeys } from './key-history.js';
+import { NAKeyHistory, recordOutlivesKey, type NAKeys } from './key-history.js';
 import { metadataProblem, timeOf } from './out-of-band.js';
 import type { RecordFlushResult, RecordSubmission } from './evidence_store.js';
 import type { RecordOutboxEntry } from './outbox.js';
 import { StrictJsonError } from './strict-json.js';
 import { timestampMicros } from './validation.js';
-import { verifyRevocationFeedSignature } from './verify.js';
+import { revocationFeedSigner, verifyRevocationFeedSignature } from './verify.js';
 import type { BoundaryDecision, ResourceAction, SovereignRevocationFeed } from './types.js';
 
 /** Why a grant cannot be used, for which the holder falls back to break-glass when the NA cannot be reached. */
@@ -242,8 +243,10 @@ export class GrantHolder {
     this.persistState = options.persist;
     this.now = options.now ?? (() => new Date());
     const grant = state.grant;
-    if (!verifyCapabilityGrant(grant, this.naKeys)) {
-      throw new GrantRefusedError('the grant is not signed by the NA, or not in its form', 'grant_invalid');
+    // 1.8.0: judged now, so a grant of an NA key past its vouching horizon is refused.
+    if (!verifyCapabilityGrant(grant, this.naKeys, { now: this.now() })) {
+      throw new GrantRefusedError('the grant is not signed by the NA, or not in its form, or its NA key no longer vouches',
+        'grant_invalid');
     }
     if (this.signer.keyId !== grant.bearer_key_id) {
       throw new GrantRefusedError(`the signer ${this.signer.keyId} is not the grant's bearer key ${grant.bearer_key_id}`,
@@ -296,21 +299,47 @@ export class GrantHolder {
   }
 
   /**
-   * Verify a revocation feed (signed by the NA's key valid at its time, issued
-   * by the grant's issuer) and keep it unless the one held is newer. A holder
-   * refuses a grant the feed it holds lists as revoked.
+   * Verify a revocation feed (signed by the NA's key valid at its time and
+   * still vouching now, issued by the grant's issuer) and keep it unless the
+   * one held is newer. A holder refuses a grant the feed it holds lists as
+   * revoked.
+   *
+   * 1.8.0: feeds are ordered by the key sequence of their signer, then by
+   * `sequence`, so a feed signed by a later NA key always replaces one signed
+   * by an earlier key, and a held feed whose key has passed its vouching
+   * horizon no longer blocks a newer one: otherwise a feed with a forged high
+   * `sequence`, signed with a succeeded key, would stop the holder from taking
+   * the NA's feeds for good.
    */
   updateRevocationFeed(feed: SovereignRevocationFeed): Promise<boolean> {
     return this.serial(async () => {
-      if (!verifyRevocationFeedSignature(feed, this.naKeys) || feed.issuer_sovereign_id !== this.current.grant.issuer_sovereign_id) {
+      const now = this.now();
+      if (!verifyRevocationFeedSignature(feed, this.naKeys, { now })
+          || feed.issuer_sovereign_id !== this.current.grant.issuer_sovereign_id) {
         throw new GrantRefusedError("the revocation feed is not the grant issuer's", 'feed_invalid_signature');
       }
       const held = this.current.revocation_feed;
-      if (held !== null && held.sequence > feed.sequence) return false;
+      if (held !== null && !this.feedReplaces(feed, held, now)) return false;
       this.current.revocation_feed = cloneJson(feed);
       await this.persist();
       return true;
     });
+  }
+
+  /** The key sequence of a feed's NA signer in the key history (0 for a list of keys, or no signer). */
+  private feedKeySequence(feed: SovereignRevocationFeed): number {
+    const signer = revocationFeedSigner(feed, this.naKeys);
+    if (signer === undefined || !(this.naKeys instanceof NAKeyHistory)) return 0;
+    return this.naKeys.keyFor(signer)?.key_sequence ?? 0;
+  }
+
+  /** True when `feed` replaces the `held` one: a later signing key, else a sequence no lower (1.8.0). */
+  private feedReplaces(feed: SovereignRevocationFeed, held: SovereignRevocationFeed, now: Date): boolean {
+    const heldSigner = revocationFeedSigner(held, this.naKeys);
+    if (heldSigner === undefined || recordOutlivesKey(this.naKeys, heldSigner, now)) return true;
+    const [incoming, kept] = [this.feedKeySequence(feed), this.feedKeySequence(held)];
+    if (incoming !== kept) return incoming > kept;
+    return feed.sequence >= held.sequence;
   }
 
   /** Read the NA's revocation feed and keep it (`updateRevocationFeed`). */
@@ -429,6 +458,8 @@ export class GrantHolder {
     let unusable: GrantUnusableCode | null = null;
     if (sequence > grant.max_uses && sequence - await this.quarantinedUses() > grant.max_uses) unusable = 'grant_budget_exhausted';
     else if (at > timestampMicros(grant.valid_until)) unusable = 'grant_expired';
+    // 1.8.0: a grant of an NA key past its vouching horizon no longer vouches; it ends as if expired.
+    else if (!verifyCapabilityGrant(grant, this.naKeys, { now })) unusable = 'grant_expired';
     else if (at < timestampMicros(grant.valid_from)) {
       throw new GrantRefusedError(`the grant is valid from ${grant.valid_from}`, 'grant_use_outside_validity');
     } else if (state.revocation_feed?.revoked_grant_ids?.includes(grant.grant_id)) unusable = 'grant_revoked';
