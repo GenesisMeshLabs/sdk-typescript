@@ -127,7 +127,8 @@ linked records:
 
 ```ts
 const result = await cancelByRotatingForward(gm, recorder, {
-  remediation: due,                 // from the due queue; its change_version_id is disabled
+  remediation: due,                 // from the due queue
+  deniedVersionId: due.change_version_id!,  // the version the denied change made
   rotation: { attestation_id, requested_capability: 'secret.rotate',
               context: { request_parameters: { lifetime_days: 30 } }, verify },
   rotate: async decision => {       // issue a new version, make it current
@@ -152,11 +153,10 @@ Before anything runs it checks the state and the plan when the remediation
 carries them (`remediation_not_due` unless the state is `remediation_due` or
 `overdue`, `remediation_already_recorded`, `remediation_steps_mismatch`), the
 denied version, and that the record outbox can be read. The denied version is
-the one the change made: `deniedVersionId` defaults to the state's
-`change_version_id`, and another one is refused
-(`remediation_subject_mismatch`), as the NA would refuse the record for good
-after the disable. Give `deniedVersionId` only when the state names no
-version. It must also pass the secret guard. The rotation must be made by the same executor sovereign as the record,
+the one the change made: when the state names it (`change_version_id`, as the
+due queue gives it), another one is refused (`remediation_subject_mismatch`),
+as the NA would refuse the record for good after the disable. It must also
+pass the secret guard. The rotation must be made by the same executor sovereign as the record,
 after the change, and be cited by no other remediation: the NA refuses
 otherwise (`remediation_rotation_other_executor`,
 `remediation_rotation_before_change`, `remediation_rotation_reused`). Before the denied version is disabled

@@ -4634,10 +4634,10 @@ export interface RotatedVersion<T = unknown> {
 
 // @public (undocumented)
 export interface RotateForwardOptions<T = unknown> {
-    deniedVersionId?: string;
+    deniedVersionId: string;
     detail?: string;
     disable: (deniedVersionId: string) => Promise<void>;
-    remediation: Pick<RemediationStatus, 'subject_kind' | 'subject_id' | 'change_kind' | 'change_id' | 'resource_id'> & Partial<Pick<RemediationStatus, 'state' | 'review_pending' | 'mode' | 'steps' | 'fallback' | 'change_version_id'>>;
+    remediation: Pick<RemediationStatus, 'subject_kind' | 'subject_id' | 'change_kind' | 'change_id' | 'resource_id'> & Partial<Pick<RemediationStatus, 'state' | 'review_pending' | 'mode' | 'steps' | 'fallback'>>;
     rotate: (decision: BoundaryDecision) => Promise<RotatedVersion<T>>;
     rotation: Omit<GovernedActionParams, 'resource_id' | 'resource_action' | 'breakGlass'> & {
         resource_action?: 'rotate' | 'update';

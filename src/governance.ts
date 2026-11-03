@@ -620,18 +620,18 @@ export interface RotateForwardOptions<T = unknown> {
    * carries `state`, `mode` and `steps`, they are checked before anything
    * runs: a remediation is recorded only from `remediation_due` or `overdue`
    * (a pending review does not stop it), and the plan must be `cancel` /
-   * `rotate_forward_then_disable`.
+   * `rotate_forward_then_disable`. When it carries `change_version_id`, as
+   * the due queue's state does, the denied version must be that one.
    */
   remediation: Pick<RemediationStatus, 'subject_kind' | 'subject_id' | 'change_kind' | 'change_id' | 'resource_id'>
-    & Partial<Pick<RemediationStatus, 'state' | 'review_pending' | 'mode' | 'steps' | 'fallback' | 'change_version_id'>>;
+    & Partial<Pick<RemediationStatus, 'state' | 'review_pending' | 'mode' | 'steps' | 'fallback'>>;
   /**
-   * The denied version: disabled once readers have the new one. Default the
-   * state's `change_version_id`; when the state names one, it must be that
-   * one: the NA refuses for good a record that disables another
-   * (`remediation_subject_mismatch`), so another is refused before anything
-   * runs.
+   * The denied version: disabled once readers have the new one. The version
+   * the change made: when the remediation carries `change_version_id`,
+   * another one is refused before anything runs, as the NA refuses for good
+   * a record that disables another (`remediation_subject_mismatch`).
    */
-  deniedVersionId?: string;
+  deniedVersionId: string;
   /**
    * The governed rotation's evaluation and verification (capability,
    * attestation, context, `verify`), as for `governedAction`; the resource is
@@ -708,7 +708,7 @@ export class RemediationNotRecordedError<T = unknown> extends GenesisMeshError {
  *    outbox (submitted directly without one).
  *
  * A credential is never rolled back. The denied version is the one the
- * change made (`change_version_id`, the default): the NA refuses a record
+ * change made (the state's `change_version_id`): the NA refuses a record
  * that disables another. The record is checked before the denied version is
  * disabled, and a rotation whose evidence the NA refused for good (a dead
  * letter in the evidence outbox) is never followed by the disable, so a
@@ -738,8 +738,9 @@ export async function cancelByRotatingForward<T>(
     if (problem) throw new OutOfBandRecordError(problem, 'remediation_steps_mismatch');
   }
   if (state.state !== undefined) nextState(state.state, 'record_remediation', state.review_pending ?? false);
-  const changed = state.change_version_id;
-  const denied = options.deniedVersionId || changed;
+  // The due queue's state names the version the change made: the NA refuses a record that disables another.
+  const changed = (state as Partial<RemediationStatus>).change_version_id;
+  const denied = options.deniedVersionId;
   if (typeof denied !== 'string' || !denied) {
     throw new OutOfBandRecordError('the denied version is required', 'remediation_malformed');
   }

@@ -352,7 +352,7 @@ suite('SDK against a live Python Network Authority', () => {
     const state = (await gm.evidenceStore.remediation(subjectId));
     expect(state.change_version_id).toBe('v2');
     const options = {
-      remediation: state,
+      remediation: state, deniedVersionId: 'v2',
       rotation: {
         attestation_id: x.attestation.attestation_id, requested_capability: x.capability,
         context: { request_parameters: { lifetime_days: 30 } }, verify: x.verify,

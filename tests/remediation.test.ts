@@ -595,18 +595,19 @@ describe('cancelByRotatingForward', () => {
     await expect(cancelByRotatingForward(x.gm, x.recorder, { ...x.options, remediation: versioned, deniedVersionId: 'v1' }))
       .rejects.toMatchObject({ code: 'remediation_subject_mismatch' });
     expect(x.steps).toEqual([]);
-    const { deniedVersionId: _, ...withoutDenied } = x.options;
-    const result = await cancelByRotatingForward(x.gm, x.recorder, { ...withoutDenied, remediation: versioned });
+    const result = await cancelByRotatingForward(x.gm, x.recorder, { ...x.options, remediation: versioned, deniedVersionId: 'v2' });
     expect(x.disable).toHaveBeenCalledWith('v2');
     expect(result.remediation).toMatchObject({ disabled_version_id: 'v2' });
-    await cancelByRotatingForward(x.gm, x.recorder, { ...x.options, remediation: versioned, deniedVersionId: 'v2' });
-    expect(x.disable).toHaveBeenLastCalledWith('v2');
+    // The state as the due queue gives it: a RemediationStatus, its change_version_id beyond the option's type.
+    const status = { ...versioned } as unknown as RemediationStatus;
+    await expect(cancelByRotatingForward(x.gm, x.recorder, { ...x.options, remediation: status, deniedVersionId: 'v3' }))
+      .rejects.toMatchObject({ code: 'remediation_subject_mismatch' });
   });
 
   it('takes the version given when the state names none, and needs one', async () => {
     const x = await setup();
     const result = await cancelByRotatingForward(x.gm, x.recorder, {
-      ...x.options, remediation: { ...due, change_version_id: null }, deniedVersionId: 'v1',
+      ...x.options, remediation: { ...due, change_version_id: null } as unknown as RemediationStatus, deniedVersionId: 'v1',
     });
     expect(result.remediation).toMatchObject({ disabled_version_id: 'v1' });
     for (const deniedVersionId of [undefined, '']) {
