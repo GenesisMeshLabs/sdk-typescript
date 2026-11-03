@@ -125,3 +125,17 @@ describe('offline evidence export', () => {
     expect(verifyEvidenceEvents([], { ...options, checkpoint: { ...v.checkpoint, signature: null } }).verified).toBe(false);
   });
 });
+
+// ── Timestamps as the reference reads them ────────────────────────────────────
+
+describe('timestamp', () => {
+  it('reads the years 1 to 9999, as the reference does (Date.UTC reads 0000 as 1900)', async () => {
+    const { timestamp } = await import('../src/validation.js');
+    expect(timestamp('0000-01-01T00:00:00Z')).toBe(false);
+    expect(timestamp('0000-02-29T00:00:00Z')).toBe(false);
+    expect(timestamp('0001-01-01T00:00:00Z')).toBe(true);
+    expect(timestamp('0004-02-29T00:00:00Z')).toBe(true);
+    expect(timestamp('0100-02-29T00:00:00Z')).toBe(false);
+    expect(timestamp('9999-12-31T23:59:59.999999Z')).toBe(true);
+  });
+});

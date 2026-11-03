@@ -277,6 +277,16 @@ export class NAKeyHistory {
  */
 export type NAKeys = readonly string[] | NAKeyHistory;
 
+/**
+ * A record's own time as `naKeysAt` takes it: a record whose time is missing
+ * (null, absent or not a string) is dated nowhere, so no key of a history
+ * signs it. Passed on as null it would take every key, and a succeeded key's
+ * signature would verify forever. A list of keys is valid at every time.
+ */
+export function recordTime(time: unknown): string | Date {
+  return typeof time === 'string' || time instanceof Date ? time : '';
+}
+
 /** The NA public keys a record dated `time` may be signed with; every key when `time` is null. */
 export function naKeysAt(keys: NAKeys, time: string | Date | null): string[] {
   if (keys instanceof NAKeyHistory) return time === null ? keys.allKeys() : keys.keysAt(time);
