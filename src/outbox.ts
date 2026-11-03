@@ -180,7 +180,11 @@ export const PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
  * (`remediation_subject_not_found`, `remediation_rotation_missing`),
  * `remediation_disabled`, a grant use whose predecessor the NA does not hold
  * yet (`grant_use_chain_gap`), one dated ahead of the NA's clock
- * (`grant_use_in_future`) and `grants_disabled`.
+ * (`grant_use_in_future`) and `grants_disabled`. 1.9.0: a chain gap behind
+ * an earlier use of the grant that the outbox holds as a dead letter, one that
+ * never took its place in the chain (no quarantine entry, or quarantined as a
+ * conflict or a chain mismatch), never closes: that use is a dead letter too
+ * (`PREDECESSOR_DEAD_LETTERED`).
  */
 export const RECORD_PERMANENT_REFUSALS: ReadonlySet<string> = new Set([
   // 1.3.1: refused by the NA's strict JSON reader; a batch so refused is split until the record is found.
