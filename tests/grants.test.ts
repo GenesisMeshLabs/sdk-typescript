@@ -12,7 +12,7 @@ import {
 } from '../src/index.js';
 import type {
   CapabilityGrant, EvidenceEvent, ExecutorKeyInfo, GrantExecutionEvidence, GrantRevocationRecord, NumericRange,
-  RecordOutboxEntry, RecordSubmission, SovereignRevocationFeed, TimeToken,
+  RecordOutbox, RecordOutboxEntry, RecordSubmission, SovereignRevocationFeed, TimeToken,
 } from '../src/index.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -364,6 +364,118 @@ describe('grant uses in the record outbox (v1.6.0)', () => {
     const http = (gm.evidenceStore as unknown as { http: { publicPost: (...a: unknown[]) => Promise<unknown> } }).http;
     jest.spyOn(http, 'publicPost').mockRejectedValueOnce(new NetworkError('down'));
     expect((await gm.evidenceStore.enqueueRecord(use)).queued?.state).toBe('pending');
+  });
+
+  // 1.9.0: a gap behind a use refused before it took its place in the chain never closes.
+  const GRANT = '00000000-0000-4000-8000-000000000010';
+  const OTHER_GRANT = '00000000-0000-4000-8000-000000000099';
+  /** A use of `grantId` at `sequence` (its signature is not checked here). */
+  async function useAt(sequence: number, grantId = GRANT): Promise<GrantExecutionEvidence> {
+    const { use } = await world();
+    return { ...use, use_sequence: sequence, grant_id: grantId, use_id: `00000000-0000-4000-8000-${String(sequence).padStart(6, '0')}${grantId.slice(-6)}` };
+  }
+  const deadLetter = (use: GrantExecutionEvidence, code: string, quarantineId?: string): RecordOutboxEntry => ({
+    ...recordOutboxEntry(use), state: 'dead_letter', attempts: 1,
+    last_error: { status: 422, code, message: 'refused', ...(quarantineId ? { quarantine_id: quarantineId } : {}) },
+  });
+  /** A client whose NA answers each use with `answer`, and the uses it was sent, in order. */
+  function naAnswering(outbox: RecordOutbox, answer: (use: GrantExecutionEvidence) => RecordSubmission | Error) {
+    const gm = new GenesisMeshClient({ audience: 'TEST', baseUrl: 'http://na', recordOutbox: outbox });
+    const sent: GrantExecutionEvidence[] = [];
+    const http = (gm.evidenceStore as unknown as { http: { publicPost: (...a: unknown[]) => Promise<unknown> } }).http;
+    jest.spyOn(http, 'publicPost').mockImplementation(async (...args: unknown[]) => {
+      const use = (args[1] as { evidence: GrantExecutionEvidence }).evidence;
+      sent.push(use);
+      const answered = answer(use);
+      if (answered instanceof Error) throw answered;
+      return answered;
+    });
+    return { gm, sent };
+  }
+  const gap = () => new ValidationError('the previous use is not held', 'grant_use_chain_gap');
+
+  it.each([
+    ['grant_use_invalid_signature', undefined], ['grant_use_malformed', undefined],
+    ['grant_use_conflict', 'q-1'], ['grant_use_chain_mismatch', 'q-1'],
+  ])('dead-letters a use behind one that never took its place in the chain (%s)', async (refusal, quarantineId) => {
+    // Use 1 was refused before it took its place: the gap it left never closes, and the flush goes on.
+    const outbox = new MemoryOutbox<RecordOutboxEntry>();
+    await outbox.add(deadLetter(await useAt(1), refusal, quarantineId));
+    const second = await useAt(2);
+    const other = await useAt(1, OTHER_GRANT);
+    await outbox.add(recordOutboxEntry(second));
+    await outbox.add(recordOutboxEntry(other));
+    const { gm } = naAnswering(outbox, use => use.grant_id === OTHER_GRANT ? recorded : gap());
+    const flushed = await gm.evidenceStore.flushRecords({ ignoreBackoff: true });
+    expect(flushed.dead_lettered.map(e => [e.id, e.last_error?.code])).toEqual([[second.use_id, PREDECESSOR_DEAD_LETTERED]]);
+    expect(flushed.dead_lettered[0]!.last_error?.message).toContain('use 1 of this grant was refused before it took its place in the chain');
+    expect(flushed.admitted.map(e => e.id)).toEqual([other.use_id]);
+    expect(flushed.pending).toEqual([]);
+    expect((await outbox.list()).find(e => e.id === second.use_id)?.state).toBe('dead_letter');
+  });
+
+  it('retries a gap behind a use the NA kept in the chain', async () => {
+    // Quarantined for a reason that keeps its place: the NA places the next use once it holds this one.
+    const outbox = new MemoryOutbox<RecordOutboxEntry>();
+    await outbox.add(deadLetter(await useAt(1), 'grant_use_outside_validity', 'q-1'));
+    await outbox.add(recordOutboxEntry(await useAt(2)));
+    const { gm } = naAnswering(outbox, gap);
+    const flushed = await gm.evidenceStore.flushRecords({ ignoreBackoff: true });
+    expect(flushed.pending.map(e => e.last_error?.code)).toEqual(['grant_use_chain_gap']);
+    expect(flushed.dead_lettered).toEqual([]);
+  });
+
+  it('retries a gap when no earlier use of this grant was refused', async () => {
+    // A dead letter of another grant, or one later in this grant's chain, leaves this use's gap to close.
+    const outbox = new MemoryOutbox<RecordOutboxEntry>();
+    await outbox.add(deadLetter(await useAt(1, OTHER_GRANT), 'grant_use_invalid_signature'));
+    await outbox.add(deadLetter(await useAt(3), 'grant_use_invalid_signature'));
+    await outbox.add(recordOutboxEntry(await useAt(2)));
+    const { gm } = naAnswering(outbox, gap);
+    const flushed = await gm.evidenceStore.flushRecords({ ignoreBackoff: true });
+    expect(flushed.pending.map(e => e.last_error?.code)).toEqual(['grant_use_chain_gap']);
+    expect(flushed.dead_lettered).toEqual([]);
+  });
+
+  it('retries a gap behind a use still pending', async () => {
+    // Use 1 waits out its backoff; the gap it leaves closes once the NA holds it.
+    const outbox = new MemoryOutbox<RecordOutboxEntry>();
+    await outbox.add({ ...recordOutboxEntry(await useAt(1)), attempts: 1, next_attempt_at: '2999-01-01T00:00:00Z' });
+    await outbox.add(recordOutboxEntry(await useAt(2)));
+    const { gm, sent } = naAnswering(outbox, gap);
+    const flushed = await gm.evidenceStore.flushRecords();
+    expect(sent.map(u => u.use_sequence)).toEqual([2]);
+    expect(flushed.pending.map(e => [e.id.slice(-12, -6), e.last_error?.code ?? null])).toEqual([['000001', null], ['000002', 'grant_use_chain_gap']]);
+    expect(flushed.dead_lettered).toEqual([]);
+  });
+
+  it('retries a gap when the outbox cannot be read to look behind it', async () => {
+    const inner = new MemoryOutbox<RecordOutboxEntry>();
+    await inner.add(deadLetter(await useAt(1), 'grant_use_invalid_signature'));
+    await inner.add(recordOutboxEntry(await useAt(2)));
+    let lists = 0;
+    const listsOnce: RecordOutbox = {
+      add: e => inner.add(e), update: e => inner.update(e), remove: id => inner.remove(id),
+      list: async () => {
+        lists += 1;
+        if (lists > 1) throw new Error('the disk went away');
+        return inner.list();
+      },
+    };
+    const { gm } = naAnswering(listsOnce, gap);
+    const flushed = await gm.evidenceStore.flushRecords({ ignoreBackoff: true });
+    expect(flushed.pending.map(e => e.last_error?.code)).toEqual(['grant_use_chain_gap']);
+  });
+
+  it('sends a grant\'s uses in their chain\'s order', async () => {
+    // Kept in the other order (two acts at once, offline): the NA still gets use 1 first.
+    const outbox = new MemoryOutbox<RecordOutboxEntry>();
+    await outbox.add(recordOutboxEntry(await useAt(2)));
+    await outbox.add(recordOutboxEntry(await useAt(1)));
+    const { gm, sent } = naAnswering(outbox, () => recorded);
+    const flushed = await gm.evidenceStore.flushRecords();
+    expect(sent.map(u => u.use_sequence)).toEqual([1, 2]);
+    expect(flushed.admitted).toHaveLength(2);
   });
 });
 

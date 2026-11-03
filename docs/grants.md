@@ -140,7 +140,12 @@ than the holder knew of, and not counting it would keep the holder signing
 uses the NA refuses. The holder never
 signs a use the NA would refuse without storing it: secret material is
 checked first. A chain gap and a use dated ahead of the NA's clock
-(`grant_use_in_future`) are retried.
+(`grant_use_in_future`) are retried. From 1.9.0 a gap behind a use that never
+took its place in the chain (refused without a quarantine entry, or
+quarantined as a conflict or a chain mismatch) is not: it never closes, so the
+use behind it is a dead letter too (`evidence_predecessor_dead_lettered`).
+`flushRecords` sends a grant's uses in their chain's order, whatever order
+they were kept in.
 
 Persist `holder.state` (the `persist` option is called after every change)
 together with the record outbox, and resume with `new GrantHolder({ ...,

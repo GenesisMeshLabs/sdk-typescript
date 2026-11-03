@@ -278,6 +278,41 @@ export interface RecordDelivery {
   queued?: RecordOutboxEntry;
 }
 
+/** A grant use's place in its chain, as its record holds it; the end for one it does not hold. */
+function useSequence(entry: RecordOutboxEntry): number {
+  const sequence = (entry.record as { use_sequence?: unknown }).use_sequence;
+  return typeof sequence === 'number' && Number.isSafeInteger(sequence) ? sequence : Number.MAX_SAFE_INTEGER;
+}
+
+/**
+ * The place of an earlier use of the same grant that the record outbox holds
+ * as a dead letter and that never took its place in the chain, or null: the
+ * NA refused it without keeping it (no quarantine entry), or kept it as a
+ * conflict or a chain mismatch, which do not continue the chain. The gap such
+ * a use leaves never closes. An outbox that cannot be read gives null: the
+ * gap is retried, as any gap is.
+ */
+async function placeNeverTaken(outbox: RecordOutbox, use: RecordOutboxEntry): Promise<number | null> {
+  const grantId = (use.record as { grant_id?: unknown }).grant_id;
+  if (typeof grantId !== 'string') return null;
+  const place = useSequence(use);
+  let held: RecordOutboxEntry[];
+  try {
+    held = await outbox.list();
+  } catch {
+    return null;
+  }
+  for (const entry of held) {
+    if (entry.kind !== 'grant_execution' || entry.state !== 'dead_letter' || entry.id === use.id) continue;
+    if ((entry.record as { grant_id?: unknown }).grant_id !== grantId) continue;
+    const earlier = useSequence(entry);
+    if (earlier >= place) continue;
+    const code = entry.last_error?.code;
+    if (!entry.last_error?.quarantine_id || code === 'grant_use_conflict' || code === 'grant_use_chain_mismatch') return earlier;
+  }
+  return null;
+}
+
 /** What one `flushRecords` run did. */
 export interface RecordFlushResult {
   /** Entries the NA admitted (or already held), now removed from the record outbox. */
@@ -844,8 +879,9 @@ export class EvidenceStoreClient {
 
   /**
    * Submit the record outbox's pending records: break-glass records first
-   * (1.3.1), then (v1.6.0) grant uses, then observations up to 100 at a time,
-   * then (v1.4.0) remediation records, each in the order they were added. A batch the NA refuses as a whole is split until the record
+   * (1.3.1), then (v1.6.0) grant uses, in their chain's order (1.9.0), then
+   * observations up to 100 at a time, then (v1.4.0) remediation records, the
+   * others each in the order they were added. A batch the NA refuses as a whole is split until the record
    * it refuses is found; a batch it throttles (`429`) halves the batches that
    * follow, and the records wait as long as its `Retry-After` asks. Records
    * in backoff are skipped unless `ignoreBackoff`; a transient error ends the
@@ -943,7 +979,28 @@ export class EvidenceStoreClient {
     } catch (err) {
       // v1.6.0: a grant use the NA refuses for good is a dead letter, and the NA quarantines it; when it
       // continued the chain it is the chain's head, so the uses after it are still sent, each judged on
-      // its own. A chain gap and a use dated in the future are retried.
+      // its own. A chain gap and a use dated in the future are retried. 1.9.0: a gap behind a use refused
+      // before it took its place in the chain never closes, so the use behind it is a dead letter too.
+      if (entry.kind === 'grant_execution') {
+        const { failure } = classifySubmissionError(err, RECORD_PERMANENT_REFUSALS);
+        const earlier = failure.code === 'grant_use_chain_gap' ? await placeNeverTaken(outbox, entry) : null;
+        if (earlier !== null) {
+          const refused: RecordOutboxEntry = {
+            ...entry, attempts: entry.attempts + 1, state: 'dead_letter', next_attempt_at: null,
+            last_error: {
+              status: failure.status, code: PREDECESSOR_DEAD_LETTERED,
+              message: `use ${earlier} of this grant was refused before it took its place in the chain; `
+                + `the NA answered ${failure.code}: ${failure.message}`,
+            },
+          };
+          try {
+            await outbox.update(refused);
+          } catch {
+            // The entry keeps its previous state; the next flush settles it.
+          }
+          return { queued: refused };
+        }
+      }
       return { queued: await this.recordFailed(outbox, entry, err) };
     }
     await this.removeRecord(outbox, entry.id);
@@ -980,12 +1037,16 @@ export class EvidenceStoreClient {
     const result: RecordFlushResult = { admitted: [], quarantined: [], pending: [], dead_lettered: [] };
     const pending = (await outbox.list()).filter(e => e.state === 'pending');
     // 1.3.1: break-glass records first. They share the NA's submission rate with observations, and
-    // an observation of the same change then finds its break-glass record. v1.6.0: grant uses next,
-    // in the order they were made, so an observation of the change finds its use. v1.4.0: remediation
-    // records last, once the changes they remediate are recorded and judged.
+    // an observation of the same change then finds its break-glass record. v1.6.0: grant uses next, so
+    // an observation of the change finds its use; 1.9.0: in their chain's order, whatever order they were
+    // kept in. v1.4.0: remediation records last, once the changes they remediate are recorded and judged.
     const first = ['break_glass', 'grant_execution', 'observation'];
     const entries = [
-      ...first.flatMap(kind => pending.filter(e => e.kind === kind)), ...pending.filter(e => !first.includes(e.kind)),
+      ...first.flatMap(kind => {
+        const of = pending.filter(e => e.kind === kind);
+        return kind === 'grant_execution' ? of.sort((a, b) => useSequence(a) - useSequence(b)) : of;
+      }),
+      ...pending.filter(e => !first.includes(e.kind)),
     ];
     const due = (e: RecordOutboxEntry) => options.ignoreBackoff
       || (!(this.recordsPausedUntil > Date.now()) && !(Date.parse(e.next_attempt_at ?? '') > Date.now()));

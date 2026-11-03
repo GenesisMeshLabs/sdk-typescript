@@ -101,7 +101,12 @@ export interface GrantDetail extends GrantSummary {
   revocation: GrantRevocationRecord | null;
 }
 
-/** One position of a grant's use chain (`GET /admin/grants/<id>/uses`). */
+/**
+ * One position of a grant's use chain (`GET /admin/grants/<id>/uses`). Once
+ * retention has removed its store entry, `recorded_at` and `outcome` are null
+ * (as `resource_id` and `resource_sequence` may be): the types keep them as
+ * strings until a major release can widen them.
+ */
 export interface GrantUseSummary {
   use_id: string;
   use_sequence: number;
