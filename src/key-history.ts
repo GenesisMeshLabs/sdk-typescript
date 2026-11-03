@@ -29,7 +29,7 @@
 import { createHash } from 'node:crypto';
 import { receivedCanonical, signedAsReceived, strictRefusal, withoutUnknownFields } from './strict.js';
 import type { Signature } from './types.js';
-import { isObject, timestampMicros, validGenesis, validKeySuccession } from './validation.js';
+import { isObject, timestamp, timestampMicros, validGenesis, validKeySuccession } from './validation.js';
 
 /** How long after a succession takes effect the outgoing key is still accepted (seconds). */
 export const SUCCESSION_HANDOVER_SECONDS = 300;
@@ -278,16 +278,22 @@ export class NAKeyHistory {
 export type NAKeys = readonly string[] | NAKeyHistory;
 
 /**
- * A record's own time as `naKeysAt` takes it: a record whose time is missing
- * (null, absent or not a string) is dated nowhere, so no key of a history
- * signs it. Passed on as null it would take every key, and a succeeded key's
+ * A record's own time as `naKeysAt` takes it: a record whose time is not a
+ * timestamp the reference reads (null, absent, not a string, a date that does
+ * not exist, the year 0000) is dated nowhere, so no key of a history signs
+ * it. Passed on as null it would take every key, and a succeeded key's
  * signature would verify forever. A list of keys is valid at every time.
  */
-export function recordTime(time: unknown): string | Date {
-  return typeof time === 'string' || time instanceof Date ? time : '';
+export function recordTime(time: unknown): string {
+  return typeof time === 'string' && timestamp(time) ? time : '';
 }
 
-/** The NA public keys a record dated `time` may be signed with; every key when `time` is null. */
+/**
+ * The NA public keys a record dated `time` may be signed with; every key when
+ * `time` is null. To check a record's signature, pass its own time, never
+ * null for a time it lacks: under a key history a record without a time
+ * would verify with every key, a succeeded one included.
+ */
 export function naKeysAt(keys: NAKeys, time: string | Date | null): string[] {
   if (keys instanceof NAKeyHistory) return time === null ? keys.allKeys() : keys.keysAt(time);
   return [...keys];

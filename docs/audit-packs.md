@@ -106,7 +106,8 @@ Every verifier that takes NA keys takes the history in their place
 `verifyTreatySignature`, `verifyAgreement`, `verifyOutOfBandRecord`,
 `verifyReviewRecord` and `verifyArchiveRecord`. A plain list of keys keeps
 the behaviour before 1.5.0: any listed key verifies any record, whatever its
-time.
+time. Under a history, a record whose own time is not a timestamp (null,
+absent, a date that does not exist) verifies under no key.
 
 ```typescript
 verifyBoundaryDecision(decision, { operatorPublicKeys: history, atRecordTime: true });

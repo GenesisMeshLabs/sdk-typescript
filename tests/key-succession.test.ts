@@ -236,7 +236,8 @@ describe('records outside the store, each at its own time', () => {
   });
 
   it('a record without its own time is signed by no key of a history, and by a listed key', () => {
-    for (const missing of [null, undefined, 42]) {
+    // Not a time the reference reads: null, absent, a number, a date that does not exist, the year 0000, a Date.
+    for (const missing of [null, undefined, 42, '2026-02-29T00:00:00Z', '0000-01-01T00:00:00Z', new Date(SUCCESSION_AT)]) {
       for (const [seed, key] of [[na1.seedBase64, na1.pubBase64], [na2.seedBase64, na2.pubBase64]] as const) {
         const p = { ...v.policy, issued_at: missing } as unknown as BoundaryPolicy;
         const policy = { ...p, signature: { key_id: 'na', sig: sign(policyCanonical(p), seed) } };
@@ -267,6 +268,14 @@ describe('records outside the store, each at its own time', () => {
           verifyJustificationSignature(proof, history)]).toEqual([false, undefined, false]);
         expect([verifyRevocationFeedSignature(feed, [key]), revocationFeedSigner(feed, [key]),
           verifyJustificationSignature(proof, [key])]).toEqual([true, key, true]);
+        const tr = {
+          treaty_id: 'treaty-1', issuer_sovereign_id: SOVEREIGN, subject_sovereign_id: 'sovereign-b',
+          subject_public_keys: [stranger.pubBase64], scope: { allowed_roles: ['role:client'] }, status: 'active',
+          issued_at: missing, valid_from: at(86400), expires_at: NEW_VALID_TO, issued_by: 'na', metadata: {}, signatures: [],
+        } as unknown as RecognitionTreaty;
+        const treaty = { ...tr, signatures: [{ key_id: 'na', sig: sign(treatyCanonical(tr), seed) }] };
+        expect([verifyTreatySignature(treaty, history), verifyTreatySignature(treaty, history, { now: at(0) }),
+          verifyTreatySignature(treaty, [key])]).toEqual([false, false, true]);
       }
     }
   });
