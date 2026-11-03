@@ -4090,7 +4090,8 @@ export type RemediationMode = 'cancel' | 'alert_only';
 
 // @public
 export class RemediationNotRecordedError<T = unknown> extends GenesisMeshError {
-    constructor(cause: unknown, rotation: GovernedActionResult<T>, record?: RemediationRecord);
+    constructor(cause: unknown, rotation: GovernedActionResult<T>, record?: RemediationRecord, disabled?: boolean);
+    readonly disabled: boolean;
     // (undocumented)
     readonly record?: RemediationRecord;
     // (undocumented)

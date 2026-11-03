@@ -31,7 +31,7 @@ import {
 } from './out-of-band.js';
 import { nonCanonicalFields, unknownFields } from './strict.js';
 import {
-  remediationStepsProblem, reviewConsistencyProblem, timestampMicros, validRemediation,
+  remediationStepsProblem, reviewConsistencyProblem, timestamp, timestampMicros, validRemediation,
 } from './validation.js';
 import type {
   BoundaryPolicy, BoundaryPolicyIntent, EvidenceStoreEntry, GateRemediation, PolicyGateEvaluation, PolicyIssue,
@@ -521,23 +521,61 @@ export function changeFacts(
   };
 }
 
-/** A time as the reference prints it: UTC, microseconds when not zero, `Z`. */
-function isoMicros(micros: number): string {
-  const ms = Math.floor(micros / 1000);
-  const base = new Date(ms).toISOString().slice(0, 19);
-  const fraction = micros - Math.floor(micros / 1_000_000) * 1_000_000;
-  return fraction === 0 ? `${base}Z` : `${base}.${String(fraction).padStart(6, '0')}Z`;
+// The due times and the review's times are kept as exact microseconds (a bigint): a double loses them
+// past the year 2255.
+
+/** The first and the last instant of the years 1 to 9999, the reference's times, in microseconds since the epoch. */
+const FIRST_MICROS = -62_135_596_800_000_000n;
+const LAST_MICROS = 253_402_300_799_999_999n;
+
+const inYears = (micros: bigint): boolean => micros >= FIRST_MICROS && micros <= LAST_MICROS;
+
+/** A time as the reference prints it: UTC, microseconds when not zero, `Z`. Throws outside the years 1 to 9999. */
+function isoMicros(micros: bigint): string {
+  if (!inYears(micros)) throw new Error('the time is outside the years 1 to 9999');
+  const fraction = ((micros % 1_000_000n) + 1_000_000n) % 1_000_000n;
+  const base = new Date(Number((micros - fraction) / 1000n)).toISOString().slice(0, 19);
+  return fraction === 0n ? `${base}Z` : `${base}.${String(fraction).padStart(6, '0')}Z`;
 }
 
-function micros(value: string, field: string): number {
-  const at = timestampMicros(value);
-  if (Number.isNaN(at)) throw new Error(`${field} is not an ISO 8601 timestamp: ${value}`);
+/** A fraction finer than microseconds, which the reference cuts when it reads a time. */
+const FINER_FRACTION = /(T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6})[0-9]+/;
+const TIME_PARTS = /^(.*T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]{1,6}))?(Z|[+-][0-9]{2}:[0-9]{2})?$/;
+/** The offset of a time in UTC, as the reference's models require it of the times a review records. */
+const UTC_ZONE = /(?:Z|[+-]00:00)$/;
+
+/**
+ * A recorded time's instant in microseconds, as the reference reads it: a
+ * fraction finer than microseconds cut and, unless `utc`, no offset read as
+ * UTC. Null for anything else: a date that does not exist (`2026-02-29`), a
+ * year outside 1 to 9999 (as written, or in UTC) included. With `utc`, only a
+ * time in UTC in the form the NA writes (`Z`, `+00:00` or `-00:00`).
+ */
+function recordedMicros(value: unknown, utc = false): bigint | null {
+  if (typeof value !== 'string') return null;
+  const cut = value.replace(FINER_FRACTION, '$1');
+  if (!timestamp(cut) || cut.startsWith('0000') || (utc && !UTC_ZONE.test(cut))) return null;
+  const [, base, fraction = '', zone = 'Z'] = TIME_PARTS.exec(cut)!;
+  const at = BigInt(Date.parse(base! + zone)) * 1000n + BigInt(fraction.padEnd(6, '0'));
+  return inYears(at) ? at : null;
+}
+
+function micros(value: string, field: string): bigint {
+  const at = recordedMicros(value);
+  if (at === null) throw new Error(`${field} is not an ISO 8601 timestamp: ${value}`);
   return at;
 }
 
-/** `remediation_due_at`: a judgement's (or review's) time plus the grace. */
+const graceMicros = (graceSeconds: number): bigint => BigInt(Math.round(graceSeconds * 1_000_000));
+
+/**
+ * `remediation_due_at`: a judgement's (or review's) time plus the grace.
+ * Throws when the time is not a timestamp (a date that does not exist
+ * included) or the due time falls after the year 9999, as the reference
+ * refuses them.
+ */
 export function remediationDueAt(at: string, graceSeconds: number): string {
-  return isoMicros(micros(at, 'at') + graceSeconds * 1_000_000);
+  return isoMicros(micros(at, 'at') + graceMicros(graceSeconds));
 }
 
 /**
@@ -546,13 +584,16 @@ export function remediationDueAt(at: string, graceSeconds: number): string {
  * not extend it).
  */
 export function dueAfterDenial(currentDue: string | null, decidedAt: string, graceSeconds: number): string {
-  const due = micros(decidedAt, 'decided_at') + graceSeconds * 1_000_000;
-  return isoMicros(currentDue === null ? due : Math.min(micros(currentDue, 'current_due'), due));
+  const due = micros(decidedAt, 'decided_at') + graceMicros(graceSeconds);
+  // Past the year 9999 the reference cannot reckon the grace, whenever it was due before.
+  if (!inYears(due)) throw new Error('the time is outside the years 1 to 9999');
+  const current = currentDue === null ? null : micros(currentDue, 'current_due');
+  return isoMicros(current !== null && current < due ? current : due);
 }
 
 /** When a remediation is due once a waiver ends: its grace again, from the waiver's end. */
 export function dueAfterWaiver(waivedUntil: string, graceSeconds: number): string {
-  return isoMicros(micros(waivedUntil, 'waived_until') + graceSeconds * 1_000_000);
+  return isoMicros(micros(waivedUntil, 'waived_until') + graceMicros(graceSeconds));
 }
 
 /** Why a remediation record does not carry out the plan the NA stated, or null (`remediation_steps_mismatch`). */
@@ -806,7 +847,7 @@ export function reviewDecisionPath(reviewId: string): string {
 }
 
 /** How far an embedded approval's timestamp may be from the time the NA recorded (300 s, in microseconds). */
-const APPROVAL_MAX_AGE = 300 * 1_000_000;
+const APPROVAL_MAX_AGE = 300_000_000n;
 
 const DECISION_FIELDS: ReadonlySet<string> = new Set(['verdict', 'waive_until', 'note']);
 
@@ -866,35 +907,39 @@ export function adminApprovalValid(approval: AdminApproval): boolean {
  */
 const RFC3339 = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,6}))?(?:Z|([+-])([0-9]{2}):([0-9]{2}))$/;
 
-/** Microseconds since the epoch of an RFC 3339 timestamp in the grammar above; NaN for anything else. */
-function instant(value: unknown): number {
+/** Microseconds since the epoch of an RFC 3339 timestamp in the grammar above; null for anything else. */
+function instant(value: unknown): bigint | null {
   const m = typeof value === 'string' ? RFC3339.exec(value) : null;
-  if (!m) return NaN;
+  if (!m) return null;
   const [, y, mo, d, h, mi, s, fraction = '', sign, oh = '0', om = '0'] = m;
   const [year, month, date, hour, minute, second, offsetHour, offsetMinute] = [y, mo, d, h, mi, s, oh, om].map(Number);
   const day = new Date(0);
   day.setUTCFullYear(year!, month! - 1, date);
   if (day.getUTCFullYear() !== year || day.getUTCMonth() !== month! - 1 || day.getUTCDate() !== date || year! < 1
     || hour! > 23 || minute! > 59 || second! > 59 || offsetHour! > 23 || offsetMinute! > 59) {
-    return NaN;
+    return null;
   }
   const offset = sign ? (sign === '-' ? -1 : 1) * (offsetHour! * 60 + offsetMinute!) : 0;
   const ms = day.getTime() + ((hour! * 60 + minute! - offset) * 60 + second!) * 1000;
-  return ms * 1000 + Number(fraction.padEnd(6, '0'));
+  const at = BigInt(ms) * 1000n + BigInt(fraction.padEnd(6, '0'));
+  // The reference reads 0001-01-01T00:00:00+00:01, but cannot put it in UTC: no time here.
+  return inYears(at) ? at : null;
 }
 
 /**
  * `value` in UTC as the reference prints it (`2026-10-12T09:00:00.500000Z`)
  * when it is an RFC 3339 timestamp in the grammar `waive_until` and the
- * admin timestamps a review embeds must follow; null otherwise.
+ * admin timestamps a review embeds must follow, in the years 1 to 9999 once
+ * read in UTC; null otherwise.
  */
 export function rfc3339(value: unknown): string | null {
   const at = instant(value);
-  return Number.isNaN(at) ? null : isoMicros(at);
+  return at === null ? null : isoMicros(at);
 }
 
 function approvalProblem(
   approval: AdminApproval, who: string, keyId: string, path: string, audiences: readonly string[], at: string,
+  field: string,
 ): string | null {
   if (!adminApprovalValid(approval)) return `the ${who}'s signature does not verify over its request`;
   if (approval.key_id !== keyId) return `the ${who}'s request is signed by ${approval.key_id}, not ${keyId}`;
@@ -902,8 +947,11 @@ function approvalProblem(
     return `the ${who}'s request is ${approval.method} ${approval.path}, not POST ${path}`;
   }
   if (!audiences.includes(approval.audience)) return `the ${who}'s request is for another Network Authority`;
+  // A UTC timestamp in the form the NA writes: another time proves no age.
+  const recordedAt = recordedMicros(at, true);
+  if (recordedAt === null) return `the review's ${field} is not a UTC timestamp`;
   const signedAt = instant(approval.timestamp);
-  if (Number.isNaN(signedAt) || Math.abs(signedAt - timestampMicros(at)) > APPROVAL_MAX_AGE) {
+  if (signedAt === null || (signedAt > recordedAt ? signedAt - recordedAt : recordedAt - signedAt) > APPROVAL_MAX_AGE) {
     return `the ${who}'s request was signed more than 300s from when it was recorded`;
   }
   return null;
@@ -916,13 +964,21 @@ function approvalProblem(
  * as `decided_by`, with exactly the verdict, waiver end and note the review
  * records, within 300 seconds of `decided_at`; a requester signed
  * `POST /admin/evidence/reviews` with exactly the subject and justification
- * it records, within 300 seconds of `requested_at`. Whether each public key
+ * it records, within 300 seconds of `requested_at`. Both recorded times are
+ * read first, as the review's model reads them before anything else: each
+ * must be a UTC timestamp in the form the NA writes (`Z`, `+00:00` or
+ * `-00:00`), or the review is refused (`the review's decided_at is not a UTC
+ * timestamp`); the reference's model also reads spellings the NA never
+ * writes (a space, a lower-case `t` or `z`, `+0000`). Whether each public key
  * is the operator key's is checked against the holder registry
  * (`verifyEvidenceEvents`, `review_approval_key_mismatch`).
  */
 export function reviewApprovalProblem(review: ReviewRecord, naPublicKeys: readonly string[]): string | null {
+  for (const [name, at] of [['decided_at', review.decided_at], ['requested_at', review.requested_at]] as const) {
+    if (recordedMicros(at, true) === null) return `the review's ${name} is not a UTC timestamp`;
+  }
   const problem = approvalProblem(review.approval, 'decider', review.decided_by, reviewDecisionPath(review.review_id),
-    naPublicKeys, review.decided_at);
+    naPublicKeys, review.decided_at, 'decided_at');
   if (problem) return problem;
   const body = review.approval.body;
   if (Object.keys(body).some(k => !DECISION_FIELDS.has(k))) return "the decider's request carries fields the review does not record";
@@ -932,8 +988,9 @@ export function reviewApprovalProblem(review: ReviewRecord, naPublicKeys: readon
   }
   const waiver = field('waive_until');
   const recorded = review.waive_until ?? null;
-  if ((waiver === null) !== (recorded === null)
-    || (waiver !== null && recorded !== null && instant(waiver) !== timestampMicros(recorded))) {
+  const given = waiver === null ? null : instant(waiver);
+  const kept = recorded === null ? null : recordedMicros(recorded);
+  if ((waiver === null) !== (recorded === null) || (waiver !== null && (given === null || kept === null || given !== kept))) {
     return "the decider's request gives another waiver time (an RFC 3339 timestamp)";
   }
   const request = review.request_approval;
@@ -960,7 +1017,7 @@ export function requestApprovalProblem(
   naPublicKeys: readonly string[],
 ): string | null {
   const problem = approvalProblem(approval, 'requester', request.requested_by, REVIEW_REQUEST_PATH, naPublicKeys,
-    request.requested_at);
+    request.requested_at, 'requested_at');
   if (problem) return problem;
   const expected: Record<string, unknown> = {
     subject_kind: request.subject_kind, subject_id: request.subject_id, justification: request.justification,
@@ -1003,6 +1060,8 @@ export function reviewRecordProblem(review: ReviewRecord): string | null {
 // ── Policies ────────────────────────────────────────────────────────────────
 
 const PARAMETER = /^[A-Za-z0-9_-]{1,64}$/;
+/** Empty, or only what Python's `str.strip()` removes (its white space, not JavaScript's: U+001C to U+001F and U+0085, no U+FEFF). */
+const PYTHON_BLANK = /^[\t\n\v\f\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/;
 
 /**
  * The issues the NA finds in a policy's 1.4.0 sections (the codes of
@@ -1037,7 +1096,8 @@ export function policySectionIssues(policy: BoundaryPolicy | BoundaryPolicyInten
   } else if (capabilities[0] === emergency.stands_for) {
     issues.push({ code: 'invalid_emergency', message: 'the emergency capability must differ from the capability it stands for' });
   }
-  if (emergency.stands_for.endsWith('.*')) {
+  // No `*` anywhere, and not blank, as the reference checks it (`"*" in stands_for or not stands_for.strip()`).
+  if (emergency.stands_for.includes('*') || PYTHON_BLANK.test(emergency.stands_for)) {
     issues.push({ code: 'invalid_emergency', message: 'stands_for is an exact capability ID' });
   }
   if (!PARAMETER.test(emergency.justification_parameter)) {

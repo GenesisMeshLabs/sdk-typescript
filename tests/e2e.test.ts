@@ -350,15 +350,21 @@ suite('SDK against a live Python Network Authority', () => {
     expect(noticed.notified_at).not.toBeNull();
 
     const state = (await gm.evidenceStore.remediation(subjectId));
-    const result = await cancelByRotatingForward(gm, x.recorder, {
+    expect(state.change_version_id).toBe('v2');
+    const options = {
       remediation: state, deniedVersionId: 'v2',
       rotation: {
         attestation_id: x.attestation.attestation_id, requested_capability: x.capability,
         context: { request_parameters: { lifetime_days: 30 } }, verify: x.verify,
       },
       rotate: async () => { cloud.enabled.add('v3'); cloud.current = 'v3'; read(); return { version_id: 'v3' }; },
-      disable: async version => { cloud.enabled.delete(version); read(); },
-    });
+      disable: async (version: string) => { cloud.enabled.delete(version); read(); },
+    };
+    // A denied version other than the change's would be disabled, then its record refused for good: refused first.
+    await expect(cancelByRotatingForward(gm, x.recorder, { ...options, deniedVersionId: 'v1' }))
+      .rejects.toMatchObject({ code: 'remediation_subject_mismatch' });
+    expect([...cloud.enabled]).toEqual(['v1', 'v2']);
+    const result = await cancelByRotatingForward(gm, x.recorder, options);
     expect(result.submission).toMatchObject({ status: 'recorded', remediation: { state: 'remediated' } });
     expect(read()).toBe('v3');
     expect(verifyRemediationRecord(result.remediation!, [(await gm.evidenceStore.listExecutorKeys())
