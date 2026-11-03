@@ -136,17 +136,40 @@ describe('enqueueRecord and flushRecords', () => {
     expect(result.dead_lettered.map(e => e.last_error?.quarantine_id)).toEqual(['q-1']);
     expect((await outbox.list()).map(e => e.state)).toEqual(['dead_letter']);
   });
-  it('keeps an observation pending when its batch result has no status this SDK knows', async () => {
-    const { store, outbox } = client();
-    jest.spyOn(store, 'submitObservation').mockRejectedValue(new NetworkError('down'));
-    for (let n = 0; n < 3; n++) await store.enqueueRecord(await observe(n));
-    jest.spyOn(store, 'submitObservations').mockImplementation(async records => records.map((_, index) => (
-      index === 1 ? { index, status: 'stored' } : { index, status: 'recorded' }
-    ) as ObservationBatchResult));
-    const result = await store.flushRecords({ ignoreBackoff: true });
-    expect(result.admitted.length).toBe(2);
-    expect(result.pending.length).toBe(1);
-    expect((await outbox.list()).length).toBe(1);
+  it('keeps the whole batch pending, with a backoff, on an answer it cannot read', async () => {
+    const answers: unknown[] = [
+      [{ index: 0, status: 'recorded' }, { index: 1, status: 'stored' }, { index: 2, status: 'recorded' }],
+      [{ index: 0, status: 'recorded' }, { index: 0, status: 'recorded' }, { index: 2, status: 'recorded' }],
+      // Every observation has a result, and one has two.
+      [{ index: 0, status: 'recorded' }, { index: 1, status: 'recorded' }, { index: 2, status: 'recorded' },
+        { index: 1, status: 'refused', error: { code: 'observation_out_of_scope', message: 'x' } }],
+      [{ index: 0, status: 'recorded' }, { index: 2, status: 'recorded' }],
+      [{ index: 0, status: 'recorded' }, null, { index: 2, status: 'recorded' }],
+      [{ index: 0, status: 'recorded' }, { index: 1.5, status: 'recorded' }, { index: 2, status: 'recorded' }],
+      [{ index: 0, status: 'recorded' }, { index: 3, status: 'recorded' }, { index: 2, status: 'recorded' }],
+      { results: [] },
+      null,
+    ];
+    for (const answer of answers) {
+      const { store, outbox } = client();
+      jest.spyOn(store, 'submitObservation').mockRejectedValue(new NetworkError('down'));
+      for (let n = 0; n < 3; n++) await store.enqueueRecord(await observe(n));
+      jest.spyOn(store, 'submitObservations').mockResolvedValue(answer as never);
+      const result = await store.flushRecords({ ignoreBackoff: true });
+      expect([answer, result.admitted.length, result.pending.length]).toEqual([answer, 0, 3]);
+      const kept = await outbox.list();
+      expect(kept.map(e => [e.state, e.attempts, e.last_error?.code]))
+        .toEqual([['pending', 2, 'response_body_unreadable'], ['pending', 2, 'response_body_unreadable'], ['pending', 2, 'response_body_unreadable']]);
+      expect(kept.every(e => Date.parse(e.next_attempt_at!) > Date.now())).toBe(true);
+    }
+  });
+  it('refuses an answer to the batch that holds no results', async () => {
+    const http = { publicPost: jest.fn(async () => ({})) };
+    const { store } = client();
+    (store as unknown as { http: unknown }).http = http;
+    await expect(store.submitObservations([])).rejects.toMatchObject({ code: 'response_body_unreadable' });
+    http.publicPost.mockResolvedValueOnce(null as never);
+    await expect(store.submitObservations([])).rejects.toMatchObject({ code: 'response_body_unreadable' });
   });
   it('stops a run at a transient failure and skips records in backoff', async () => {
     const { store } = client();

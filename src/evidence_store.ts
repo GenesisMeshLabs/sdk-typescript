@@ -133,6 +133,31 @@ function admits(answer: unknown, statuses: readonly string[]): void {
   }
 }
 
+/**
+ * A batch's results by observation, read as the NA sends them: each result names one observation of the batch by
+ * its index, none twice, each observation has one, and each status is one the NA sends. Any other answer could take
+ * one record for another's: it leaves the whole batch pending (`response_body_unreadable`), with a backoff.
+ */
+function batchAnswers(results: unknown, count: number): ObservationBatchResult[] {
+  const unread = (detail: string) => new NetworkError(detail, 'response_body_unreadable');
+  if (!Array.isArray(results)) throw unread("the NA's answer to the batch holds no results");
+  const byIndex: (ObservationBatchResult | undefined)[] = new Array(count).fill(undefined);
+  for (const result of results as unknown[]) {
+    const index = typeof result === 'object' && result !== null ? (result as { index?: unknown }).index : undefined;
+    if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index >= count || byIndex[index] !== undefined) {
+      throw unread("a result of the NA's answer to the batch names no observation of it, or one another result names");
+    }
+    const status = (result as { status?: unknown }).status;
+    if (typeof status !== 'string' || (status !== 'refused' && !RECORD_ADMITTED.includes(status))) {
+      throw unread(`a result of the NA's answer to the batch has the status ${JSON.stringify(status ?? null)}`);
+    }
+    byIndex[index] = result as ObservationBatchResult;
+  }
+  const missing = byIndex.indexOf(undefined);
+  if (missing >= 0) throw unread(`the NA's answer to the batch has no result for observation ${missing}`);
+  return byIndex as ObservationBatchResult[];
+}
+
 /** One observation's result in a batch, at its index in the request. */
 export interface ObservationBatchResult {
   index: number;
@@ -699,9 +724,12 @@ export class EvidenceStoreClient {
 
   /** Submit up to 100 observations; the NA admits them in order of their change times. One result each, by index. */
   async submitObservations(observations: readonly ObservationRecord[]): Promise<ObservationBatchResult[]> {
-    const body = await this.http.publicPost<{ results: ObservationBatchResult[] }>(
+    const body = await this.http.publicPost<{ results: ObservationBatchResult[] } | null>(
       '/evidence/observations/batch', { observations }, true,
     );
+    if (typeof body !== 'object' || body === null || !Array.isArray(body.results)) {
+      throw new NetworkError("the NA's answer to the batch holds no results", 'response_body_unreadable');
+    }
     return body.results;
   }
 
@@ -1010,7 +1038,7 @@ export class EvidenceStoreClient {
   ): Promise<boolean> {
     let results: ObservationBatchResult[];
     try {
-      results = await this.submitObservations(batch.map(e => e.record as ObservationRecord));
+      results = batchAnswers(await this.submitObservations(batch.map(e => e.record as ObservationRecord)), batch.length);
     } catch (err) {
       const tooLarge = err instanceof GenesisMeshError && err.status === 413;
       if (!tooLarge && classifySubmissionError(err, RECORD_PERMANENT_REFUSALS).transient) {
@@ -1033,11 +1061,8 @@ export class EvidenceStoreClient {
       return part(batch.slice(half));
     }
     for (const [index, e] of batch.entries()) {
-      const answer = results.find(r => r.index === index);
-      // No result, or one of no status this SDK knows: the NA's answer says nothing of the record, which stays pending.
-      if (!answer || (answer.status !== 'refused' && !RECORD_ADMITTED.includes(answer.status))) {
-        result.pending.push(e);
-      } else if (answer.status === 'refused') {
+      const answer = results[index]!;
+      if (answer.status === 'refused') {
         const code = answer.error?.code ?? 'unknown';
         const refusal = new GenesisMeshError(answer.error?.message ?? code, code, code.endsWith('_conflict') ? 409 : 422);
         // The NA's details too, as a refusal of the record alone carries them: its quarantine entry among them.

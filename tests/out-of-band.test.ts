@@ -134,8 +134,12 @@ describe('ObservationRecorder', () => {
     await expect(recorder.record({ ...base, ...unreadable })).rejects.toThrow(StrictJsonError);
     await expect(recorder.record({ ...base, ...unreadable, changed_at: new Date(), changed_not_before: new Date(), changed_not_after: new Date() }))
       .rejects.toThrow(StrictJsonError);
-    // Readable JSON: the times, as before.
+    // A lone surrogate inside a time is JSON the NA cannot read, too.
+    await expect(recorder.record({ ...base, changed_at: '2026-01-01T00:00:00Z\ud800' })).rejects.toThrow(StrictJsonError);
+    // Readable JSON: the times, as before; a time the model cannot read before the rule on which times are given.
     await expect(recorder.record({ ...base, changed_at: 'not a time' })).rejects.toMatchObject({ code: 'observation_malformed' });
+    await expect(recorder.record({ ...base, changed_at: 'not a time', changed_not_before: new Date(), changed_not_after: new Date() }))
+      .rejects.toThrow('changed_at is not an ISO 8601 time');
     await expect(recorder.record({ ...base, changed_at: new Date(), observed_at: '2026-02-30T00:00:00Z' }))
       .rejects.toThrow('observed_at is not an ISO 8601 time');
   });

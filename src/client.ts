@@ -123,7 +123,6 @@ const CONNECT_FAILURE_CODES = new Set([
   'ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT',
 ]);
 
-/** The NA public key lookup answered as an instance that is down or busy: the request was never sent (1.3.1). */
 /** The endpoint (its position) a failed NA-key lookup went to: the requests waiting for it failed there. */
 const lookupEndpoint = new WeakMap<object, number>();
 
@@ -132,6 +131,7 @@ interface Sent {
   at: number;
 }
 
+/** The NA public key lookup answered as an instance that is down or busy: the request was never sent (1.3.1). */
 function lookupOutage(err: unknown): boolean {
   return err instanceof GenesisMeshError && err.code === 'na_public_key_unavailable' && RETRYABLE_STATUS.has(err.status);
 }

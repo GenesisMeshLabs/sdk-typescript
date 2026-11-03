@@ -1,5 +1,5 @@
 import { describe, expect, it, jest } from '@jest/globals';
-import { GenesisMeshClient } from '../src/index.js';
+import { GenesisMeshClient, seedSigner } from '../src/index.js';
 import { HttpTransport } from '../src/client.js';
 import { ConflictError, NetworkError, ServiceUnavailableError, isRetryableConflict } from '../src/errors.js';
 import { TEST_KEY } from './helpers.js';
@@ -209,7 +209,6 @@ describe('isRetryableConflict', () => {
 // ── Concurrent failures ────────────────────────────────────────────────────────
 
 describe('concurrent failures at one instance', () => {
-  const C = 'http://na-c:8443';
   const ok = (body: unknown = { ok: true }) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) }) as Response;
   const refused = () => Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
 
@@ -240,7 +239,7 @@ describe('concurrent failures at one instance', () => {
     expect(x.calls.filter(u => u.startsWith(C))).toEqual([]);
   });
 
-  it('move past it once when the requests that failed were not all sent at once', async () => {
+  it('move past it once when they failed without reaching it', async () => {
     const x = together(2, async () => { throw refused(); });
     const t = new HttpTransport({ audience: 'TEST', baseUrls: [A, B, C], fetch: x.fetch });
     await Promise.all([t.publicGet('/x'), t.publicGet('/y')]);
@@ -257,5 +256,192 @@ describe('concurrent failures at one instance', () => {
     expect(t.baseUrl).toBe(B);
     expect(x.calls.filter(u => u.startsWith(A))).toEqual([`${A}/sovereign.json`]);
     expect(x.calls.filter(u => u.startsWith(C))).toEqual([]);
+  });
+});
+
+// ── Failover interleavings (the review of 1.9.0) ─────────────────────────────────
+
+const C = 'http://na-c:8443';
+const answer = (body: unknown = { ok: true }) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) }) as Response;
+const busy = () => ({ ok: false, status: 503, text: async () => '{"error":{"code":"service_not_ready","message":"x"}}' }) as Response;
+const refusedConnection = () => Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+const resetConnection = () => Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } });
+const tick = async (n = 50) => { for (let i = 0; i < n; i++) await Promise.resolve(); };
+
+interface Call { url: string; resolve: (r: Response) => void; reject: (e: unknown) => void }
+
+/** A fetch whose every call waits until the test settles it. */
+function manual() {
+  const calls: Call[] = [];
+  const fetch = (async (url: string | URL | Request) => new Promise<Response>((resolve, reject) => {
+    calls.push({ url: String(url), resolve, reject });
+  })) as unknown as typeof globalThis.fetch;
+  const take = (prefix: string) => {
+    const i = calls.findIndex(c => c.url.startsWith(prefix));
+    if (i < 0) throw new Error(`no pending call to ${prefix}: ${calls.map(c => c.url).join(', ')}`);
+    return calls.splice(i, 1)[0]!;
+  };
+  return { fetch, calls, take };
+}
+
+describe('failover interleavings, each call settled by hand', () => {
+  it('a late failure at an endpoint already left does not move the client', async () => {
+    const m = manual();
+    const t = new HttpTransport({ audience: 'TEST', baseUrls: [A, B, C], fetch: m.fetch });
+    const r1 = t.publicGet('/one');
+    const r2 = t.publicGet('/two');
+    await tick();
+    m.take(A).reject(refusedConnection()); // r2 or r1 fails first at A
+    await tick();
+    expect(t.baseUrl).toBe(B);
+    m.take(B).resolve(answer());
+    await tick();
+    m.take(A).reject(resetConnection()); // the other one, late
+    await tick();
+    expect(t.baseUrl).toBe(B);
+    m.take(B).resolve(answer());
+    await Promise.all([r1, r2]);
+    expect(t.baseUrl).toBe(B);
+  });
+
+  it('a late failure at A after the client moved A->B->C does not send it back to B', async () => {
+    const m = manual();
+    const t = new HttpTransport({ audience: 'TEST', baseUrls: [A, B, C], fetch: m.fetch });
+    const r1 = t.publicGet('/one');
+    const r2 = t.publicGet('/two');
+    await tick();
+    m.take(`${A}/two`).reject(refusedConnection());
+    await tick();
+    m.take(`${B}/two`).resolve(busy());
+    await tick();
+    expect(t.baseUrl).toBe(C);
+    m.take(`${C}/two`).resolve(answer());
+    await r2;
+    m.take(`${A}/one`).reject(resetConnection());
+    await tick();
+    expect(t.baseUrl).toBe(C);
+    m.take(`${C}/one`).resolve(answer());
+    await r1;
+  });
+
+  it('a lookup started at A fails after the client moved to B: no further move', async () => {
+    const m = manual();
+    const t = new HttpTransport({ baseUrls: [A, B, C], signingKeyBase64: TEST_KEY.seedBase64, keyId: 'ops', fetch: m.fetch });
+    const admin = t.adminGet('/admin/x');
+    await tick();
+    const pub = t.publicGet('/p');
+    await tick();
+    // public fails at A, moves to B, succeeds there
+    const pubCall = m.calls.find(c => c.url === `${A}/p`)!;
+    m.calls.splice(m.calls.indexOf(pubCall), 1);
+    pubCall.reject(refusedConnection());
+    await tick();
+    expect(t.baseUrl).toBe(B);
+    m.take(`${B}/p`).resolve(answer());
+    await pub;
+    // the lookup at A now fails
+    m.take(`${A}/sovereign.json`).reject(refusedConnection());
+    await tick();
+    expect(t.baseUrl).toBe(B);
+    m.take(`${B}/sovereign.json`).resolve(answer({ network_authority: { public_key: 'K' } }));
+    await tick();
+    m.take(`${B}/admin/x`).resolve(answer());
+    await admin;
+    expect(t.baseUrl).toBe(B);
+  });
+
+  it('a request that joins a lookup after the client moved, and the lookup fails: joins B', async () => {
+    const m = manual();
+    const t = new HttpTransport({ baseUrls: [A, B, C], signingKeyBase64: TEST_KEY.seedBase64, keyId: 'ops', fetch: m.fetch });
+    const a1 = t.adminGet('/admin/1');
+    await tick();
+    const pub = t.publicGet('/p');
+    await tick();
+    m.take(`${A}/p`).reject(refusedConnection());
+    await tick();
+    m.take(`${B}/p`).resolve(answer());
+    await pub;
+    expect(t.baseUrl).toBe(B);
+    // a2 starts while the client is at B, but joins the lookup still pending at A
+    const a2 = t.adminPost('/admin/2', {});
+    await tick();
+    m.take(`${A}/sovereign.json`).reject(refusedConnection());
+    await tick();
+    expect(t.baseUrl).toBe(B);
+    m.take(`${B}/sovereign.json`).resolve(answer({ network_authority: { public_key: 'K' } }));
+    await tick();
+    m.take(`${B}/admin/1`).resolve(answer());
+    m.take(`${B}/admin/2`).resolve(answer());
+    await Promise.all([a1, a2]);
+    expect(t.baseUrl).toBe(B);
+    expect(m.calls).toEqual([]);
+  });
+
+  it('lookup answering 503: waiters move once', async () => {
+    const m = manual();
+    const t = new HttpTransport({ baseUrls: [A, B, C], signingKeyBase64: TEST_KEY.seedBase64, keyId: 'ops', fetch: m.fetch });
+    const all = Promise.all([t.adminGet('/admin/x'), t.adminGet('/admin/y'), t.adminPost('/admin/z', {})]);
+    await tick();
+    m.take(`${A}/sovereign.json`).resolve(busy());
+    await tick();
+    expect(t.baseUrl).toBe(B);
+    m.take(`${B}/sovereign.json`).resolve(answer({ network_authority: { public_key: 'K' } }));
+    await tick();
+    for (const p of ['/admin/x', '/admin/y', '/admin/z']) m.take(`${B}${p}`).resolve(answer());
+    await all;
+    expect(t.baseUrl).toBe(B);
+  });
+
+  it('non-idempotent request reset at A while another already moved: next request starts at B', async () => {
+    const m = manual();
+    const t = new HttpTransport({ audience: 'TEST', baseUrls: [A, B], fetch: m.fetch, signingKeyBase64: TEST_KEY.seedBase64, keyId: 'ops' });
+    const post = t.adminPost('/admin/p', {});
+    const get = t.publicGet('/g');
+    await tick();
+    m.take(`${A}/g`).reject(refusedConnection());
+    await tick();
+    m.take(`${B}/g`).resolve(answer());
+    await get;
+    m.take(`${A}/admin/p`).reject(resetConnection());
+    await expect(post).rejects.toBeInstanceOf(NetworkError);
+    expect(t.baseUrl).toBe(B);
+  });
+
+  it('single endpoint: retries with backoff and no movement', async () => {
+    let n = 0;
+    const fetch = (async () => {
+      n += 1;
+      if (n <= 2) throw refusedConnection();
+      return answer();
+    }) as unknown as typeof globalThis.fetch;
+    const t = new HttpTransport({ audience: 'TEST', baseUrl: A, fetch, retry: { attempts: 2, baseDelayMs: 1 } });
+    await expect(t.publicGet('/x')).resolves.toEqual({ ok: true });
+    expect(n).toBe(3);
+    expect(t.baseUrl).toBe(A);
+  });
+
+  it('async signer: the client moves while signing, and the request goes where it is then', async () => {
+    const m = manual();
+    let release!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    const inner = seedSigner(TEST_KEY.seedBase64, 'ops');
+    const signer = { ...inner, keyId: 'ops', sign: async (d: Buffer) => { await gate; return inner.sign(d); } };
+    const t = new HttpTransport({ audience: 'TEST', baseUrls: [A, B, C], fetch: m.fetch, signer: signer as never });
+    const admin = t.adminGet('/admin/x');
+    const pub = t.publicGet('/p');
+    await tick();
+    m.take(`${A}/p`).reject(refusedConnection());
+    await tick();
+    m.take(`${B}/p`).resolve(answer());
+    await pub;
+    expect(t.baseUrl).toBe(B);
+    release();
+    await tick();
+    // sent to B (the client moved while signing), fails there: client moves past B
+    m.take(`${B}/admin/x`).resolve(busy());
+    await tick();
+    expect(t.baseUrl).toBe(C);
+    m.take(`${C}/admin/x`).resolve(answer());
+    await admin;
   });
 });

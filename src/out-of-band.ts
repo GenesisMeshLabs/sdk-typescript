@@ -368,13 +368,16 @@ export class ObservationRecorder {
   }
 
   async record(input: ObservationInput): Promise<ObservationRecord> {
-    // A time the NA could not read is refused after the JSON, as the NA reads a record (its model after the JSON).
+    // A time the NA could not read is refused after the JSON, as the NA reads a record (its model after the JSON);
+    // the JSON is checked with the time as given.
     let unreadable: unknown;
+    const given: Record<string, unknown> = {};
     const time = (value: Date | string | undefined, field: string) => {
       try {
         return timeOf(value, field, 'observation_malformed');
       } catch (err) {
         unreadable ??= err;
+        given[field] = value;
         return undefined;
       }
     };
@@ -396,7 +399,9 @@ export class ObservationRecorder {
     };
     // 1.3.1: refused before signing as the NA would refuse it, in its order: JSON it cannot read,
     // a record its model does not take, then secret material.
-    checkSignable(record);
+    checkSignable({ ...record, ...given });
+    // The model reads each time before the rule on which are given.
+    if (unreadable !== undefined) throw unreadable;
     const window = input.changed_not_before !== undefined || input.changed_not_after !== undefined;
     if (input.changed_at !== undefined && window) {
       throw new OutOfBandRecordError('give changed_at, or the changed_not_before and changed_not_after window, not both',
@@ -406,7 +411,6 @@ export class ObservationRecorder {
       throw new OutOfBandRecordError('changed_at, or both changed_not_before and changed_not_after, is required',
         'observation_malformed');
     }
-    if (unreadable !== undefined) throw unreadable;
     if (!validObservation(record)) {
       const { changed_not_before: from, changed_not_after: to } = record;
       throw new OutOfBandRecordError(from && to && timestampOrder(from, to) > 0
