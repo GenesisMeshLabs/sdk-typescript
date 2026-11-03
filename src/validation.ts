@@ -34,7 +34,8 @@ export const timestamp: Check = v => {
   if (!match) return false;
   const [, y, m, d, h, min, sec, zh = '0', zm = '0'] = match;
   const days = new Date(Date.UTC(Number(y), Number(m), 0)).getUTCDate();
-  return Number(m) >= 1 && Number(m) <= 12 && Number(d) >= 1 && Number(d) <= days
+  // The reference's years run from 1: Date.UTC reads 0000 as 1900.
+  return Number(y) >= 1 && Number(m) >= 1 && Number(m) <= 12 && Number(d) >= 1 && Number(d) <= days
     && Number(h) < 24 && Number(min) < 60 && Number(sec) < 60 && Number(zh) < 24 && Number(zm) < 60
     && Number.isFinite(Date.parse(v.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(v) ? v : v + 'Z'));
 };

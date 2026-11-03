@@ -31,7 +31,13 @@ import {
   verifyAttestationSignature,
   verifyAuditPack,
   verifyBoundaryDecision,
+  verifyDecisionSignature,
   verifyEvidenceEvents,
+  verifyJustificationSignature,
+  verifyRevocationFeedSignature,
+  revocationFeedSigner,
+  justificationCanonical,
+  revocationFeedCanonical,
   verifyKeyHistory,
   verifyPolicySignature,
   verifyRetentionCheckpoint,
@@ -39,7 +45,8 @@ import {
   verifyTreatySignature,
 } from '../src/index.js';
 import type {
-  AgreementRecord, ArchiveRecord, AuditPackManifest, BoundaryDecision, BoundaryPolicy, ExecutorKeyInfo, GenesisBlock,
+  AgreementRecord, ArchiveRecord, AuditPackManifest, BoundaryDecision, BoundaryPolicy, DecisionJustification, ExecutorKeyInfo,
+  GenesisBlock, SovereignRevocationFeed,
   KeySuccessionRecord, MembershipAttestation, RecognitionTreaty, RetentionCheckpoint, StoreAnchor,
 } from '../src/index.js';
 import { generateTestKeyPair, mockFetch } from './helpers.js';
@@ -190,6 +197,20 @@ describe('decisions are verified with the key valid when they were made', () => 
     expect(reason(longLived(-3600, 30 * 86400), [na1.pubBase64])).toBe('authorized');
   });
 
+  it('a decision without its time is signed by no key of a history', () => {
+    for (const missing of [null, undefined, 42]) {
+      const d = { ...v.allowed.decision, decision_made_at: missing } as unknown as BoundaryDecision;
+      for (const [seed, key] of [[na1.seedBase64, na1.pubBase64], [na2.seedBase64, na2.pubBase64]] as const) {
+        const decision = { ...d, signature: { key_id: 'na', sig: sign(decisionCanonical(d), seed) } };
+        expect([missing, key, verifyDecisionSignature(decision, history)]).toEqual([missing, key, false]);
+        // verifyBoundaryDecision reads the decision's shape first: no time, no decision.
+        expect(verifyBoundaryDecision(decision, { operatorPublicKeys: history, atRecordTime: true }).reason).toBe('payload_invalid');
+        // A list of keys is valid at every time.
+        expect(verifyDecisionSignature(decision, [key])).toBe(true);
+      }
+    }
+  });
+
   it('judged now, an archived decision has expired', () => {
     const decision = decisionAt(-86400, na1.seedBase64);
     expect(verifyBoundaryDecision(decision, { operatorPublicKeys: history }).reason).toBe('decision_expired');
@@ -212,6 +233,51 @@ describe('records outside the store, each at its own time', () => {
     // The export's start checkpoint too.
     const late = verifyEvidenceEvents([], { naPublicKeys: history, executorKeys: [], checkpoint: checkpointAt(301, na1.seedBase64) });
     expect(late.failures.map(f => f.reason)).toEqual(['invalid_signature']);
+  });
+
+  it('a record without its own time is signed by no key of a history, and by a listed key', () => {
+    // Not a time the reference reads: null, absent, a number, a date that does not exist, the year 0000, a Date.
+    for (const missing of [null, undefined, 42, '2026-02-29T00:00:00Z', '0000-01-01T00:00:00Z', new Date(SUCCESSION_AT)]) {
+      for (const [seed, key] of [[na1.seedBase64, na1.pubBase64], [na2.seedBase64, na2.pubBase64]] as const) {
+        const p = { ...v.policy, issued_at: missing } as unknown as BoundaryPolicy;
+        const policy = { ...p, signature: { key_id: 'na', sig: sign(policyCanonical(p), seed) } };
+        const c = { ...v.checkpoint, created_at: missing } as unknown as RetentionCheckpoint;
+        const checkpoint = { ...c, signature: { key_id: 'na', sig: sign(checkpointCanonical(c), seed) } };
+        const a = { ...v.attestation, issued_at: missing, signatures: [] } as unknown as MembershipAttestation;
+        const attestation = { ...a, signatures: [{ key_id: 'na', sig: sign(attestationCanonical(a), seed) }] };
+        expect([missing, key, verifyPolicySignature(policy, history), verifyRetentionCheckpoint(checkpoint, history),
+          verifyAttestationSignature(attestation, history), verifyAttestationSignature(attestation, history, { now: at(0) })])
+          .toEqual([missing, key, false, false, false, false]);
+        expect([verifyPolicySignature(policy, [key]), verifyRetentionCheckpoint(checkpoint, [key]),
+          verifyAttestationSignature(attestation, [key])]).toEqual([true, true, true]);
+        const f = {
+          feed_id: 'feed-1', issuer_sovereign_id: SOVEREIGN, sequence: 1, issued_at: missing, revoked_attestation_ids: [],
+          revocation_reasons: {}, issued_by: 'na', signatures: [],
+        } as unknown as SovereignRevocationFeed;
+        const feed = { ...f, signatures: [{ key_id: 'na', sig: sign(revocationFeedCanonical(f), seed) }] };
+        const j = {
+          proof_id: 'proof-1', decision_id: 'decision-1', proof_issued_at: missing, issuer_sovereign_id: SOVEREIGN,
+          trace: {
+            trace_id: 't', decision_id: 'decision-1', agreement_id: 'a', operator_sovereign_id: SOVEREIGN, traced_at: at(0),
+            entries: [], short_circuited_at: null, final_authorized: true,
+          },
+          signature: null,
+        } as unknown as DecisionJustification;
+        const proof = { ...j, signature: { key_id: 'na', sig: sign(justificationCanonical(j), seed) } };
+        expect([verifyRevocationFeedSignature(feed, history), revocationFeedSigner(feed, history),
+          verifyJustificationSignature(proof, history)]).toEqual([false, undefined, false]);
+        expect([verifyRevocationFeedSignature(feed, [key]), revocationFeedSigner(feed, [key]),
+          verifyJustificationSignature(proof, [key])]).toEqual([true, key, true]);
+        const tr = {
+          treaty_id: 'treaty-1', issuer_sovereign_id: SOVEREIGN, subject_sovereign_id: 'sovereign-b',
+          subject_public_keys: [stranger.pubBase64], scope: { allowed_roles: ['role:client'] }, status: 'active',
+          issued_at: missing, valid_from: at(86400), expires_at: NEW_VALID_TO, issued_by: 'na', metadata: {}, signatures: [],
+        } as unknown as RecognitionTreaty;
+        const treaty = { ...tr, signatures: [{ key_id: 'na', sig: sign(treatyCanonical(tr), seed) }] };
+        expect([verifyTreatySignature(treaty, history), verifyTreatySignature(treaty, history, { now: at(0) }),
+          verifyTreatySignature(treaty, [key])]).toEqual([false, false, true]);
+      }
+    }
   });
 
   it('an attestation and a policy at their issued_at', () => {

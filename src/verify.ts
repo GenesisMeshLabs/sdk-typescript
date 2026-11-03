@@ -48,7 +48,7 @@ import {
 } from './grants.js';
 import {
   NAKeyHistory, RECORD_TIME_TOLERANCE_SECONDS, SUCCESSION_MIN_LEAD_SECONDS, decisionOutlivesKey, naKeysAt,
-  naKeysVouchingAt, naSignatureAt,
+  naKeysVouchingAt, naSignatureAt, recordTime,
   successionDigest, successionSignedBy, type KeySuccessionRecord, type NAKeys,
 } from './key-history.js';
 import {
@@ -147,7 +147,7 @@ function decisionSigned(decision: BoundaryDecision, publicKeys: readonly string[
  * keys (v1.5.0: given the key history, the key valid at `decision_made_at`).
  */
 export function verifyDecisionSignature(decision: BoundaryDecision, publicKeys: NAKeys): boolean {
-  return decisionSigned(decision, naKeysAt(publicKeys, decision.decision_made_at))
+  return decisionSigned(decision, naKeysAt(publicKeys, recordTime(decision.decision_made_at)))
     && unknownFields('BoundaryDecision', decision).length === 0;
 }
 
@@ -162,7 +162,8 @@ export interface VouchingOptions {
 }
 
 function keysFor(publicKeys: NAKeys, time: string, options: VouchingOptions): string[] {
-  return options.now === undefined ? naKeysAt(publicKeys, time) : naKeysVouchingAt(publicKeys, time, options.now);
+  const dated = recordTime(time);
+  return options.now === undefined ? naKeysAt(publicKeys, dated) : naKeysVouchingAt(publicKeys, dated, options.now);
 }
 
 /**
@@ -180,13 +181,13 @@ export function verifyAttestationSignature(
 /** v1.5.0: given the NA's key history, signed by the key valid at the policy's `issued_at`. */
 export function verifyPolicySignature(policy: BoundaryPolicy, publicKeys: NAKeys): boolean {
   return unknownFields('BoundaryPolicy', policy).length === 0
-    && signedBy(policyCanonical(policy), policy.signature, naKeysAt(publicKeys, policy.issued_at));
+    && signedBy(policyCanonical(policy), policy.signature, naKeysAt(publicKeys, recordTime(policy.issued_at)));
 }
 
 /** v1.5.0: given the NA's key history, signed by the key valid at `proof_issued_at`. */
 export function verifyJustificationSignature(proof: DecisionJustification, publicKeys: NAKeys): boolean {
   return unknownFields('JustificationProof', proof).length === 0
-    && signedBy(justificationCanonical(proof), proof.signature, naKeysAt(publicKeys, proof.proof_issued_at));
+    && signedBy(justificationCanonical(proof), proof.signature, naKeysAt(publicKeys, recordTime(proof.proof_issued_at)));
 }
 
 /**
@@ -202,7 +203,7 @@ export function verifyRevocationFeedSignature(
 
 /** The NA key that signed a revocation feed at its `issued_at` (1.8.0), or `undefined`. */
 export function revocationFeedSigner(feed: SovereignRevocationFeed, publicKeys: NAKeys): string | undefined {
-  return naKeysAt(publicKeys, feed.issued_at).find(k => anySigned(revocationFeedCanonical(feed), feed.signatures, [k]));
+  return naKeysAt(publicKeys, recordTime(feed.issued_at)).find(k => anySigned(revocationFeedCanonical(feed), feed.signatures, [k]));
 }
 
 function checkpointSigned(checkpoint: RetentionCheckpoint, publicKeys: readonly string[]): boolean {
@@ -211,7 +212,7 @@ function checkpointSigned(checkpoint: RetentionCheckpoint, publicKeys: readonly 
 
 /** v1.5.0: given the NA's key history, signed by the key valid at the checkpoint's `created_at`. */
 export function verifyRetentionCheckpoint(checkpoint: RetentionCheckpoint, publicKeys: NAKeys): boolean {
-  return checkpointSigned(checkpoint, naKeysAt(publicKeys, checkpoint.created_at))
+  return checkpointSigned(checkpoint, naKeysAt(publicKeys, recordTime(checkpoint.created_at)))
     && unknownFields('RetentionCheckpoint', checkpoint).length === 0;
 }
 
