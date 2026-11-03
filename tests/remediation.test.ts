@@ -359,6 +359,11 @@ describe('the due queue, notices and reviews', () => {
       expect([other, reviewApprovalProblem({ ...waiver, waive_until: other }, ['NA-KEY'])])
         .toEqual([other, "the decider's request gives another waiver time (an RFC 3339 timestamp)"]);
     }
+    // Read first, before the signatures, as the review's model reads them; a requested_at without a request too.
+    expect(reviewApprovalProblem({ ...review, approval: { ...review.approval, admin_signature: 'AAAA' }, decided_at: seconds },
+      ['NA-KEY'])).toBe("the review's decided_at is not a UTC timestamp");
+    expect(reviewApprovalProblem({ ...review, requested_at: seconds }, ['ANOTHER-NA'])).toBe("the review's requested_at is not a UTC timestamp");
+    expect(reviewApprovalProblem({ ...waiver, requested_at: 'not a time' }, ['NA-KEY'])).toBe("the review's requested_at is not a UTC timestamp");
     // Read, but further than 300 s from the request.
     expect(reviewApprovalProblem({ ...review, requested_at: `${hourLater}Z` }, ['NA-KEY'])).toMatch("requester's request was signed more than 300s");
   });

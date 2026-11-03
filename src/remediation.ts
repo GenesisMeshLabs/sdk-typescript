@@ -549,7 +549,7 @@ const UTC_ZONE = /(?:Z|[+-]00:00)$/;
  * fraction finer than microseconds cut and, unless `utc`, no offset read as
  * UTC. Null for anything else: a date that does not exist (`2026-02-29`), a
  * year outside 1 to 9999 (as written, or in UTC) included. With `utc`, only a
- * time in UTC (`Z` or `+00:00`), as a review's model reads its times.
+ * time in UTC in the form the NA writes (`Z`, `+00:00` or `-00:00`).
  */
 function recordedMicros(value: unknown, utc = false): bigint | null {
   if (typeof value !== 'string') return null;
@@ -947,7 +947,7 @@ function approvalProblem(
     return `the ${who}'s request is ${approval.method} ${approval.path}, not POST ${path}`;
   }
   if (!audiences.includes(approval.audience)) return `the ${who}'s request is for another Network Authority`;
-  // The review's model reads its times as UTC timestamps only: another time proves no age.
+  // A UTC timestamp in the form the NA writes: another time proves no age.
   const recordedAt = recordedMicros(at, true);
   if (recordedAt === null) return `the review's ${field} is not a UTC timestamp`;
   const signedAt = instant(approval.timestamp);
@@ -964,11 +964,19 @@ function approvalProblem(
  * as `decided_by`, with exactly the verdict, waiver end and note the review
  * records, within 300 seconds of `decided_at`; a requester signed
  * `POST /admin/evidence/reviews` with exactly the subject and justification
- * it records, within 300 seconds of `requested_at`. Whether each public key
+ * it records, within 300 seconds of `requested_at`. Both recorded times are
+ * read first, as the review's model reads them before anything else: each
+ * must be a UTC timestamp in the form the NA writes (`Z`, `+00:00` or
+ * `-00:00`), or the review is refused (`the review's decided_at is not a UTC
+ * timestamp`); the reference's model also reads spellings the NA never
+ * writes (a space, a lower-case `t` or `z`, `+0000`). Whether each public key
  * is the operator key's is checked against the holder registry
  * (`verifyEvidenceEvents`, `review_approval_key_mismatch`).
  */
 export function reviewApprovalProblem(review: ReviewRecord, naPublicKeys: readonly string[]): string | null {
+  for (const [name, at] of [['decided_at', review.decided_at], ['requested_at', review.requested_at]] as const) {
+    if (recordedMicros(at, true) === null) return `the review's ${name} is not a UTC timestamp`;
+  }
   const problem = approvalProblem(review.approval, 'decider', review.decided_by, reviewDecisionPath(review.review_id),
     naPublicKeys, review.decided_at, 'decided_at');
   if (problem) return problem;
