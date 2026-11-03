@@ -163,18 +163,25 @@ otherwise (`remediation_rotation_other_executor`,
 it checks the record as it will be signed, and a rotation whose evidence the
 NA refused for good (a dead letter in the evidence outbox) is never followed
 by the disable: a disable is never left without a record the NA would take.
-A rotation the NA refuses only at a later flush leaves the record pending
-for good: rotate again.
+A rotation the NA refuses only at a later flush (its evidence a dead letter
+then) leaves the record pending for good, with the denied version disabled:
+remove the record from the record outbox and cancel again, with a `disable`
+that accepts a version already disabled. Read the state right before
+cancelling: for a decision the NA plans from its latest execution.
 
-Once the rotation has run, a failure throws `RemediationNotRecordedError`
-(`remediation_not_recorded`) with the rotation's result, the record once
-signed, and `disabled`:
+Once the rotation's evidence is in the NA or the evidence outbox, a failure
+throws `RemediationNotRecordedError` (`remediation_not_recorded`) with the
+rotation's result, the record once signed, and `disabled`:
 
 - `disabled` false: rotate again when the rotation cannot be cited (its
   evidence refused for good, or the denied version issued again), or disable
   the denied version and record it when the disable failed;
-- `disabled` true: submit its `record` once the cause is fixed (a
-  resubmission is a duplicate); do not rotate again.
+- `disabled` true: submit its `record` once the cause is fixed, or sign it
+  again when there is none (a resubmission is a duplicate); do not rotate
+  again.
+
+A failure of the rotation's own governed action, once `rotate` ran, throws
+as `governedAction` does, before anything is disabled.
 
 ### Other remediations
 

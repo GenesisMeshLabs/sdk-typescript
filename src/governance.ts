@@ -673,8 +673,9 @@ export interface RotateForwardResult<T = unknown> {
  * - The disable failed (`disabled` false): disable the denied version, then
  *   record it.
  * - After the disable (`disabled` true): the record could not be signed,
- *   submitted or kept. Submit `record` once the cause is fixed (a
- *   resubmission is a duplicate); do not rotate again.
+ *   submitted or kept. Once the cause is fixed, submit `record`, or sign it
+ *   again when there is none (a resubmission is a duplicate); do not rotate
+ *   again.
  */
 export class RemediationNotRecordedError<T = unknown> extends GenesisMeshError {
   readonly rotation: GovernedActionResult<T>;
@@ -714,8 +715,16 @@ export class RemediationNotRecordedError<T = unknown> extends GenesisMeshError {
  * disable is never left without a record the NA will take. The NA admits
  * the record once it holds the rotation's evidence
  * (`remediation_rotation_missing` is retried); flush the evidence outbox
- * before the record outbox. A rotation the NA refuses at a later flush
- * leaves the record pending for good: rotate again.
+ * before the record outbox. A rotation the NA refuses only at a later flush
+ * (its evidence a dead letter then) leaves the record pending for good, the
+ * denied version disabled: remove the record from the record outbox and
+ * cancel again, with a `disable` that accepts a version already disabled.
+ *
+ * Read the state right before cancelling: for a decision the NA plans from
+ * its latest execution. A failure of the rotation's own governed action,
+ * once `rotate` ran, throws as `governedAction` does, before anything is
+ * disabled: without an evidence outbox, the NA's refusal of its evidence or
+ * no answer; with one, `EvidenceNotKeptError` or `MetadataRefusedError`.
  */
 export async function cancelByRotatingForward<T>(
   clients: GovernanceClients,

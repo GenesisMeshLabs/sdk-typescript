@@ -85,6 +85,22 @@ describe('times and sections as the reference reads them', () => {
     }
     expect(() => remediationDueAt('9999-12-31T23:59:00Z', 60)).toThrow('outside the years 1 to 9999');
     expect(() => dueAfterWaiver('9999-12-31T23:59:00Z', 86400)).toThrow('outside the years 1 to 9999');
+    // Past 9999 the grace cannot be reckoned, even when the change was due earlier.
+    expect(() => dueAfterDenial('2026-03-01T00:00:30Z', '9999-12-31T23:59:59Z', 60)).toThrow('outside the years 1 to 9999');
+    // A year 0 is no time, whatever its offset makes of it.
+    expect(() => dueAfterWaiver('0000-12-31T23:59:59-00:01', 0)).toThrow('is not an ISO 8601 timestamp');
+    expect(() => remediationDueAt('0001-01-01T00:00:59.999999+00:01', 0)).toThrow('is not an ISO 8601 timestamp');
+  });
+
+  it('keeps every microsecond, at the ends of the range too', () => {
+    expect(rfc3339('9999-12-31T23:59:59.999999Z')).toBe('9999-12-31T23:59:59.999999Z');
+    expect(rfc3339('0001-01-01T00:00:00.000001Z')).toBe('0001-01-01T00:00:00.000001Z');
+    expect(rfc3339('0001-01-01T00:00:59.999999+00:01')).toBeNull();
+    expect(rfc3339('0885-08-29T21:51:35.999999Z')).toBe('0885-08-29T21:51:35.999999Z');
+    expect(remediationDueAt('9999-12-31T23:59:59.99999Z', -60)).toBe('9999-12-31T23:58:59.999990Z');
+    expect(remediationDueAt('2300-01-01T00:00:00.000001Z', 0)).toBe('2300-01-01T00:00:00.000001Z');
+    expect(dueAfterDenial('9999-12-31T23:59:59.999999Z', '2026-03-01T00:00:00Z', 60)).toBe('2026-03-01T00:01:00Z');
+    expect(dueAfterDenial('2026-03-01T00:00:59.999999Z', '2026-03-01T00:00:00Z', 60)).toBe('2026-03-01T00:00:59.999999Z');
   });
 
   it('reads the times the reference reads', () => {
@@ -114,8 +130,15 @@ describe('times and sections as the reference reads them', () => {
     for (const refused of ['*', 'secret.*', 'secret*rotate', 'secret.*.rotate', 'secret.rotate*', '', ' ', '\t\n', '\x1c', '\x1f', '\x85', '\u00a0', '\u3000']) {
       expect([refused, issues(refused)]).toEqual([refused, [expect.objectContaining({ code: 'invalid_emergency' })]]);
     }
+    // Each of the 29 characters Python's str.strip() removes, alone.
+    const pythonSpace = [0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x85, 0xa0, 0x1680,
+      ...Array.from({ length: 11 }, (_, i) => 0x2000 + i), 0x2028, 0x2029, 0x202f, 0x205f, 0x3000];
+    expect(pythonSpace).toHaveLength(29);
+    for (const c of pythonSpace.map(code => String.fromCodePoint(code))) {
+      expect([c.codePointAt(0), issues(c)]).toEqual([c.codePointAt(0), [expect.objectContaining({ code: 'invalid_emergency' })]]);
+    }
     // U+FEFF is white space to JavaScript, not to Python.
-    for (const kept of ['secret.read', '\ufeff', ' secret.read ']) expect([kept, issues(kept)]).toEqual([kept, []]);
+    for (const kept of ['secret.read', '\ufeff', '\u180e', '\u200b', ' secret.read ']) expect([kept, issues(kept)]).toEqual([kept, []]);
   });
 });
 
@@ -291,13 +314,53 @@ describe('the due queue, notices and reviews', () => {
     expect(reviewApprovalProblem({ ...review, note: 'other' }, ['NA-KEY'])).toMatch('another verdict or note');
     expect(reviewApprovalProblem({ ...review, decided_by: 'operator-1' }, ['NA-KEY'])).toMatch('not operator-1');
     expect(reviewApprovalProblem(review, ['OTHER-NA'])).toMatch('another Network Authority');
-    // A recorded time that cannot be read proves no age: refused, as the reference refuses the record.
-    for (const unreadable of ['not a time', decidedAt.replace('T', ' '), '2026-02-29T00:00:00Z', '0000-12-31T23:59:59Z']) {
-      expect(reviewApprovalProblem({ ...review, decided_at: unreadable }, ['NA-KEY'])).toMatch('more than 300s');
+  });
+
+  it("reads a review's recorded times as UTC timestamps, as its model does", async () => {
+    const x = capture({ review_id: 'r1', state: 'review_pending' }, { review: {}, state: 'review_denied' });
+    await x.gm.evidenceStore.requestReview({ subject_kind: 'judgement', subject_id: 'j1', justification: 'planned' });
+    await x.gm.evidenceStore.decideReview('r1', { verdict: 'deny' });
+    const at = new Date();
+    const now = pythonTimestamp(at);
+    const review: ReviewRecord = {
+      review_id: 'r1', subject_kind: 'judgement', subject_id: 'j1', subject_digest: 'a'.repeat(64),
+      opened_for: 'requested', requested_by: 'operator-2', requester_holder: 'alice', justification: 'planned',
+      request_approval: embedded(x.call(0), TEST_KEY.pubBase64), requested_at: now, verdict: 'deny',
+      decided_by: 'operator-2', decider_holder: 'bob', approval: embedded(x.call(1), TEST_KEY.pubBase64), decided_at: now,
+      issuer_sovereign_id: 'na', issued_by: 'na-key',
+    };
+    expect(reviewApprovalProblem(review, ['NA-KEY'])).toBeNull();
+    const seconds = now.slice(0, 19);
+    const hourLater = pythonTimestamp(new Date(at.getTime() + 3_600_000)).slice(0, 19);
+    // The same instant in UTC: accepted, a fraction finer than microseconds cut.
+    for (const same of [`${seconds}+00:00`, `${seconds}-00:00`, `${seconds}.0000001Z`, `${seconds}.9999999Z`]) {
+      for (const field of ['decided_at', 'requested_at'] as const) {
+        expect([field, same, reviewApprovalProblem({ ...review, [field]: same }, ['NA-KEY'])]).toEqual([field, same, null]);
+      }
     }
-    // A fraction finer than microseconds is cut, as the reference reads it.
-    expect(reviewApprovalProblem({ ...review, decided_at: decidedAt.replace(/Z$/, '').replace(/(\.\d+)?$/, '.0000001Z') }, ['NA-KEY']))
-      .toBeNull();
+    // Any other time proves no age, whichever request it is for: not UTC, no offset, or no time at all.
+    for (const other of [seconds, `${hourLater}+01:00`, `+00${seconds}Z`, `${seconds.replace('T', ' ')}Z`,
+      `${seconds.replace('T', 't')}Z`, `${seconds}z`, 'not a time', '2026-02-29T00:00:00Z', `0000${seconds.slice(4)}Z`]) {
+      expect(reviewApprovalProblem({ ...review, decided_at: other }, ['NA-KEY'])).toBe("the review's decided_at is not a UTC timestamp");
+      expect(reviewApprovalProblem({ ...review, requested_at: other }, ['NA-KEY']))
+        .toBe("the review's requested_at is not a UTC timestamp");
+    }
+    // The waiver's end as the NA records it, to the microsecond, as the reference reads it.
+    const w = capture({ review: {}, state: 'waived' });
+    await w.gm.evidenceStore.decideReview('r1', { verdict: 'waive_until', waive_until: '2027-03-01T00:00:00.000001Z' });
+    const { request_approval: _a, requested_by: _b, requester_holder: _c, justification: _d, ...flagged } = review;
+    const waiver: ReviewRecord = {
+      ...flagged, opened_for: 'flagged_for_review', verdict: 'waive_until', approval: embedded(w.call(0), TEST_KEY.pubBase64),
+    };
+    for (const kept of ['2027-03-01T00:00:00.000001Z', '2027-03-01T00:00:00.0000019Z', '2027-03-01T01:00:00.000001+01:00']) {
+      expect([kept, reviewApprovalProblem({ ...waiver, waive_until: kept }, ['NA-KEY'])]).toEqual([kept, null]);
+    }
+    for (const other of ['2027-03-01T00:00:00Z', '2027-02-29T00:00:00.000001Z', '2027-03-01T00:00:00.000002Z']) {
+      expect([other, reviewApprovalProblem({ ...waiver, waive_until: other }, ['NA-KEY'])])
+        .toEqual([other, "the decider's request gives another waiver time (an RFC 3339 timestamp)"]);
+    }
+    // Read, but further than 300 s from the request.
+    expect(reviewApprovalProblem({ ...review, requested_at: `${hourLater}Z` }, ['NA-KEY'])).toMatch("requester's request was signed more than 300s");
   });
 
   it('submits a remediation record on its own route, retried as idempotent', async () => {
@@ -517,6 +580,12 @@ describe('cancelByRotatingForward', () => {
     expect(unsent).toBeInstanceOf(RemediationNotRecordedError);
     expect(unsent).toMatchObject({ disabled: true });
     expect(unsent.record).toMatchObject({ version_id: 'v3', disabled_version_id: 'v2' });
+    // The disable ran, the record could not be signed: nothing to submit, sign it again.
+    jest.spyOn(x.recorder, 'signRemediation').mockRejectedValueOnce(new Error('signer unreachable'));
+    const unsigned = await cancelByRotatingForward(x.gm, x.recorder, x.options).catch(e => e);
+    expect(unsigned).toMatchObject({ code: 'remediation_not_recorded', disabled: true, cause: { message: 'signer unreachable' } });
+    expect(unsigned.record).toBeUndefined();
+    expect(x.disable).toHaveBeenLastCalledWith('v2');
   });
 
   it('disables the version the change made, and refuses another before anything runs', async () => {
