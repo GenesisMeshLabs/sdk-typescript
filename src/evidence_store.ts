@@ -3,7 +3,7 @@ import type { ArchiveRecord, AuditPackManifest, AuditPackResponse } from './audi
 import { checkMetadataOnly, SecretMaterialError } from './execution.js';
 import type { HttpTransport } from './client.js';
 import { executionDigest } from './canonical.js';
-import { GenesisMeshError, NotFoundError } from './errors.js';
+import { GenesisMeshError, NetworkError, NotFoundError } from './errors.js';
 import {
   outOfBandDigest,
   type BreakGlassRecord,
@@ -112,6 +112,50 @@ export interface RecordSubmission {
    * its resource's chain (null for a use without a resource).
    */
   resource_sequence?: number | null;
+}
+
+/** The statuses with which the NA admits execution evidence, and a record outside the governed path (1.9.0). */
+const EVIDENCE_ADMITTED: readonly string[] = ['recorded', 'duplicate'];
+const RECORD_ADMITTED: readonly string[] = ['recorded', 'duplicate', 'quarantined'];
+
+/**
+ * An outbox removes a record only on an answer that admits it: an object with
+ * one of `statuses`. Any other answer (`null`, `{}`, a status this SDK does not
+ * know) says nothing of the record, which stays pending
+ * (`response_body_unreadable`); a resubmission is a duplicate when the NA
+ * holds it.
+ */
+function admits(answer: unknown, statuses: readonly string[]): void {
+  const status = typeof answer === 'object' && answer !== null ? (answer as { status?: unknown }).status : undefined;
+  if (typeof status !== 'string' || !statuses.includes(status)) {
+    throw new NetworkError(`the NA's answer to the record has the status ${JSON.stringify(status ?? null)}`,
+      'response_body_unreadable');
+  }
+}
+
+/**
+ * A batch's results by observation, read as the NA sends them: each result names one observation of the batch by
+ * its index, none twice, each observation has one, and each status is one the NA sends. Any other answer could take
+ * one record for another's: it leaves the whole batch pending (`response_body_unreadable`), with a backoff.
+ */
+function batchAnswers(results: unknown, count: number): ObservationBatchResult[] {
+  const unread = (detail: string) => new NetworkError(detail, 'response_body_unreadable');
+  if (!Array.isArray(results)) throw unread("the NA's answer to the batch holds no results");
+  const byIndex: (ObservationBatchResult | undefined)[] = new Array(count).fill(undefined);
+  for (const result of results as unknown[]) {
+    const index = typeof result === 'object' && result !== null ? (result as { index?: unknown }).index : undefined;
+    if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index >= count || byIndex[index] !== undefined) {
+      throw unread("a result of the NA's answer to the batch names no observation of it, or one another result names");
+    }
+    const status = (result as { status?: unknown }).status;
+    if (typeof status !== 'string' || (status !== 'refused' && !RECORD_ADMITTED.includes(status))) {
+      throw unread(`a result of the NA's answer to the batch has the status ${JSON.stringify(status ?? null)}`);
+    }
+    byIndex[index] = result as ObservationBatchResult;
+  }
+  const missing = byIndex.indexOf(undefined);
+  if (missing >= 0) throw unread(`the NA's answer to the batch has no result for observation ${missing}`);
+  return byIndex as ObservationBatchResult[];
 }
 
 /** One observation's result in a batch, at its index in the request. */
@@ -592,6 +636,7 @@ export class EvidenceStoreClient {
     let submission: EvidenceSubmission;
     try {
       submission = await this.submit(entry.evidence);
+      admits(submission, EVIDENCE_ADMITTED);
     } catch (err) {
       const { failure, transient } = classifySubmissionError(err);
       const attempts = entry.attempts + 1;
@@ -679,9 +724,12 @@ export class EvidenceStoreClient {
 
   /** Submit up to 100 observations; the NA admits them in order of their change times. One result each, by index. */
   async submitObservations(observations: readonly ObservationRecord[]): Promise<ObservationBatchResult[]> {
-    const body = await this.http.publicPost<{ results: ObservationBatchResult[] }>(
+    const body = await this.http.publicPost<{ results: ObservationBatchResult[] } | null>(
       '/evidence/observations/batch', { observations }, true,
     );
+    if (typeof body !== 'object' || body === null || !Array.isArray(body.results)) {
+      throw new NetworkError("the NA's answer to the batch holds no results", 'response_body_unreadable');
+    }
     return body.results;
   }
 
@@ -891,6 +939,7 @@ export class EvidenceStoreClient {
           : entry.kind === 'grant_execution'
             ? await this.http.publicPost<RecordSubmission>('/evidence/grant-executions', { evidence: entry.record }, true)
             : await this.submitBreakGlass(entry.record as BreakGlassRecord);
+      admits(submission, RECORD_ADMITTED);
     } catch (err) {
       // v1.6.0: a grant use the NA refuses for good is a dead letter, and the NA quarantines it; when it
       // continued the chain it is the chain's head, so the uses after it are still sent, each judged on
@@ -989,7 +1038,7 @@ export class EvidenceStoreClient {
   ): Promise<boolean> {
     let results: ObservationBatchResult[];
     try {
-      results = await this.submitObservations(batch.map(e => e.record as ObservationRecord));
+      results = batchAnswers(await this.submitObservations(batch.map(e => e.record as ObservationRecord)), batch.length);
     } catch (err) {
       const tooLarge = err instanceof GenesisMeshError && err.status === 413;
       if (!tooLarge && classifySubmissionError(err, RECORD_PERMANENT_REFUSALS).transient) {
@@ -1012,12 +1061,15 @@ export class EvidenceStoreClient {
       return part(batch.slice(half));
     }
     for (const [index, e] of batch.entries()) {
-      const answer = results.find(r => r.index === index);
-      if (!answer) {
-        result.pending.push(e);
-      } else if (answer.status === 'refused') {
+      const answer = results[index]!;
+      if (answer.status === 'refused') {
         const code = answer.error?.code ?? 'unknown';
         const refusal = new GenesisMeshError(answer.error?.message ?? code, code, code.endsWith('_conflict') ? 409 : 422);
+        // The NA's details too, as a refusal of the record alone carries them: its quarantine entry among them.
+        const details = (answer.error as { details?: unknown } | undefined)?.details;
+        if (typeof details === 'object' && details !== null && !Array.isArray(details)) {
+          refusal.details = details as Record<string, unknown>;
+        }
         settle(e, { queued: await this.recordFailed(outbox, e, refusal) });
       } else {
         await this.removeRecord(outbox, e.id);

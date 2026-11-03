@@ -123,6 +123,14 @@ const CONNECT_FAILURE_CODES = new Set([
   'ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT',
 ]);
 
+/** The endpoint (its position) a failed NA-key lookup went to: the requests waiting for it failed there. */
+const lookupEndpoint = new WeakMap<object, number>();
+
+/** Where an attempt went: the endpoint's position, read when it was sent. */
+interface Sent {
+  at: number;
+}
+
 /** The NA public key lookup answered as an instance that is down or busy: the request was never sent (1.3.1). */
 function lookupOutage(err: unknown): boolean {
   return err instanceof GenesisMeshError && err.code === 'na_public_key_unavailable' && RETRYABLE_STATUS.has(err.status);
@@ -179,9 +187,13 @@ export class HttpTransport {
     return this.baseUrls[this.active] as string;
   }
 
-  /** Move to the next endpoint (no-op with one endpoint). */
-  private failover(): void {
-    if (this.baseUrls.length > 1) this.active = (this.active + 1) % this.baseUrls.length;
+  /**
+   * Move past the endpoint at `used`, the position a failed attempt went to.
+   * Attempts that failed at one endpoint together move once; one that failed
+   * at an endpoint already left behind moves nothing (no-op with one endpoint).
+   */
+  private failover(used: number): void {
+    if (this.baseUrls.length > 1 && this.active === used) this.active = (used + 1) % this.baseUrls.length;
   }
 
   /** Whether this client has an operator signer for admin requests. */
@@ -236,8 +248,9 @@ export class HttpTransport {
     for (;;) {
       let response: BufferedResponse | undefined;
       let error: GenesisMeshError | undefined;
+      const sent: Sent = { at: this.active };
       try {
-        response = await this._attempt(spec);
+        response = await this._attempt(spec, sent);
       } catch (err) {
         if (!(err instanceof NetworkError) && !lookupOutage(err)) throw err;
         error = err as GenesisMeshError;
@@ -245,7 +258,7 @@ export class HttpTransport {
       // The instance's status: the response's, or the key lookup's that kept the request unsent (1.3.1).
       const status = response?.status ?? (error instanceof NetworkError ? undefined : error?.status);
       const failoverWorthy = error instanceof NetworkError || (status !== undefined && FAILOVER_STATUS.has(status));
-      if (failoverWorthy) this.failover();
+      if (failoverWorthy) this.failover(sent.at);
       // A request that may have reached an instance is replayed elsewhere only
       // if it is idempotent; one that never connected (or was never sent) can always move on.
       const mayMove = spec.idempotent || (error instanceof NetworkError ? error.connectFailed : error !== undefined);
@@ -266,8 +279,8 @@ export class HttpTransport {
   }
 
   /** One request to the active endpoint, with the body fully read (a dropped body is a NetworkError). */
-  private async _attempt(spec: RequestSpec): Promise<BufferedResponse> {
-    const res = await this._once(spec);
+  private async _attempt(spec: RequestSpec, sent: Sent): Promise<BufferedResponse> {
+    const res = await this._once(spec, sent);
     let body: string | ArrayBuffer;
     try {
       // The bytes, so a body that is not UTF-8 is refused rather than repaired.
@@ -301,7 +314,7 @@ export class HttpTransport {
     }
   }
 
-  private async _once(spec: RequestSpec): Promise<Response> {
+  private async _once(spec: RequestSpec, sent: Sent): Promise<Response> {
     const headers: Record<string, string> = { ...this.headers };
     if (spec.admin) {
       if (!this.signer) {
@@ -311,6 +324,8 @@ export class HttpTransport {
       try {
         audience = await this._audience();
       } catch (err) {
+        // The request failed where the lookup it waited for went.
+        sent.at = lookupEndpoint.get(err as object) ?? sent.at;
         // 1.3.1: an answer from the NA's side (a 403 from a firewall, a 404) keeps its status
         // (`na_public_key_unavailable`); only a lookup that got no answer is a network error.
         if (!(err instanceof NetworkError)) throw err;
@@ -337,8 +352,9 @@ export class HttpTransport {
       init.body = canonicalJson(spec.body);
     }
     const path = buildPath(spec.path, spec.query);
+    sent.at = this.active;
     try {
-      return await this._fetch(this.baseUrl + path, init);
+      return await this._fetch(this.baseUrls[sent.at] + path, init);
     } catch (err) {
       const error = new NetworkError(`${spec.method} ${spec.path} failed: ${(err as Error).message}`);
       error.connectFailed = isConnectFailure(err);
@@ -354,7 +370,8 @@ export class HttpTransport {
    */
   private _audience(): Promise<string> {
     if (!this.audience) {
-      const url = this.baseUrl + '/sovereign.json';
+      const at = this.active;
+      const url = this.baseUrls[at] + '/sovereign.json';
       const pending = (async () => {
         let response: Response;
         try {
@@ -380,7 +397,11 @@ export class HttpTransport {
         return key;
       })();
       // A failed lookup is retried by the next admin request.
-      this.audience = pending.catch(err => { this.audience = undefined; throw err; });
+      this.audience = pending.catch(err => {
+        this.audience = undefined;
+        if (typeof err === 'object' && err !== null) lookupEndpoint.set(err, at);
+        throw err;
+      });
     }
     return this.audience;
   }
