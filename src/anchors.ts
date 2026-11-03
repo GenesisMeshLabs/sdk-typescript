@@ -15,7 +15,9 @@
 import { canonicalJson, copyPythonFloats, defineMember, sha256Hex, verifyCanonical } from './auth.js';
 import { entryDigest } from './canonical.js';
 import { naSignatureAt, type NAKeys } from './key-history.js';
-import type { AnchorSummary, EvidenceEvent, EvidenceStoreVerification, RetentionCheckpoint, Signature } from './types.js';
+import type {
+  AnchorSummary, AnchorVerification, EvidenceEvent, EvidenceStoreVerification, RetentionCheckpoint, Signature,
+} from './types.js';
 
 export type { AnchorSummary } from './types.js';
 import { timestampMicros, validAnchor, validCheckpoint } from './validation.js';
@@ -49,20 +51,8 @@ export function anchorDigest(anchor: StoreAnchor): string {
   return sha256Hex(anchorCanonical(anchor));
 }
 
-export interface AnchorFailure {
-  anchor_sequence: number | null;
-  reason: string;
-  detail: string;
-}
-
-export interface AnchorVerification {
-  verified: boolean;
-  checked_anchors: number;
-  first_anchor_sequence: number | null;
-  last_anchor_sequence: number | null;
-  anchored_through_sequence: number | null;
-  failures: AnchorFailure[];
-}
+// The result types live with the other wire types, so that `AnchorSummary.chain` can name them.
+export type { AnchorFailure, AnchorVerification } from './types.js';
 
 export interface VerifyAnchorsOptions {
   /**

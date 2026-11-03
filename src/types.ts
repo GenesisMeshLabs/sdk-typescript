@@ -476,6 +476,10 @@ export interface AttestationRecord {
   status: AttestationStatus;
   revoked_at: string | null;
   revocation_reason: string | null;
+  /** 1.8.0: the copy this one re-issues under the NA's current key, or null. */
+  reissued_from?: string | null;
+  /** 1.8.0: the copy that re-issued this one, or null. */
+  superseded_by?: string | null;
 }
 
 export interface AttestationList {
@@ -487,6 +491,8 @@ export interface AttestationList {
 export interface AttestationRevocation {
   attestation_id: string;
   status: string;
+  /** 1.8.0: every copy of the attestation's re-issue lineage the revocation reached, this one included. */
+  lineage_ids?: string[];
 }
 
 export interface AttestationVerification {
@@ -854,6 +860,22 @@ export interface EvidenceVerificationFailure {
   detail: string;
 }
 
+export interface AnchorFailure {
+  anchor_sequence: number | null;
+  reason: string;
+  detail: string;
+}
+
+/** `verifyStoreAnchors`: whether the anchors form an unbroken signed chain. */
+export interface AnchorVerification {
+  verified: boolean;
+  checked_anchors: number;
+  first_anchor_sequence: number | null;
+  last_anchor_sequence: number | null;
+  anchored_through_sequence: number | null;
+  failures: AnchorFailure[];
+}
+
 /** How a run of entries ties to the anchors held (`EvidenceStoreVerification.anchors`, v1.5.0). */
 export interface AnchorSummary {
   anchors_checked: number;
@@ -863,6 +885,11 @@ export interface AnchorSummary {
   linked_start: boolean;
   anchored_through_sequence: number | null;
   unanchored_entries: number;
+  /**
+   * From the NA's own verification (`evidenceStore.verify()`): its anchors as a
+   * chain, as `verifyStoreAnchors` checks it. The offline verifiers leave it out.
+   */
+  chain?: AnchorVerification;
 }
 
 export interface EvidenceStoreVerification {
@@ -939,6 +966,16 @@ export interface EvidenceStoreStatus {
   evidence_remediation?: string;
   /** v1.4.0, with the records on: the number of remediation states by state. */
   remediation?: Record<string, number>;
+  /** v1.6.0: `on` when the NA issues pre-issued grants and records their uses. */
+  evidence_grants?: string;
+  /** v1.6.0, with the grants on: the grants issued. */
+  grants_issued?: number;
+  /** v1.6.0, with the grants on: the grants neither revoked nor past their end. */
+  grants_active?: number;
+  /** v1.6.0, with the grants on: the grants revoked. */
+  grants_revoked?: number;
+  /** v1.6.0, with the grants on: the grant uses recorded. */
+  grant_uses?: number;
 }
 
 export interface ExecutorKeyRecord {
