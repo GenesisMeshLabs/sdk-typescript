@@ -623,9 +623,15 @@ export interface RotateForwardOptions<T = unknown> {
    * `rotate_forward_then_disable`.
    */
   remediation: Pick<RemediationStatus, 'subject_kind' | 'subject_id' | 'change_kind' | 'change_id' | 'resource_id'>
-    & Partial<Pick<RemediationStatus, 'state' | 'review_pending' | 'mode' | 'steps' | 'fallback'>>;
-  /** The denied version: disabled once readers have the new one. */
-  deniedVersionId: string;
+    & Partial<Pick<RemediationStatus, 'state' | 'review_pending' | 'mode' | 'steps' | 'fallback' | 'change_version_id'>>;
+  /**
+   * The denied version: disabled once readers have the new one. Default the
+   * state's `change_version_id`; when the state names one, it must be that
+   * one: the NA refuses for good a record that disables another
+   * (`remediation_subject_mismatch`), so another is refused before anything
+   * runs.
+   */
+  deniedVersionId?: string;
   /**
    * The governed rotation's evaluation and verification (capability,
    * attestation, context, `verify`), as for `governedAction`; the resource is
@@ -655,23 +661,34 @@ export interface RotateForwardResult<T = unknown> {
 }
 
 /**
- * The forward rotation ran, but the remediation was not recorded: the record
- * could not be built (`remediation_malformed`, `remediation_secret_material`:
- * nothing was disabled), the disable failed, or the record could not be
- * signed, submitted or kept. `rotation` is the rotation's result; `record`
- * the signed record when there is one (submit it once the cause is fixed;
- * resubmission is idempotent). Do not rotate again.
+ * The forward rotation ran, but the remediation was not recorded. `cause` is
+ * why; `rotation` the rotation's result; `disabled` whether the denied
+ * version was disabled:
+ *
+ * - Before the disable (`disabled` false): the rotation's evidence was
+ *   refused for good (`rotation.queued` a dead letter), or the record could
+ *   not be built, for example because the rotation issued the denied version
+ *   again (`remediation_malformed`). That rotation can never be cited: rotate
+ *   again.
+ * - The disable failed (`disabled` false): disable the denied version, then
+ *   record it.
+ * - After the disable (`disabled` true): the record could not be signed,
+ *   submitted or kept. Submit `record` once the cause is fixed (a
+ *   resubmission is a duplicate); do not rotate again.
  */
 export class RemediationNotRecordedError<T = unknown> extends GenesisMeshError {
   readonly rotation: GovernedActionResult<T>;
   readonly record?: RemediationRecord;
+  /** True when the denied version was disabled. */
+  readonly disabled: boolean;
 
-  constructor(cause: unknown, rotation: GovernedActionResult<T>, record?: RemediationRecord) {
+  constructor(cause: unknown, rotation: GovernedActionResult<T>, record?: RemediationRecord, disabled = false) {
     super(`the forward rotation ran; the remediation was not recorded: ${String(cause)}`, 'remediation_not_recorded', 0);
     this.name = 'RemediationNotRecordedError';
     this.cause = cause;
     this.rotation = rotation;
     if (record) this.record = record;
+    this.disabled = disabled;
   }
 }
 
@@ -689,11 +706,16 @@ export class RemediationNotRecordedError<T = unknown> extends GenesisMeshError {
  *    and the disabled one, signed by the executor key and kept in the record
  *    outbox (submitted directly without one).
  *
- * A credential is never rolled back. The record is checked before the
- * denied version is disabled, so a record the NA would refuse never follows
- * a disable. The NA admits the record once it holds the rotation's evidence
+ * A credential is never rolled back. The denied version is the one the
+ * change made (`change_version_id`, the default): the NA refuses a record
+ * that disables another. The record is checked before the denied version is
+ * disabled, and a rotation whose evidence the NA refused for good (a dead
+ * letter in the evidence outbox) is never followed by the disable, so a
+ * disable is never left without a record the NA will take. The NA admits
+ * the record once it holds the rotation's evidence
  * (`remediation_rotation_missing` is retried); flush the evidence outbox
- * before the record outbox.
+ * before the record outbox. A rotation the NA refuses at a later flush
+ * leaves the record pending for good: rotate again.
  */
 export async function cancelByRotatingForward<T>(
   clients: GovernanceClients,
@@ -707,10 +729,16 @@ export async function cancelByRotatingForward<T>(
     if (problem) throw new OutOfBandRecordError(problem, 'remediation_steps_mismatch');
   }
   if (state.state !== undefined) nextState(state.state, 'record_remediation', state.review_pending ?? false);
-  if (typeof options.deniedVersionId !== 'string' || !options.deniedVersionId) {
+  const changed = state.change_version_id;
+  const denied = options.deniedVersionId || changed;
+  if (typeof denied !== 'string' || !denied) {
     throw new OutOfBandRecordError('the denied version is required', 'remediation_malformed');
   }
-  const secret = remediationSecretProblem({ disabled_version_id: options.deniedVersionId, detail: options.detail });
+  if (changed && denied !== changed) {
+    throw new OutOfBandRecordError(`the change made version ${changed}; the denied version cannot be ${denied}`,
+      'remediation_subject_mismatch');
+  }
+  const secret = remediationSecretProblem({ disabled_version_id: denied, detail: options.detail });
   if (secret) throw new OutOfBandRecordError(secret, 'remediation_secret_material');
   // A record outbox that cannot be read fails here, before anything runs.
   if (clients.evidenceStore.recordOutbox) await clients.evidenceStore.recordOutbox.list();
@@ -727,10 +755,16 @@ export async function cancelByRotatingForward<T>(
     };
   });
   if (!result.authorized) return { rotation: result };
+  // A rotation the NA refused for good can never be cited: nothing is disabled.
+  if (result.queued?.state === 'dead_letter') {
+    const code = result.queued.last_error?.code;
+    throw new RemediationNotRecordedError(
+      new Error(`the rotation's evidence was refused for good${code ? ` (${code})` : ''}: rotate again`), result);
+  }
 
   const input: RemediationInput = {
     ...subject, steps: 'rotate_forward_then_disable', rotation_evidence_id: result.evidence!.evidence_id,
-    version_id: rotated!.version_id, disabled_version_id: options.deniedVersionId,
+    version_id: rotated!.version_id, disabled_version_id: denied,
     ...(options.detail !== undefined ? { detail: options.detail } : {}),
   };
   try {
@@ -739,14 +773,16 @@ export async function cancelByRotatingForward<T>(
     throw new RemediationNotRecordedError(err, result);
   }
   let record: RemediationRecord | undefined;
+  let disabled = false;
   try {
-    await options.disable(options.deniedVersionId);
+    await options.disable(denied);
+    disabled = true;
     record = await recorder.signRemediation(input);
     const store = clients.evidenceStore;
     if (store.recordOutbox) return { rotation: result, remediation: record, ...await store.enqueueRecord(record) };
     return { rotation: result, remediation: record, submission: await store.submitRemediation(record) };
   } catch (err) {
-    throw new RemediationNotRecordedError(err, result, record);
+    throw new RemediationNotRecordedError(err, result, record, disabled);
   }
 }
 

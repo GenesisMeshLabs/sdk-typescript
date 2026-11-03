@@ -127,8 +127,7 @@ linked records:
 
 ```ts
 const result = await cancelByRotatingForward(gm, recorder, {
-  remediation: due,                 // from the due queue
-  deniedVersionId: 'v2',            // the version the denied change made
+  remediation: due,                 // from the due queue; its change_version_id is disabled
   rotation: { attestation_id, requested_capability: 'secret.rotate',
               context: { request_parameters: { lifetime_days: 30 } }, verify },
   rotate: async decision => {       // issue a new version, make it current
@@ -152,15 +151,30 @@ const result = await cancelByRotatingForward(gm, recorder, {
 Before anything runs it checks the state and the plan when the remediation
 carries them (`remediation_not_due` unless the state is `remediation_due` or
 `overdue`, `remediation_already_recorded`, `remediation_steps_mismatch`), the
-denied version against the secret guard, and that the record outbox can be
-read. The rotation must be made by the same executor sovereign as the record,
+denied version, and that the record outbox can be read. The denied version is
+the one the change made: `deniedVersionId` defaults to the state's
+`change_version_id`, and another one is refused
+(`remediation_subject_mismatch`), as the NA would refuse the record for good
+after the disable. Give `deniedVersionId` only when the state names no
+version. It must also pass the secret guard. The rotation must be made by the same executor sovereign as the record,
 after the change, and be cited by no other remediation: the NA refuses
 otherwise (`remediation_rotation_other_executor`,
 `remediation_rotation_before_change`, `remediation_rotation_reused`). Before the denied version is disabled
-it checks the record as it will be signed: a disable is never left without a
-record the NA would take. A failure after the rotation throws
-`RemediationNotRecordedError` (`remediation_not_recorded`) with the
-rotation's result and, once signed, the record: do not rotate again.
+it checks the record as it will be signed, and a rotation whose evidence the
+NA refused for good (a dead letter in the evidence outbox) is never followed
+by the disable: a disable is never left without a record the NA would take.
+A rotation the NA refuses only at a later flush leaves the record pending
+for good: rotate again.
+
+Once the rotation has run, a failure throws `RemediationNotRecordedError`
+(`remediation_not_recorded`) with the rotation's result, the record once
+signed, and `disabled`:
+
+- `disabled` false: rotate again when the rotation cannot be cited (its
+  evidence refused for good, or the denied version issued again), or disable
+  the denied version and record it when the disable failed;
+- `disabled` true: submit its `record` once the cause is fixed (a
+  resubmission is a duplicate); do not rotate again.
 
 ### Other remediations
 

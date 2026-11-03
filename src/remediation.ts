@@ -31,7 +31,7 @@ import {
 } from './out-of-band.js';
 import { nonCanonicalFields, unknownFields } from './strict.js';
 import {
-  remediationStepsProblem, reviewConsistencyProblem, timestampMicros, validRemediation,
+  remediationStepsProblem, reviewConsistencyProblem, timestamp, timestampMicros, validRemediation,
 } from './validation.js';
 import type {
   BoundaryPolicy, BoundaryPolicyIntent, EvidenceStoreEntry, GateRemediation, PolicyGateEvaluation, PolicyIssue,
@@ -521,21 +521,49 @@ export function changeFacts(
   };
 }
 
-/** A time as the reference prints it: UTC, microseconds when not zero, `Z`. */
+/** True when an instant (microseconds since the epoch) falls in the years 1 to 9999, the reference's times. */
+function inYears(micros: number): boolean {
+  const year = new Date(Math.floor(micros / 1000)).getUTCFullYear();
+  return year >= 1 && year <= 9999;
+}
+
+/** A time as the reference prints it: UTC, microseconds when not zero, `Z`. Throws outside the years 1 to 9999. */
 function isoMicros(micros: number): string {
+  if (!inYears(micros)) throw new Error('the time is outside the years 1 to 9999');
   const ms = Math.floor(micros / 1000);
   const base = new Date(ms).toISOString().slice(0, 19);
   const fraction = micros - Math.floor(micros / 1_000_000) * 1_000_000;
   return fraction === 0 ? `${base}Z` : `${base}.${String(fraction).padStart(6, '0')}Z`;
 }
 
+/** A fraction finer than microseconds, which the reference cuts when it reads a time. */
+const FINER_FRACTION = /(T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6})[0-9]+/;
+
+/**
+ * A recorded time's instant in microseconds, as the reference reads it (a
+ * fraction finer than microseconds cut, no offset read as UTC); NaN for
+ * anything else, a date that does not exist (`2026-02-29`) or a year outside
+ * 1 to 9999 included.
+ */
+function recordedMicros(value: unknown): number {
+  if (typeof value !== 'string') return NaN;
+  const cut = value.replace(FINER_FRACTION, '$1');
+  const at = timestamp(cut) ? timestampMicros(cut) : NaN;
+  return !Number.isNaN(at) && inYears(at) ? at : NaN;
+}
+
 function micros(value: string, field: string): number {
-  const at = timestampMicros(value);
+  const at = recordedMicros(value);
   if (Number.isNaN(at)) throw new Error(`${field} is not an ISO 8601 timestamp: ${value}`);
   return at;
 }
 
-/** `remediation_due_at`: a judgement's (or review's) time plus the grace. */
+/**
+ * `remediation_due_at`: a judgement's (or review's) time plus the grace.
+ * Throws when the time is not a timestamp (a date that does not exist
+ * included) or the due time falls after the year 9999, as the reference
+ * refuses them.
+ */
 export function remediationDueAt(at: string, graceSeconds: number): string {
   return isoMicros(micros(at, 'at') + graceSeconds * 1_000_000);
 }
@@ -880,13 +908,16 @@ function instant(value: unknown): number {
   }
   const offset = sign ? (sign === '-' ? -1 : 1) * (offsetHour! * 60 + offsetMinute!) : 0;
   const ms = day.getTime() + ((hour! * 60 + minute! - offset) * 60 + second!) * 1000;
-  return ms * 1000 + Number(fraction.padEnd(6, '0'));
+  const at = ms * 1000 + Number(fraction.padEnd(6, '0'));
+  // In UTC, too, as the reference reads it: 0001-01-01T00:00:00+00:01 is no time.
+  return inYears(at) ? at : NaN;
 }
 
 /**
  * `value` in UTC as the reference prints it (`2026-10-12T09:00:00.500000Z`)
  * when it is an RFC 3339 timestamp in the grammar `waive_until` and the
- * admin timestamps a review embeds must follow; null otherwise.
+ * admin timestamps a review embeds must follow, in the years 1 to 9999 once
+ * read in UTC; null otherwise.
  */
 export function rfc3339(value: unknown): string | null {
   const at = instant(value);
@@ -903,7 +934,9 @@ function approvalProblem(
   }
   if (!audiences.includes(approval.audience)) return `the ${who}'s request is for another Network Authority`;
   const signedAt = instant(approval.timestamp);
-  if (Number.isNaN(signedAt) || Math.abs(signedAt - timestampMicros(at)) > APPROVAL_MAX_AGE) {
+  const recordedAt = recordedMicros(at);
+  // A recorded time that cannot be read proves no age: refused, as the reference refuses the record.
+  if (Number.isNaN(signedAt) || Number.isNaN(recordedAt) || Math.abs(signedAt - recordedAt) > APPROVAL_MAX_AGE) {
     return `the ${who}'s request was signed more than 300s from when it was recorded`;
   }
   return null;
@@ -1003,6 +1036,8 @@ export function reviewRecordProblem(review: ReviewRecord): string | null {
 // ── Policies ────────────────────────────────────────────────────────────────
 
 const PARAMETER = /^[A-Za-z0-9_-]{1,64}$/;
+/** Empty, or only what Python's `str.strip()` removes (its white space, not JavaScript's: U+001C to U+001F and U+0085, no U+FEFF). */
+const PYTHON_BLANK = /^[\t\n\v\f\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]*$/;
 
 /**
  * The issues the NA finds in a policy's 1.4.0 sections (the codes of
@@ -1037,7 +1072,8 @@ export function policySectionIssues(policy: BoundaryPolicy | BoundaryPolicyInten
   } else if (capabilities[0] === emergency.stands_for) {
     issues.push({ code: 'invalid_emergency', message: 'the emergency capability must differ from the capability it stands for' });
   }
-  if (emergency.stands_for.endsWith('.*')) {
+  // No `*` anywhere, and not blank, as the reference checks it (`"*" in stands_for or not stands_for.strip()`).
+  if (emergency.stands_for.includes('*') || PYTHON_BLANK.test(emergency.stands_for)) {
     issues.push({ code: 'invalid_emergency', message: 'stands_for is an exact capability ID' });
   }
   if (!PARAMETER.test(emergency.justification_parameter)) {

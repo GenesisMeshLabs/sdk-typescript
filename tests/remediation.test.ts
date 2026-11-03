@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import {
   BadRequestError, ConflictError, ExecutionRecorder, FileRecordOutbox, GenesisMeshClient, MemoryOutbox, NetworkError,
+  dueAfterDenial, dueAfterWaiver, policySectionIssues, remediationDueAt, rfc3339,
   ObservationRecorder, OutOfBandRecordError, RateLimitError, RemediationNotRecordedError,
   ServiceUnavailableError, StrictJsonError, ValidationError,
   adminApprovalValid, cancelByRotatingForward, decisionCanonical, parseJson, policyDigest, pythonTimestamp,
@@ -67,6 +68,54 @@ describe('policy digests with the 1.4.0 sections', () => {
     const guided = suite.vectors.find(x => x.id === 'policy-with-guidance')!;
     expect(policyDigest(guided.record!)).toBe(guided.expected.digest);
     expect(policyDigest({ ...guided.record!, emergency: null } as unknown as BoundaryPolicy)).toBe(guided.expected.digest);
+  });
+});
+
+describe('times and sections as the reference reads them', () => {
+  it('refuses a due time from a date that does not exist, or past the year 9999', () => {
+    for (const due of [
+      () => remediationDueAt('2026-02-29T00:00:00Z', 0),
+      () => dueAfterDenial(null, '2026-02-29T00:00:00Z', 60),
+      () => dueAfterDenial('2026-01-01T00:10:00Z', '2026-02-29T00:00:00Z', 0),
+      () => dueAfterDenial('2026-02-30T00:00:00Z', '2026-01-01T00:00:00Z', 0),
+      () => dueAfterWaiver('2026-04-31T00:00:00Z', 86400),
+      () => remediationDueAt('0000-12-31T23:59:59Z', 0),
+    ]) {
+      expect(due).toThrow('is not an ISO 8601 timestamp');
+    }
+    expect(() => remediationDueAt('9999-12-31T23:59:00Z', 60)).toThrow('outside the years 1 to 9999');
+    expect(() => dueAfterWaiver('9999-12-31T23:59:00Z', 86400)).toThrow('outside the years 1 to 9999');
+  });
+
+  it('reads the times the reference reads', () => {
+    expect(remediationDueAt('2028-02-29T00:00:00Z', 60)).toBe('2028-02-29T00:01:00Z');
+    expect(remediationDueAt('9999-12-31T23:58:00Z', 60)).toBe('9999-12-31T23:59:00Z');
+    expect(remediationDueAt('0001-01-01T00:00:00Z', 0)).toBe('0001-01-01T00:00:00Z');
+    expect(remediationDueAt('2026-03-01T00:00:00', 0)).toBe('2026-03-01T00:00:00Z');
+    expect(remediationDueAt('2026-03-01T01:00:00+01:00', 0)).toBe('2026-03-01T00:00:00Z');
+    expect(remediationDueAt('2026-03-01T00:00:00.1234567Z', 0)).toBe('2026-03-01T00:00:00.123456Z');
+    expect(dueAfterDenial('2026-03-01T00:00:00.5Z', '2026-03-01T00:00:00Z', 60)).toBe('2026-03-01T00:00:00.500000Z');
+  });
+
+  it('reads an RFC 3339 time only when it falls in the years 1 to 9999 in UTC', () => {
+    expect(rfc3339('0001-01-01T00:00:00+00:01')).toBeNull();
+    expect(rfc3339('9999-12-31T23:59:59-00:01')).toBeNull();
+    expect(rfc3339('0001-01-01T00:01:00+00:01')).toBe('0001-01-01T00:00:00Z');
+    expect(rfc3339('9999-12-31T23:58:59-00:01')).toBe('9999-12-31T23:59:59Z');
+  });
+
+  it('takes stands_for as an exact capability ID: no * anywhere, and not blank as Python strips it', () => {
+    const suite = parseJson(readFileSync(fileURLToPath(new URL('./fixtures/conformance/remediation.json', import.meta.url)), 'utf-8')) as
+      { vectors: Array<{ id: string; record?: BoundaryPolicy }> };
+    const valid = suite.vectors.find(x => x.id === 'validation-emergency-valid')!.record!;
+    const issues = (standsFor: string) => policySectionIssues({ ...valid, emergency: { ...valid.emergency!, stands_for: standsFor } })
+      .filter(i => i.message === 'stands_for is an exact capability ID');
+    expect(policySectionIssues(valid)).toEqual([]);
+    for (const refused of ['*', 'secret.*', 'secret*rotate', 'secret.*.rotate', 'secret.rotate*', '', ' ', '\t\n', '\x1c', '\x1f', '\x85', '\u00a0', '\u3000']) {
+      expect([refused, issues(refused)]).toEqual([refused, [expect.objectContaining({ code: 'invalid_emergency' })]]);
+    }
+    // U+FEFF is white space to JavaScript, not to Python.
+    for (const kept of ['secret.read', '\ufeff', ' secret.read ']) expect([kept, issues(kept)]).toEqual([kept, []]);
   });
 });
 
@@ -242,6 +291,13 @@ describe('the due queue, notices and reviews', () => {
     expect(reviewApprovalProblem({ ...review, note: 'other' }, ['NA-KEY'])).toMatch('another verdict or note');
     expect(reviewApprovalProblem({ ...review, decided_by: 'operator-1' }, ['NA-KEY'])).toMatch('not operator-1');
     expect(reviewApprovalProblem(review, ['OTHER-NA'])).toMatch('another Network Authority');
+    // A recorded time that cannot be read proves no age: refused, as the reference refuses the record.
+    for (const unreadable of ['not a time', decidedAt.replace('T', ' '), '2026-02-29T00:00:00Z', '0000-12-31T23:59:59Z']) {
+      expect(reviewApprovalProblem({ ...review, decided_at: unreadable }, ['NA-KEY'])).toMatch('more than 300s');
+    }
+    // A fraction finer than microseconds is cut, as the reference reads it.
+    expect(reviewApprovalProblem({ ...review, decided_at: decidedAt.replace(/Z$/, '').replace(/(\.\d+)?$/, '.0000001Z') }, ['NA-KEY']))
+      .toBeNull();
   });
 
   it('submits a remediation record on its own route, retried as idempotent', async () => {
@@ -454,12 +510,65 @@ describe('cancelByRotatingForward', () => {
     const x = await setup();
     x.disable.mockRejectedValueOnce(new Error('vault refused'));
     const failed = await cancelByRotatingForward(x.gm, x.recorder, x.options).catch(e => e);
-    expect(failed).toMatchObject({ code: 'remediation_not_recorded', cause: { message: 'vault refused' } });
+    expect(failed).toMatchObject({ code: 'remediation_not_recorded', cause: { message: 'vault refused' }, disabled: false });
     expect(failed.record).toBeUndefined();
     x.submitRemediation.mockRejectedValueOnce(new ServiceUnavailableError());
     const unsent = await cancelByRotatingForward(x.gm, x.recorder, x.options).catch(e => e);
     expect(unsent).toBeInstanceOf(RemediationNotRecordedError);
+    expect(unsent).toMatchObject({ disabled: true });
     expect(unsent.record).toMatchObject({ version_id: 'v3', disabled_version_id: 'v2' });
+  });
+
+  it('disables the version the change made, and refuses another before anything runs', async () => {
+    const x = await setup();
+    const versioned = { ...due, change_version_id: 'v2' };
+    // The NA refuses for good a record that disables another version (remediation_subject_mismatch).
+    await expect(cancelByRotatingForward(x.gm, x.recorder, { ...x.options, remediation: versioned, deniedVersionId: 'v1' }))
+      .rejects.toMatchObject({ code: 'remediation_subject_mismatch' });
+    expect(x.steps).toEqual([]);
+    const { deniedVersionId: _, ...withoutDenied } = x.options;
+    const result = await cancelByRotatingForward(x.gm, x.recorder, { ...withoutDenied, remediation: versioned });
+    expect(x.disable).toHaveBeenCalledWith('v2');
+    expect(result.remediation).toMatchObject({ disabled_version_id: 'v2' });
+    await cancelByRotatingForward(x.gm, x.recorder, { ...x.options, remediation: versioned, deniedVersionId: 'v2' });
+    expect(x.disable).toHaveBeenLastCalledWith('v2');
+  });
+
+  it('takes the version given when the state names none, and needs one', async () => {
+    const x = await setup();
+    const result = await cancelByRotatingForward(x.gm, x.recorder, {
+      ...x.options, remediation: { ...due, change_version_id: null }, deniedVersionId: 'v1',
+    });
+    expect(result.remediation).toMatchObject({ disabled_version_id: 'v1' });
+    for (const deniedVersionId of [undefined, '']) {
+      await expect(cancelByRotatingForward(x.gm, x.recorder, { ...x.options, deniedVersionId } as typeof x.options))
+        .rejects.toMatchObject({ code: 'remediation_malformed' });
+    }
+  });
+
+  it('never disables after a rotation whose evidence the NA refused for good', async () => {
+    const x = await setup();
+    const gm = new GenesisMeshClient({ audience: 'TEST', baseUrl: 'http://unused', outbox: new MemoryOutbox() });
+    gm.boundary.evaluate = x.gm.boundary.evaluate;
+    jest.spyOn(gm.evidenceStore, 'resourceHead').mockResolvedValue(null);
+    jest.spyOn(gm.evidenceStore, 'submit').mockRejectedValue(new ConflictError('taken', 'evidence_conflict'));
+    const submitRemediation = jest.spyOn(gm.evidenceStore, 'submitRemediation');
+    const error = await cancelByRotatingForward(gm, x.recorder, x.options).catch(e => e);
+    expect(error).toBeInstanceOf(RemediationNotRecordedError);
+    expect(error).toMatchObject({
+      code: 'remediation_not_recorded', disabled: false, rotation: { queued: { state: 'dead_letter' } },
+    });
+    expect(String(error.cause)).toContain('refused for good (evidence_conflict): rotate again');
+    expect(error.record).toBeUndefined();
+    expect(x.rotate).toHaveBeenCalled();
+    expect(x.disable).not.toHaveBeenCalled();
+    expect(submitRemediation).not.toHaveBeenCalled();
+    // Evidence still pending (the NA did not answer) is cited once it is admitted: the disable goes ahead.
+    jest.spyOn(gm.evidenceStore, 'submit').mockRejectedValue(new NetworkError('down'));
+    submitRemediation.mockResolvedValue(recorded());
+    const pending = await cancelByRotatingForward(gm, x.recorder, x.options);
+    expect(pending.rotation.queued).toMatchObject({ state: 'pending' });
+    expect(x.disable).toHaveBeenCalledWith('v2');
   });
 });
 

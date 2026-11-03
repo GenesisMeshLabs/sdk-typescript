@@ -4090,7 +4090,8 @@ export type RemediationMode = 'cancel' | 'alert_only';
 
 // @public
 export class RemediationNotRecordedError<T = unknown> extends GenesisMeshError {
-    constructor(cause: unknown, rotation: GovernedActionResult<T>, record?: RemediationRecord);
+    constructor(cause: unknown, rotation: GovernedActionResult<T>, record?: RemediationRecord, disabled?: boolean);
+    readonly disabled: boolean;
     // (undocumented)
     readonly record?: RemediationRecord;
     // (undocumented)
@@ -4633,10 +4634,10 @@ export interface RotatedVersion<T = unknown> {
 
 // @public (undocumented)
 export interface RotateForwardOptions<T = unknown> {
-    deniedVersionId: string;
+    deniedVersionId?: string;
     detail?: string;
     disable: (deniedVersionId: string) => Promise<void>;
-    remediation: Pick<RemediationStatus, 'subject_kind' | 'subject_id' | 'change_kind' | 'change_id' | 'resource_id'> & Partial<Pick<RemediationStatus, 'state' | 'review_pending' | 'mode' | 'steps' | 'fallback'>>;
+    remediation: Pick<RemediationStatus, 'subject_kind' | 'subject_id' | 'change_kind' | 'change_id' | 'resource_id'> & Partial<Pick<RemediationStatus, 'state' | 'review_pending' | 'mode' | 'steps' | 'fallback' | 'change_version_id'>>;
     rotate: (decision: BoundaryDecision) => Promise<RotatedVersion<T>>;
     rotation: Omit<GovernedActionParams, 'resource_id' | 'resource_action' | 'breakGlass'> & {
         resource_action?: 'rotate' | 'update';
