@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import {
   ObservationRecorder,
   OutOfBandRecordError,
+  StrictJsonError,
   observationFromFinding,
   outOfBandCanonical,
   parseExportLines,
@@ -121,6 +122,22 @@ describe('ObservationRecorder', () => {
     await expect(recorder.record({
       ...base, changed_at: new Date(), changed_not_before: new Date(), changed_not_after: new Date(),
     })).rejects.toThrow('not both');
+  });
+
+  it("refuses in the NA's order: JSON it cannot read before the change times", async () => {
+    const base = {
+      resource_id: 'kv:prod/api-key', action: 'rotate' as const, capability: 'secret.rotate',
+      source: 'log', source_event_id: 'e',
+    };
+    const unreadable = { metadata: { note: 'half a pair \ud800' } };
+    await expect(recorder.record({ ...base, ...unreadable, changed_at: 'not a time' })).rejects.toThrow(StrictJsonError);
+    await expect(recorder.record({ ...base, ...unreadable })).rejects.toThrow(StrictJsonError);
+    await expect(recorder.record({ ...base, ...unreadable, changed_at: new Date(), changed_not_before: new Date(), changed_not_after: new Date() }))
+      .rejects.toThrow(StrictJsonError);
+    // Readable JSON: the times, as before.
+    await expect(recorder.record({ ...base, changed_at: 'not a time' })).rejects.toMatchObject({ code: 'observation_malformed' });
+    await expect(recorder.record({ ...base, changed_at: new Date(), observed_at: '2026-02-30T00:00:00Z' }))
+      .rejects.toThrow('observed_at is not an ISO 8601 time');
   });
 
   it('refuses secret material in metadata before signing', async () => {

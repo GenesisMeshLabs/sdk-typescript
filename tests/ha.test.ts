@@ -205,3 +205,57 @@ describe('isRetryableConflict', () => {
     expect(isRetryableConflict(undefined)).toBe(false);
   });
 });
+
+// ── Concurrent failures ────────────────────────────────────────────────────────
+
+describe('concurrent failures at one instance', () => {
+  const C = 'http://na-c:8443';
+  const ok = (body: unknown = { ok: true }) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) }) as Response;
+  const refused = () => Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+
+  /** A fetch where the requests to A wait until `count` of them arrived, then fail as `fail` says. */
+  function together(count: number, fail: () => Promise<Response>) {
+    const calls: string[] = [];
+    let arrived = 0;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const fetch = jest.fn(async (url: string | URL | Request) => {
+      const u = String(url);
+      calls.push(u);
+      if (u.startsWith(A)) {
+        if (++arrived === count) release();
+        await gate;
+        return fail();
+      }
+      return u.endsWith('/sovereign.json') ? ok({ network_authority: { public_key: 'NA-KEY' } }) : ok();
+    });
+    return { fetch: fetch as unknown as typeof globalThis.fetch, calls };
+  }
+
+  it('move past it once, not once per request', async () => {
+    const x = together(2, async () => ({ ok: false, status: 503, text: async () => '{"error":{"code":"service_not_ready","message":"x"}}' }) as Response);
+    const t = new HttpTransport({ audience: 'TEST', baseUrls: [A, B, C], fetch: x.fetch });
+    await Promise.all([t.publicGet('/x'), t.publicGet('/y')]);
+    expect(t.baseUrl).toBe(B);
+    expect(x.calls.filter(u => u.startsWith(C))).toEqual([]);
+  });
+
+  it('move past it once when the requests that failed were not all sent at once', async () => {
+    const x = together(2, async () => { throw refused(); });
+    const t = new HttpTransport({ audience: 'TEST', baseUrls: [A, B, C], fetch: x.fetch });
+    await Promise.all([t.publicGet('/x'), t.publicGet('/y')]);
+    expect(t.baseUrl).toBe(B);
+    // A third request after them starts where they ended.
+    await t.publicGet('/z');
+    expect(x.calls.filter(u => u.startsWith(C))).toEqual([]);
+  });
+
+  it('move past it once when the NA-key lookup they waited for failed there', async () => {
+    const x = together(1, async () => { throw refused(); });
+    const t = new HttpTransport({ baseUrls: [A, B, C], signingKeyBase64: TEST_KEY.seedBase64, keyId: 'ops', fetch: x.fetch });
+    await Promise.all([t.adminGet('/admin/x'), t.adminGet('/admin/y'), t.adminPost('/admin/z', {})]);
+    expect(t.baseUrl).toBe(B);
+    expect(x.calls.filter(u => u.startsWith(A))).toEqual([`${A}/sovereign.json`]);
+    expect(x.calls.filter(u => u.startsWith(C))).toEqual([]);
+  });
+});

@@ -164,6 +164,16 @@ describe('governedAction with the evidence outbox (1.2.0)', () => {
     x.submit.mockRejectedValueOnce(error);
     expect((await governedAction(x.gm, x.recorder, x.params, x.action)).queued).toMatchObject({ state: 'pending' });
   });
+  it('keeps the evidence pending when the answer does not admit it', async () => {
+    for (const answer of [null, {}, { status: 'quarantined' }]) {
+      const x = await withOutbox();
+      x.submit.mockResolvedValueOnce(answer as never);
+      const result = await governedAction(x.gm, x.recorder, x.params, x.action);
+      expect([answer, result.queued?.state, result.queued?.last_error?.code]).toEqual([answer, 'pending', 'response_body_unreadable']);
+      expect(result.submission).toBeUndefined();
+      expect((await x.outbox.list()).length).toBe(1);
+    }
+  });
   it('dead-letters a record the NA refuses, with its code, and keeps it', async () => {
     const x = await withOutbox();
     x.submit.mockRejectedValueOnce(new ConflictError('taken', 'evidence_conflict'));
