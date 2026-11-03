@@ -240,13 +240,14 @@ export interface AnchorSummary {
     anchors_checked: number;
     // (undocumented)
     anchors_matched: number;
+    chain?: AnchorVerification;
     // (undocumented)
     linked_start: boolean;
     // (undocumented)
     unanchored_entries: number;
 }
 
-// @public (undocumented)
+// @public
 export interface AnchorVerification {
     // (undocumented)
     anchored_through_sequence: number | null;
@@ -383,18 +384,21 @@ export interface AttestationList {
 export interface AttestationRecord {
     // (undocumented)
     attestation: MembershipAttestation;
+    reissued_from?: string | null;
     // (undocumented)
     revocation_reason: string | null;
     // (undocumented)
     revoked_at: string | null;
     // (undocumented)
     status: AttestationStatus;
+    superseded_by?: string | null;
 }
 
 // @public (undocumented)
 export interface AttestationRevocation {
     // (undocumented)
     attestation_id: string;
+    lineage_ids?: string[];
     // (undocumented)
     status: string;
 }
@@ -1690,9 +1694,14 @@ export interface EvidenceStoreStatus {
     anchoring_blocked?: string;
     // (undocumented)
     entries?: number;
+    evidence_grants?: string;
     evidence_remediation?: string;
     // (undocumented)
     evidence_store: string;
+    grant_uses?: number;
+    grants_active?: number;
+    grants_issued?: number;
+    grants_revoked?: number;
     // (undocumented)
     last_store_sequence?: number | null;
     latest_anchor?: {

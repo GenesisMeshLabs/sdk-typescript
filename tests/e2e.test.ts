@@ -152,7 +152,10 @@ suite('SDK against a live Python Network Authority', () => {
     expect(vendorHistory.verification.verified).toBe(true);
     const keys = await gm.evidenceStore.listExecutorKeys();
     expect(verifyEvidenceEvents(vendorHistory.entries, { naPublicKeys: [naPublicKey], executorKeys: keys, contiguous: false }).verified).toBe(true);
-    await gm.attestation.revoke(attestation.attestation_id, { reason: 'SDK test complete' });
+    const stored = await gm.attestation.get(attestation.attestation_id);
+    expect([stored.reissued_from, stored.superseded_by]).toEqual([null, null]);
+    const revocation = await gm.attestation.revoke(attestation.attestation_id, { reason: 'SDK test complete' });
+    expect(revocation.lineage_ids).toEqual([attestation.attestation_id]);
     expect((await gm.attestation.get(attestation.attestation_id)).status).toBe('revoked');
     const revoked = await gm.boundary.evaluate({ attestation_id: attestation.attestation_id, requested_capability: 'sp-secret.create', context });
     expect(verifyBoundaryDecision(revoked.decision, verify)).toMatchObject({ accepted: true, authorized: false });
@@ -161,8 +164,17 @@ suite('SDK against a live Python Network Authority', () => {
     const feed = await gm.attestation.revocationFeed();
     expect(feed.revoked_attestation_ids).toContain(attestation.attestation_id);
     expect(verifyRevocationFeedSignature(feed, [naPublicKey])).toBe(true);
-    expect((await gm.evidenceStore.verify()).verified).toBe(true);
-    expect((await gm.evidenceStore.status()).evidence_store).toBe('on');
+    const verification = await gm.evidenceStore.verify();
+    expect(verification.verified).toBe(true);
+    expect(verification.anchors?.chain).toMatchObject({ verified: true, failures: [] });
+    const storeStatus = await gm.evidenceStore.status();
+    expect(storeStatus.evidence_store).toBe('on');
+    expect(['on', 'off']).toContain(storeStatus.evidence_grants);
+    if (storeStatus.evidence_grants === 'on') {
+      for (const count of [storeStatus.grants_issued, storeStatus.grants_active, storeStatus.grants_revoked, storeStatus.grant_uses]) {
+        expect(Number.isInteger(count)).toBe(true);
+      }
+    }
     const exported: EvidenceEvent[] = [];
     for await (const event of gm.evidenceStore.exportAll(0, 5)) exported.push(event);
     expect(verifyEvidenceEvents(exported, { naPublicKeys: [naPublicKey], executorKeys: keys }).verified).toBe(true);
