@@ -19,6 +19,10 @@ import {
   type TimeTokenRequestInput,
 } from './grants.js';
 import type { AgreementRecord, EvidenceStoreEntry } from './types.js';
+import { checkRange } from './validation.js';
+
+/** The NA's largest page of grants or of a grant's uses. */
+const MAX_GRANT_PAGE = 500;
 
 /** `POST /admin/grants`: exactly one basis, `attestation_id` or `agreement`. */
 export interface IssueGrantParams {
@@ -173,9 +177,30 @@ export class GrantsClient {
     return this.http.adminPost<IssuedGrant>('/admin/grants', body);
   }
 
-  /** Grants, newest first (admin, read tier). Follow `next_before`. */
+  /**
+   * Grants, newest first (admin, read tier). Follow `next_before`, or use
+   * `allGrants`. 1.9.0: a `limit` outside 1 to 500 is refused (`RangeError`)
+   * before anything is sent.
+   */
   listGrants(params: GrantListParams = {}): Promise<GrantList> {
+    try {
+      checkRange('limit', params.limit, 1, MAX_GRANT_PAGE);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     return this.http.adminGet<GrantList>('/admin/grants', { ...params });
+  }
+
+  /** Every grant, newest first, following pages (admin, read tier; 1.9.0). */
+  async *allGrants(params: Omit<GrantListParams, 'before'> = {}): AsyncGenerator<GrantSummary> {
+    let before: string | undefined;
+    for (;;) {
+      const page: GrantList = await this.listGrants({ ...params, ...(before !== undefined ? { before } : {}) });
+      yield* page.grants;
+      if (page.next_before === null || page.next_before === undefined || page.grants.length === 0) return;
+      if (page.next_before === before) throw new Error('grant list cursor did not advance');
+      before = page.next_before;
+    }
   }
 
   /** One grant, its state and its revocation (admin, read tier); `404 grant_not_found`. */
@@ -189,7 +214,26 @@ export class GrantsClient {
    * as a conflict or a chain mismatch is not in the chain.
    */
   listGrantUses(grantId: string, params: GrantUsesParams = {}): Promise<GrantUses> {
+    try {
+      checkRange('limit', params.limit, 1, MAX_GRANT_PAGE);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     return this.http.adminGet<GrantUses>(`/admin/grants/${encodeURIComponent(grantId)}/uses`, { ...params });
+  }
+
+  /** A grant's whole use chain, newest first, following pages (admin, read tier; 1.9.0). */
+  async *allGrantUses(grantId: string, limit?: number): AsyncGenerator<GrantUseSummary> {
+    let before: number | undefined;
+    for (;;) {
+      const page: GrantUses = await this.listGrantUses(grantId, {
+        ...(limit !== undefined ? { limit } : {}), ...(before !== undefined ? { before } : {}),
+      });
+      yield* page.uses;
+      if (page.next_before === null || page.next_before === undefined || page.uses.length === 0) return;
+      if (page.next_before === before) throw new Error('use chain cursor did not advance');
+      before = page.next_before;
+    }
   }
 
   /**
