@@ -2478,6 +2478,8 @@ export type GrantScalar = string | boolean | GrantNumber | null;
 // @public
 export class GrantsClient {
     constructor(http: HttpTransport);
+    allGrants(params?: Omit<GrantListParams, 'before'>): AsyncGenerator<GrantSummary>;
+    allGrantUses(grantId: string, limit?: number): AsyncGenerator<GrantUseSummary>;
     getGrant(grantId: string): Promise<GrantDetail>;
     issueGrant(params: IssueGrantParams): Promise<IssuedGrant>;
     listGrants(params?: GrantListParams): Promise<GrantList>;

@@ -352,3 +352,14 @@ export const validFeed = shape({
   feed_id: string, issuer_sovereign_id: string, sequence: nonnegative, issued_at: timestamp, issued_by: string,
   signatures: filled(signatures),
 });
+
+/**
+ * A page size, cursor or store position out of range, refused before anything
+ * is sent (1.9.0): an integer from `min` to `max`, or absent.
+ */
+export function checkRange(name: string, value: number | undefined, min: number, max?: number): void {
+  if (value === undefined) return;
+  if (!Number.isSafeInteger(value) || value < min || (max !== undefined && value > max)) {
+    throw new RangeError(`${name} must be an integer from ${min}${max === undefined ? '' : ` to ${max}`}`);
+  }
+}

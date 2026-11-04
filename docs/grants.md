@@ -63,6 +63,10 @@ Reading (read tier):
   `evidenceStore.storedResourceHead(id)` names a resource's head, which may
   be a grant use (`entry_kind`, `record_id`).
 
+From 1.9.0 `allGrants({ status, bearer_key_id, limit })` and
+`allGrantUses(id, limit)` follow the pages, and a `limit` outside 1 to 500 is
+refused (`RangeError`) before anything is sent.
+
 `revokeGrant(id, reason)` revokes one (privileged): `reason` is stored as the
 revocation's `detail`, and the revocation's `reason` is `operator`. The NA
 also revokes a grant itself: `attestation_revoked`, `policy_deactivated`,

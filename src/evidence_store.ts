@@ -34,7 +34,7 @@ import type {
   ReviewSummary,
   ReviewVerdict, StoredRecord,
 } from './remediation.js';
-import { timestampOrder } from './validation.js';
+import { checkRange, timestampOrder } from './validation.js';
 import { parseExportLines } from './verify.js';
 import type {
   EntryKind,
@@ -847,6 +847,10 @@ export class EvidenceStoreClient {
    * (`reviewApprovalProblem`).
    */
   decideReview(reviewId: string, decision: ReviewDecision): Promise<ReviewDecided> {
+    // 1.9.0: a waiver's end is given exactly for a waiver; otherwise the NA refuses it, after a signed request.
+    if ((decision.verdict === 'waive_until') !== (decision.waive_until !== undefined)) {
+      return Promise.reject(new Error("a waiver's end (waive_until) is given exactly for the verdict waive_until"));
+    }
     const body: Record<string, unknown> = { verdict: decision.verdict };
     if (decision.waive_until !== undefined) {
       body['waive_until'] = decision.waive_until instanceof Date ? decision.waive_until.toISOString() : decision.waive_until;
@@ -1238,8 +1242,18 @@ export class EvidenceStoreClient {
     return this.http.adminPost<RetentionResult>('/admin/evidence/retention/apply', body);
   }
 
-  /** One page of the NA's signed store anchors, in order (admin, read tier; v1.2.0). */
+  /**
+   * One page of the NA's signed store anchors, in order (admin, read tier;
+   * v1.2.0). 1.9.0: a `limit` outside 1 to 1000, or a negative `after_anchor`,
+   * is refused (`RangeError`) before anything is sent.
+   */
   anchors(params: { after_anchor?: number; limit?: number } = {}): Promise<AnchorPage> {
+    try {
+      checkRange('after_anchor', params.after_anchor, 0);
+      checkRange('limit', params.limit, 1, MAX_PAGE);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     return this.http.adminGet<AnchorPage>('/admin/evidence/anchors', { ...params });
   }
 
@@ -1279,6 +1293,13 @@ export class EvidenceStoreClient {
    * `ClientOptions.timeout` for a large range.
    */
   auditPack(params: AuditPackParams = {}): Promise<AuditPackResponse> {
+    // 1.9.0: a store position below 1 is refused before anything is sent.
+    try {
+      checkRange('from_sequence', params.from_sequence, 1);
+      checkRange('until_sequence', params.until_sequence, 1);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     return this.http.adminPost<AuditPackResponse>('/admin/evidence/audit-pack', { ...params });
   }
 
