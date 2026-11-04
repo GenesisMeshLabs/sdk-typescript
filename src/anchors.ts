@@ -12,7 +12,7 @@
  * history, each anchor must be signed by the key valid at its `anchored_at`.
  */
 
-import { canonicalJson, copyPythonFloats, defineMember, sha256Hex, verifyCanonical } from './auth.js';
+import { canonicalJson, defineMember, sha256Hex, verifyCanonical } from './auth.js';
 import { entryDigest } from './canonical.js';
 import { naSignatureAt, type NAKeys } from './key-history.js';
 import type {
@@ -36,13 +36,16 @@ export interface StoreAnchor {
   signature?: Signature | null;
 }
 
-/** The form the NA signs: every field but `signature`, an absent previous digest left out. */
+/**
+ * The form the NA signs: every field but `signature`, an absent previous
+ * digest left out. An anchor holds integers only, written as integers, as the
+ * reference's model reads one: a position written `1.0` is 1 (1.9.0).
+ */
 export function anchorCanonical(anchor: StoreAnchor): string {
   const body: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(anchor)) {
     if (key !== 'signature' && value !== undefined && value !== null) defineMember(body, key, value);
   }
-  copyPythonFloats(anchor, body);
   return canonicalJson(body);
 }
 
