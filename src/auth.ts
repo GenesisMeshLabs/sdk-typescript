@@ -37,7 +37,8 @@ function asciiString(value: string): string {
   );
 }
 
-function pythonFloatRepr(value: number): string {
+/** Python's `repr()` of a float: the shortest round-trip digits, positional for exponents -4 to 15. */
+export function pythonFloatRepr(value: number): string {
   if (Object.is(value, -0)) return '-0.0';
   const [mantissa, expText] = value.toExponential().split('e');
   const exp = Number(expText);

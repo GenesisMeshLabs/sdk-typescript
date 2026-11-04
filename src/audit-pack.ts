@@ -17,7 +17,10 @@
 import { createHash } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
-import { canonicalJsonUnescaped, compareCodePoints, copyPythonFloats, defineMember, parseJson, verifyCanonical } from './auth.js';
+import {
+  canonicalJsonUnescaped, compareCodePoints, copyPythonFloats, defineMember, isParsedFloat, parseJson, pythonFloatRepr,
+  verifyCanonical,
+} from './auth.js';
 import { checkEventsAgainstAnchors, startingCheckpoint, verifyStoreAnchors, type StoreAnchor } from './anchors.js';
 import { agreementCanonical, attestationDigest, entryDigest, policyDigest, policySetDigest } from './canonical.js';
 import { validGrant, type CapabilityGrant } from './grants.js';
@@ -882,14 +885,18 @@ const validAgreementRecord = (v: unknown): boolean => isObject(v) && typeof v['a
  * control character (U+0000 to U+001F, U+007F to U+009F) and U+2028, U+2029
  * `\uXXXX` (upper-case hex). A string is written as itself, an integer in
  * decimal, a boolean `true` or `false`, an absent value empty, anything else
- * as canonical JSON (non-ASCII kept).
+ * as canonical JSON (non-ASCII kept). 1.9.0: a number read from a float
+ * literal is a Python float: in decimal while its value is an integer below
+ * 2^53, as Python writes it otherwise (`1e+16`).
  */
 export function reportCell(value: unknown): string {
   let raw: string;
   if (value === null || value === undefined) raw = '';
   else if (typeof value === 'boolean') raw = value ? 'true' : 'false';
   else if (typeof value === 'string') raw = value;
-  else if (typeof value === 'bigint' || (typeof value === 'number' && Number.isInteger(value))) raw = String(value);
+  else if (value instanceof PythonFloat) {
+    raw = Math.abs(value.value) < 2 ** 53 ? String(Math.trunc(value.value)) : pythonFloatRepr(value.value);
+  } else if (typeof value === 'bigint' || (typeof value === 'number' && Number.isInteger(value))) raw = String(value);
   else raw = canonicalJsonUnescaped(value);
   let out = '';
   for (const ch of raw) {
@@ -914,15 +921,74 @@ function table(headers: readonly string[], rows: readonly (readonly unknown[])[]
   ];
 }
 
-/** The reference's `str()` of a value read from a record (`None` when absent). */
+/**
+ * A number a record held as a float literal with an integral value (`1.0`,
+ * `1e16`): JavaScript reads it as an integer, Python as a float, and the
+ * report writes what Python does.
+ */
+class PythonFloat {
+  constructor(readonly value: number) {}
+}
+
+/** A member of a record as the report reads it: a float literal with an integral value stays a float. */
+function read(holder: unknown, key: string): unknown {
+  if (!isObject(holder) && !Array.isArray(holder)) return undefined;
+  const value = Object.hasOwn(holder, key) ? (holder as Record<string, unknown>)[key] : undefined;
+  return typeof value === 'number' && isParsedFloat(holder, key) ? new PythonFloat(value) : value;
+}
+
+/**
+ * The reference's `str()` of a value read from a record (`None` when absent).
+ * 1.9.0: a float as Python writes it (`1.0`, `1e-07`), and a list or an
+ * object as its `repr()` (`{'why': ['x']}`).
+ */
 function pyStr(value: unknown): string {
   if (value === null || value === undefined) return 'None';
   if (typeof value === 'boolean') return value ? 'True' : 'False';
+  if (typeof value === 'string') return value;
+  if (value instanceof PythonFloat) return pythonFloatRepr(value.value);
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : pythonFloatRepr(value);
+  if (Array.isArray(value)) return `[${value.map((_, i) => pyRepr(read(value, String(i)))).join(', ')}]`;
+  if (isObject(value)) {
+    return `{${Object.keys(value).map(k => `${pyStringRepr(k)}: ${pyRepr(read(value, k))}`).join(', ')}}`;
+  }
   return String(value);
+}
+
+/** Python's `repr()`: a string quoted and escaped, anything else as `str()` writes it. */
+function pyRepr(value: unknown): string {
+  return typeof value === 'string' ? pyStringRepr(value) : pyStr(value);
+}
+
+/** Characters Python's `str.isprintable()` refuses: other (controls, format, surrogates, private use, unassigned) and separators. */
+const NOT_PRINTABLE = /[\p{C}\p{Z}]/u;
+
+/**
+ * Python's `repr()` of a string: in single quotes (double when it holds a
+ * single quote and no double one), a backslash, the quote, tab, line feed and
+ * return escaped, and any other character Python does not print written
+ * `\xhh`, `\uhhhh` or `\Uhhhhhhhh`.
+ */
+function pyStringRepr(s: string): string {
+  const quote = s.includes("'") && !s.includes('"') ? '"' : "'";
+  let out = quote;
+  for (const ch of s) {
+    const code = ch.codePointAt(0)!;
+    if (ch === quote || ch === '\\') out += '\\' + ch;
+    else if (ch === '\t') out += '\\t';
+    else if (ch === '\n') out += '\\n';
+    else if (ch === '\r') out += '\\r';
+    else if (code < 0x20 || code === 0x7f || (code > 0x7f && NOT_PRINTABLE.test(ch))) {
+      out += code <= 0xff ? `\\x${code.toString(16).padStart(2, '0')}`
+        : code <= 0xffff ? `\\u${code.toString(16).padStart(4, '0')}` : `\\U${code.toString(16).padStart(8, '0')}`;
+    } else out += ch;
+  }
+  return out + quote;
 }
 
 /** Python truthiness of a value read from JSON. */
 function truthy(value: unknown): boolean {
+  if (value instanceof PythonFloat) return value.value !== 0;
   if (value === null || value === undefined || value === false || value === 0 || value === '') return false;
   if (Array.isArray(value)) return value.length > 0;
   if (isObject(value)) return Object.keys(value).length > 0;
@@ -977,7 +1043,7 @@ export function renderReport(input: {
   const judgements = new Map<string, Record<string, unknown>>();
   for (const e of entries) {
     if (e.entry.entry_kind === 'judgement') {
-      judgements.set(`${pyStr(e.payload['subject_kind'])}\u0000${pyStr(e.payload['subject_id'])}`, e.payload);
+      judgements.set(`${pyStr(read(e.payload, 'subject_kind'))}\u0000${pyStr(read(e.payload, 'subject_id'))}`, e.payload);
     }
   }
   let period = '';
@@ -1000,11 +1066,12 @@ export function renderReport(input: {
     `Verified by the Network Authority when it wrote the pack, against its own anchors: **${truthy(checks['verified']) ? 'yes' : 'no'}**.`, '',
   ];
   const failures = Array.isArray(checks['failures']) ? checks['failures'].filter(isObject) : [];
-  lines.push(...table(['Reason', 'File', 'Entry', 'Detail'], failures.map(f => [f['reason'], f['file'], f['store_sequence'], f['detail']])));
+  lines.push(...table(['Reason', 'File', 'Entry', 'Detail'],
+    failures.map(f => [read(f, 'reason'), read(f, 'file'), read(f, 'store_sequence'), read(f, 'detail')])));
   const counts = isObject(checks['counts']) && truthy(checks['counts']) ? checks['counts'] : {};
   lines.push('## Totals', '');
   lines.push(...table(['Records', 'Count'],
-    Object.keys(counts).sort(compareCodePoints).filter(k => truthy(counts[k])).map(k => [k, counts[k]])));
+    Object.keys(counts).sort(compareCodePoints).filter(k => truthy(read(counts, k))).map(k => [k, read(counts, k)])));
 
   const changes: unknown[][] = [];
   const denials: unknown[][] = [];
@@ -1022,56 +1089,59 @@ export function renderReport(input: {
   };
   for (const e of entries) {
     const p = e.payload;
+    const P = (name: string) => read(p, name);
     const kind = e.entry.entry_kind;
     const seq = e.entry.store_sequence;
     if (kind === 'execution') {
-      changes.push([seq, kind, p['resource_id'], p['resource_action'], p['executed_at'], 'prior_decision',
-        or(stateOf(p['decision_id']), 'recorded'), p['executor_sovereign_id']]);
+      changes.push([seq, kind, P('resource_id'), P('resource_action'), P('executed_at'), 'prior_decision',
+        or(stateOf(P('decision_id')), 'recorded'), P('executor_sovereign_id')]);
     } else if (kind === 'grant_execution') {
       // v1.6.0: a change made under a grant, governed by it.
-      changes.push([seq, kind, p['resource_id'], p['resource_action'], p['executed_at'], 'grant', 'recorded',
-        p['executor_sovereign_id']]);
+      changes.push([seq, kind, P('resource_id'), P('resource_action'), P('executed_at'), 'grant', 'recorded',
+        P('executor_sovereign_id')]);
     } else if (kind === 'grant') {
-      grants.push([seq, p['grant_id'], p['bearer_sovereign_id'], p['capabilities'], p['valid_from'], p['valid_until'],
-        p['max_uses']]);
+      grants.push([seq, P('grant_id'), P('bearer_sovereign_id'), P('capabilities'), P('valid_from'), P('valid_until'),
+        P('max_uses')]);
     } else if (kind === 'grant_revocation') {
-      grantRevocations.push([seq, p['grant_id'], p['reason'], p['revoked_at']]);
+      grantRevocations.push([seq, P('grant_id'), P('reason'), P('revoked_at')]);
     } else if (kind === 'observation' || kind === 'break_glass') {
-      const recordId = pyStr(or(p['observation_id'], p['break_glass_id']));
+      const recordId = pyStr(or(P('observation_id'), P('break_glass_id')));
       const judgement = judgements.get(`${kind}\u0000${recordId}`);
-      let state = judgement ? stateOf(judgement['judgement_id']) : undefined;
+      let state = judgement ? stateOf(read(judgement, 'judgement_id')) : undefined;
       if (state === undefined || state === null) {
         state = judgement === undefined ? 'observed'
           : (judgement['governed_by'] === 'prior_decision' || judgement['governed_by'] === 'grant')
             && judgement['verdict'] !== 'deny' ? 'matched'
-            : ({ allow: 'judged_allowed', deny: 'judged_denied' } as Record<string, string>)[pyStr(judgement['verdict'])]
+            : ({ allow: 'judged_allowed', deny: 'judged_denied' } as Record<string, string>)[pyStr(read(judgement, 'verdict'))]
               ?? 'indeterminate';
       }
-      changes.push([seq, kind, p['resource_id'], or(p['action'], p['resource_action']),
-        or(p['changed_at'], p['changed_not_after'], p['executed_at']), judgement ? judgement['governed_by'] : null, state, p['actor']]);
+      changes.push([seq, kind, P('resource_id'), or(P('action'), P('resource_action')),
+        or(P('changed_at'), P('changed_not_after'), P('executed_at')), judgement ? read(judgement, 'governed_by') : null, state,
+        P('actor')]);
       if (kind === 'break_glass') {
-        breakGlass.push([seq, p['resource_id'], p['capability'], p['executed_at'], p['evaluation_failure'], p['justification']]);
+        breakGlass.push([seq, P('resource_id'), P('capability'), P('executed_at'), P('evaluation_failure'), P('justification')]);
       }
     } else if (kind === 'decision') {
       const decision = (truthy(p['decision']) ? p['decision'] : {}) as Record<string, unknown>;
-      if (decision['authorized'] === false) denials.push([seq, 'decision', decision['decision_id'], decision['denial_reason']]);
+      if (decision['authorized'] === false) {
+        denials.push([seq, 'decision', read(decision, 'decision_id'), read(decision, 'denial_reason')]);
+      }
     } else if (kind === 'judgement' && (p['verdict'] === 'deny' || p['verdict'] === 'indeterminate')) {
-      const reason = or(p['reason'], '');
-      denials.push([seq, 'judgement', p['judgement_id'], `${pyStr(p['verdict'])}: ${typeof reason === 'string' ? reason : pyStr(reason)}`]);
+      denials.push([seq, 'judgement', P('judgement_id'), `${pyStr(P('verdict'))}: ${pyStr(or(P('reason'), ''))}`]);
     } else if (kind === 'remediation') {
-      remediations.push([seq, p['subject_kind'], p['subject_id'], p['outcome'], p['steps'], p['remediated_at'], p['executor_sovereign_id']]);
+      remediations.push([seq, P('subject_kind'), P('subject_id'), P('outcome'), P('steps'), P('remediated_at'), P('executor_sovereign_id')]);
     } else if (kind === 'review') {
-      reviews.push([seq, p['subject_id'], p['verdict'], p['requested_by'], p['requester_holder'], p['decided_by'],
-        p['decider_holder'], p['decided_at']]);
+      reviews.push([seq, P('subject_id'), P('verdict'), P('requested_by'), P('requester_holder'), P('decided_by'),
+        P('decider_holder'), P('decided_at')]);
     } else if (kind === 'quarantine') {
-      quarantined.push([seq, p['record_kind'], p['resource_id'], p['rejection_code'], p['quarantined_at']]);
+      quarantined.push([seq, P('record_kind'), P('resource_id'), P('rejection_code'), P('quarantined_at')]);
     } else if (kind === 'key_succession' || kind === 'archive') {
-      others.push([seq, kind, or(p['succession_id'], p['archive_id']), or(p['effective_at'], p['archived_at'])]);
+      others.push([seq, kind, or(P('succession_id'), P('archive_id')), or(P('effective_at'), P('archived_at'))]);
     }
   }
   const noticeRows = Object.keys(notices).sort(compareCodePoints).filter(k => isObject(notices[k])).map(k => {
     const v = notices[k] as Record<string, unknown>;
-    return [k, v['notified_at'], v['notified_by']];
+    return [k, read(v, 'notified_at'), read(v, 'notified_by')];
   });
   const sections: Array<[string, string[], unknown[][]]> = [
     ['Changes', ['Entry', 'Kind', 'Resource', 'Action', 'Changed at', 'Governed by', 'State', 'Actor'], changes],
@@ -1144,43 +1214,123 @@ export function parseRfc3339(value: string): string {
   return isoMicros((date.getTime() - offsetMinutes * 60_000) * 1000 + micro);
 }
 
-/** RFC 4180 rows of a CSV text (the reference reads it with Python's `csv`); empty lines are skipped. */
+/** Python's `csv.field_size_limit()`: the longest field it reads, in code points. */
+const CSV_FIELD_LIMIT = 131072;
+
+/**
+ * The rows of a CSV text as Python's `csv.reader` reads it (the excel
+ * dialect, not strict; 1.9.0) from lines split at LF, as `io.StringIO`
+ * splits them: a `"` opens a quoted field only at the start of a field, a
+ * doubled one inside a quoted field is one, and a quote closing a field
+ * followed by other text joins it. An empty line is a row of no fields. Where
+ * Python raises `csv.Error`, it throws: a carriage return not followed by the
+ * end of its line outside quotes, and a field longer than 131072 code points.
+ */
 function csvRows(input: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let field = '';
-  let quoted = false;
-  let touched = false;
-  const endRow = () => {
-    if (touched || row.length > 0) row.push(field);
-    if (row.length > 0) rows.push(row);
-    row = [];
-    field = '';
-    touched = false;
-  };
-  for (let i = 0; i < input.length; i++) {
-    const ch = input[i]!;
-    if (quoted) {
-      if (ch === '"' && input[i + 1] === '"') { field += '"'; i++; }
-      else if (ch === '"') quoted = false;
-      else field += ch;
-    } else if (ch === '"') {
-      quoted = true;
-      touched = true;
-    } else if (ch === ',') {
-      row.push(field);
-      field = '';
-      touched = true;
-    } else if (ch === '\n' || ch === '\r') {
-      if (ch === '\r' && input[i + 1] === '\n') i++;
-      endRow();
-    } else {
-      field += ch;
-      touched = true;
-    }
+  const lines: string[] = [];
+  for (let at = 0; at < input.length;) {
+    const lf = input.indexOf('\n', at);
+    const next = lf < 0 ? input.length : lf + 1;
+    lines.push(input.slice(at, next));
+    at = next;
   }
-  endRow();
+  const EOL = null;
+  type State = 'start_record' | 'start_field' | 'in_field' | 'in_quoted_field' | 'quote_in_quoted_field' | 'eat_crnl';
+  const rows: string[][] = [];
+  let line = 0;
+  while (line < lines.length) {
+    const fields: string[] = [];
+    let field = '';
+    let length = 0;
+    let state: State = 'start_record';
+    const save = () => {
+      fields.push(field);
+      field = '';
+      length = 0;
+    };
+    const add = (ch: string) => {
+      length += 1;
+      if (length > CSV_FIELD_LIMIT) throw new Error(`a CSV field is longer than ${CSV_FIELD_LIMIT} characters`);
+      field += ch;
+    };
+    const endField = (ch: string | null) => {
+      save();
+      state = ch === EOL ? 'start_record' : 'eat_crnl';
+    };
+    const process = (ch: string | null) => {
+      switch (state) {
+        case 'start_record':
+          if (ch === EOL) return;
+          if (ch === '\n' || ch === '\r') {
+            state = 'eat_crnl';
+            return;
+          }
+          state = 'start_field';
+          process(ch);
+          return;
+        case 'start_field':
+          if (ch === '\n' || ch === '\r' || ch === EOL) endField(ch);
+          else if (ch === '"') state = 'in_quoted_field';
+          else if (ch === ',') save();
+          else {
+            add(ch);
+            state = 'in_field';
+          }
+          return;
+        case 'in_field':
+          if (ch === '\n' || ch === '\r' || ch === EOL) endField(ch);
+          else if (ch === ',') {
+            save();
+            state = 'start_field';
+          } else add(ch);
+          return;
+        case 'in_quoted_field':
+          if (ch === '"') state = 'quote_in_quoted_field';
+          else if (ch !== EOL) add(ch);
+          return;
+        case 'quote_in_quoted_field':
+          if (ch === '"') {
+            add('"');
+            state = 'in_quoted_field';
+          } else if (ch === ',') {
+            save();
+            state = 'start_field';
+          } else if (ch === '\n' || ch === '\r' || ch === EOL) endField(ch);
+          else {
+            add(ch);
+            state = 'in_field';
+          }
+          return;
+        default:
+          if (ch === EOL) state = 'start_record';
+          else if (ch !== '\n' && ch !== '\r') throw new Error('a carriage return inside a CSV line, outside quotes');
+      }
+    };
+    do {
+      // The text ends inside a quoted field: the field ends with it.
+      if (line === lines.length) {
+        save();
+        break;
+      }
+      for (const ch of lines[line++]!) process(ch);
+      process(EOL);
+    } while (state !== 'start_record');
+    rows.push(fields);
+  }
   return rows;
+}
+
+/** Python's `str.isspace()` of one character: what `str.strip()` trims. */
+const PYTHON_SPACE = /[\t\n\v\f\r\x1c-\x1f\x85\p{Zs}\u2028\u2029]/u;
+
+/** A value trimmed as Python's `str.strip()` trims it (1.9.0). */
+function pythonStrip(value: string): string {
+  const chars = Array.from(value);
+  let start = 0;
+  let end = chars.length;
+  while (start < end && PYTHON_SPACE.test(chars[start]!)) start++;
+  while (end > start && PYTHON_SPACE.test(chars[end - 1]!)) end--;
+  return chars.slice(start, end).join('');
 }
 
 /**
@@ -1194,8 +1344,10 @@ export function parseChanges(input: string | unknown, options: { csv?: boolean }
   let rows: unknown[];
   if (options.csv) {
     if (typeof input !== 'string') throw new Error('a CSV changes file is text');
+    // The header is the first row, a blank one included (no columns), as Python's csv.DictReader reads it;
+    // blank rows after it are skipped.
     const [header, ...records] = csvRows(input);
-    rows = header === undefined ? [] : records.map(record => {
+    rows = header === undefined ? [] : records.filter(record => record.length > 0).map(record => {
       const row: Record<string, unknown> = {};
       header.forEach((name, i) => defineMember(row, name, i < record.length ? record[i] : null));
       return row;
@@ -1213,7 +1365,7 @@ export function parseChanges(input: string | unknown, options: { csv?: boolean }
       const raw = Object.hasOwn(row, name) ? row[name] : null;
       if (raw === null || raw === undefined) return null;
       if (typeof raw !== 'string') throw new Error(`change ${index}: ${name} must be a string`);
-      return raw.trim() || null;
+      return pythonStrip(raw) || null;
     };
     const resource = value('resource_id');
     const action = value('action');
