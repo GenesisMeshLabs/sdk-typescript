@@ -18,3 +18,10 @@ updates:
       npm-development:
         dependency-type: development
         patterns: ["*"]
+    ignore:
+      # ts-jest supports TypeScript below 7 (its peer range): a major update cannot install until it does.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+      # The types of the oldest Node.js the package supports (engines: >=22), so it uses nothing newer.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]

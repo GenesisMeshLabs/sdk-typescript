@@ -65,12 +65,12 @@
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
-    "@microsoft/api-extractor": "7.59.4",
+    "@microsoft/api-extractor": "7.60.1",
     "@types/jest": "30.0.0",
     "@types/node": "22.20.4",
     "fast-check": "4.10.2",
     "jest": "30.5.2",
-    "ts-jest": "29.4.14",
+    "ts-jest": "29.4.15",
     "typescript": "5.9.3"
   },
   "overrides": {
