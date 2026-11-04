@@ -40,7 +40,7 @@ import { metadataProblem, outOfBandCanonical, timeOf, wire } from './out-of-band
 import {
   nonCanonicalFields, receivedCanonical, signedAsReceived, unknownFields, withoutUnknownFields,
 } from './strict.js';
-import { isObject, timestamp, timestampMicros } from './validation.js';
+import { isObject, sixDigits, timestamp, timestampMicros } from './validation.js';
 import type { AppliedPolicy, GateResult, ResourceAction, Signature } from './types.js';
 
 // ── Limits ───────────────────────────────────────────────────────────────────
@@ -756,6 +756,13 @@ function micros(value: string): number {
   return timestampMicros(value);
 }
 
+/** A time the caller of `useProblem` gives, in microseconds; throws for one it cannot read (1.9.0). */
+function callerMicros(value: string, field: string): number {
+  const at = timestampMicros(sixDigits(value));
+  if (Number.isNaN(at)) throw new Error(`check.${field} is not a timestamp: ${value}`);
+  return at;
+}
+
 /** A time as the reference prints it: UTC, microseconds when not zero, `Z`. */
 function iso(at: number): string {
   const base = new Date(Math.floor(at / 1000)).toISOString().slice(0, 19);
@@ -775,6 +782,14 @@ function iso(at: number): string {
  */
 export function useProblem(use: GrantExecutionEvidence, check: UseCheck): UseProblem | null {
   const { grant, previous } = check;
+  // 1.9.0: the caller's times first: one it gives must be readable, or its rule would be skipped.
+  if (previous !== null) {
+    callerMicros(previous.time_token_issued_at, 'previous.time_token_issued_at');
+    callerMicros(previous.executed_at, 'previous.executed_at');
+  }
+  if (check.tokenHead !== null) callerMicros(check.tokenHead.executed_at, 'tokenHead.executed_at');
+  if (check.recordedAt !== null) callerMicros(check.recordedAt, 'recordedAt');
+  if (check.revokedAt !== null) callerMicros(check.revokedAt, 'revokedAt');
   const token = use.time_token;
   const executed = micros(use.executed_at);
   const tokenIssued = micros(token.issued_at);
