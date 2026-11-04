@@ -7,6 +7,79 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [1.9.0] - 2026-11-04
+
+### Security
+
+- **A record without its own time is signed by no key of the NA's key history.** `verifyDecisionSignature`, `verifyPolicySignature`, `verifyJustificationSignature`, `verifyAttestationSignature`, `verifyTreatySignature`, `verifyRevocationFeedSignature`, `revocationFeedSigner` and `verifyRetentionCheckpoint` took every key of the history for a record whose time was null, so a succeeded key's signature over such a record verified forever. The reference's models require these times: a record whose own time is not a timestamp now verifies under no key of a history. A list of keys is still valid at every time.
+
+### Added
+
+- `GrantsClient.allGrants(params)` and `allGrantUses(grantId, limit)`: every grant, or a grant's whole use chain, following the pages; a cursor that does not advance throws.
+- `GrantSyncResult.timeTokenRefusal`: a time token the NA refused for a reason other than the grant's end, such as `time_token_request_stale` (this clock is more than 300 seconds off the NA's).
+- `GrantStateNotKeptError.actionError`: when the action itself failed, its error; `result.use` is then its failure use.
+- **Fields the NA sends that the types lacked:**
+  - `AttestationRecord.reissued_from` and `superseded_by` (1.8.0): the copy an attestation re-issues and the copy that re-issued it;
+  - `AttestationRevocation.lineage_ids` (1.8.0): every copy of the re-issue lineage the revocation reached;
+  - `EvidenceStoreStatus.evidence_grants`, `grants_issued`, `grants_active`, `grants_revoked` and `grant_uses` (1.6.0);
+  - `AnchorSummary.chain`: the NA's own verification of its anchor chain, as `evidenceStore.verify()` returns it.
+
+### Changed
+
+- **Arguments out of range are refused before anything is sent** (`RangeError`), where the NA refused them after a signed request:
+  - `evidenceStore.anchors`: a `limit` outside 1 to 1000, or a negative `after_anchor` (so `allAnchors` too);
+  - `evidenceStore.auditPack`: a `from_sequence` or `until_sequence` below 1;
+  - `grants.listGrants` and `listGrantUses`: a `limit` outside 1 to 500.
+- **`evidenceStore.decideReview`** refuses a waiver's end (`waive_until`) given for another verdict, or the verdict `waive_until` without one, before anything is sent.
+- **`RemediationNotRecordedError.disabled`** says whether the denied version was disabled, and its docs say what to do in each case, and which failures of the rotation's own governed action throw as `governedAction` does.
+
+Refused before anything runs, as the .NET SDK refuses them (T2 of the parity plan):
+
+- **`cancelByRotatingForward`:** a rotation whose action is other than `rotate` or `update`, or which names another resource than the remediation's (the resource was replaced silently).
+- **`urgentAction`:** an empty emergency capability, or no emergency policies, before anything is evaluated.
+
+### Fixed
+
+Found by comparing this SDK with the Python reference and the .NET SDK on the reference-judged audit pack, report, changes file and anchor cases:
+
+- **A report writes numbers and IDs as the reference does.** A number written as a float stays one: a cell writes `1e+16` where its value is an integer of 2^53 or more (it wrote the digits), and an ID or a denial reason `1.0`, not `1`, so an observation keyed `1.0` finds its judgement. A reason or ID that is a list or an object is Python's `str()` of it (`{'why': ['x']}`, where it wrote `[object Object]` or the items joined by commas). A pack whose report holds such a value no longer fails as `report_mismatch`.
+- **A CSV changes file is read as Python's `csv` module reads it.** A quote opens a quoted field only at the start of a field (elsewhere it is text: `r1, "rotate"` is `"rotate"`, where it read `rotate`), a quote closing a field followed by other text joins it, and the header is the first line, a blank one included (it skipped one). A carriage return inside a line outside quotes, and a field longer than 131072 characters, are refused, as the reference's `csv.Error`; a lone carriage return no longer ends a line.
+- **A changes file's values are trimmed as Python trims them:** U+001C to U+001F and U+0085 included, U+FEFF kept.
+- **An audit pack manifest whose signature holds a field besides `key_id` and `sig`** is not in the NA's form: `manifest_invalid`, as the reference reads it (it was accepted).
+- **A store anchor whose integers are written as floats** (`1.0`) verifies, as the reference reads it; its signature failed.
+- **A failed action's use is persisted.** `GrantHolder.act` recorded a failed action as a `failure` use, which moves the chain, but did not persist the state after it; a process that stopped then signed that place in the chain again on resume.
+- **A resumed holder takes up a kept use.** On its first change a holder takes up the latest use of its grant the record outbox holds beyond its state (kept before the process stopped, the state unpersisted), so no place in the chain is signed twice.
+- **A refused time token does not stop the upload.** `sync` threw on a time token the NA refused for another reason than the grant's end (such as `time_token_request_stale`) before it uploaded the record outbox; it now reports it (`timeTokenRefusal`) and uploads. `act` threw it when the time token's uses were spent; it now falls back, and the NA decides.
+- **A retired bearer key is a refusal from the first call.** `act` threw the NA's `ConflictError` (`grant_bearer_key_retired`) when it asked for a fresh time token, and `GrantRefusedError` on later calls; it is `GrantRefusedError` from the first.
+- **A use without a resource is outside an empty prefix.** Under a bearer key with the empty resource prefix, `act` let a request without a resource run and `verifyEvidenceEvents` let such a use through; the reference refuses both as `grant_use_out_of_scope`.
+- **A grant use behind one that never took its place in the chain is a dead letter.** The record outbox retried a use the NA refused for a chain gap (`grant_use_chain_gap`) forever, even when the gap was left by an earlier use of the grant that the outbox holds as a dead letter and that never took its place: one refused without a quarantine entry, or quarantined as a conflict or a chain mismatch. Every `ignoreBackoff` flush then ended on it. Such a use is now a dead letter too (`evidence_predecessor_dead_lettered`, the code the evidence outbox gives a record behind a refused one), with the earlier use named, and the flush goes on. A gap behind a use the NA kept in the chain, behind another grant's dead letter or a later use's, or one the outbox cannot be read to look behind, is still retried.
+- **A grant's uses are sent in their chain's order** by `flushRecords`, whatever order they were kept in, as when two uses were kept at once offline.
+
+Where the .NET SDK reads as the references do (T2 of the parity plan):
+
+- **`parseRfc3339`** refuses a time that falls outside the years 1 to 9999 once in UTC (`0001-01-01T00:00:00+00:01`), which it printed out of range; the reference cannot convert one (`OverflowError`).
+- **A key's placement times** (`registered_at_time`, `retired_at_time`) with more than six fraction digits, as .NET's round-trip format writes them, are read to the microsecond, as the references read them; `verifyEvidenceEvents` threw for one.
+- **`useProblem` throws for a time its caller gives that it cannot read** (`revokedAt`, `recordedAt`, `tokenHead.executed_at`, `previous`'s times), where it skipped the rule that time is for, so an unreadable revocation time let a use through. Seven fraction digits are read to the microsecond.
+- **`checkEventsAgainstAnchors`** refuses an anchor that is not well formed, as `verifyStoreAnchors` does, so a hand-built one never counts as matched.
+- **The same verifiers no longer throw for a record whose time is absent or not a string** under a key history (`TypeError` from the key lookup): it verifies under no key.
+- **Timestamps of the year 0000 are refused,** as the reference refuses them: `Date.UTC` reads the year 0000 as 1900, so a record dated `0000-…` passed the shape checks.
+- **`cancelByRotatingForward` disables only the version the change made.** When the state carries `change_version_id` (as the due queue's state does), another `deniedVersionId` is refused before anything runs (`remediation_subject_mismatch`). Before, it was disabled, then the NA refused the record for good and quarantined it, leaving the denied version enabled.
+- **`cancelByRotatingForward` never disables after a rotation the NA refused for good.** With an evidence outbox, a rotation whose evidence is a dead letter can never be cited by a remediation record: it now throws `RemediationNotRecordedError` before the disable.
+- **`policySectionIssues` refuses `stands_for` with a `*` anywhere, or blank,** as the reference does (`invalid_emergency`). Only a final `.*` was refused.
+- **`reviewApprovalProblem` reads a review's recorded times (`decided_at`, `requested_at`) first, as its model does, and takes each only as a UTC timestamp in the form the NA writes** (`Z`, `+00:00` or `-00:00`). Another time gives `the review's decided_at is not a UTC timestamp`; the reference's model also reads spellings the NA never writes (a space, a lower-case `t`, `+0000`). The 300-second bound was skipped when the time could not be read, so such a review passed, and a time without an offset or in another zone was taken.
+- **Due times refuse a date that does not exist and a time outside the years 1 to 9999,** as the reference does. `remediationDueAt('2026-02-29T00:00:00Z', 0)` gave `2026-03-01T00:00:00Z`, a due time past 9999 printed as `+010000-…`, and `dueAfterDenial` gave the earlier due time when the decision's grace ran past 9999. `rfc3339` returns null for a time that falls outside the years 1 to 9999 once read in UTC.
+- **Due times and `rfc3339` keep every microsecond.** A time before 1685 or after 2255 lost its last digits (`0885-08-29T21:51:35.999999Z` printed as `…:36Z`).
+- **Failover moves past a failed endpoint once.** Requests that failed at one endpoint together each moved the client on, so two of them skipped the next endpoint, a healthy one too. A request now moves past only the endpoint it was sent to, and only while the client is still there; requests waiting on one NA-key lookup that failed move once.
+- **A refused observation in a batch keeps the NA's details:** its quarantine entry (`last_error.quarantine_id`), as when it is refused alone.
+- **An outbox removes a record only on an answer that admits it.** A 2xx answer without a status the SDK knows (`null`, `{}`, an unknown status) removed the record as admitted, and `null` then made `flushRecords` throw a `TypeError`; the record now stays pending with a backoff (`response_body_unreadable`), and a resubmission is a duplicate when the NA holds it.
+- **A batch answer is read whole, as the NA sends it:** each result names one observation of the batch by its index, none twice, each observation has one, and each status is one the NA sends. Any other answer (no `results`, a result for no observation or for one already answered, a missing result, an unknown status) leaves the whole batch pending with a backoff and ends the run, where it took one record for another's, left records unmarked, or threw a `TypeError`. `submitObservations` refuses an answer without `results` (`response_body_unreadable`).
+- **`ObservationRecorder.record` refuses in the NA's order:** JSON the NA cannot read (a lone surrogate, in a time too) before a change time it cannot read, and a time it cannot read before the rule on which change times are given.
+
+### Documentation
+
+- `GrantHolder`: any other error of the governed action under a fallback (a refused evaluation, a decision that fails verification) is thrown as it is; the class comment said `GrantRefusedError`.
+- `GrantUseSummary`: once retention has removed a use's store entry, the NA answers `recorded_at` and `outcome` as null; the types keep them as strings until a major release can widen them.
+
 ## [1.8.1] - 2026-10-24
 
 ### Added
