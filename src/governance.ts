@@ -750,11 +750,19 @@ export async function cancelByRotatingForward<T>(
   }
   const secret = remediationSecretProblem({ disabled_version_id: denied, detail: options.detail });
   if (secret) throw new OutOfBandRecordError(secret, 'remediation_secret_material');
+  const { resource_action = 'rotate', ...rotation } = options.rotation;
+  // 1.9.0: a forward rotation rotates or updates the remediation's resource; anything else is refused before it runs.
+  if (resource_action !== 'rotate' && resource_action !== 'update') {
+    throw new Error(`a forward rotation's action is rotate or update, not ${String(resource_action)}`);
+  }
+  const named = (rotation as { resource_id?: unknown }).resource_id;
+  if (named !== undefined && named !== subject.resource_id) {
+    throw new Error(`the rotation's resource is the remediation's (${subject.resource_id}), not ${String(named)}`);
+  }
   // A record outbox that cannot be read fails here, before anything runs.
   if (clients.evidenceStore.recordOutbox) await clients.evidenceStore.recordOutbox.list();
 
   let rotated: RotatedVersion<T> | undefined;
-  const { resource_action = 'rotate', ...rotation } = options.rotation;
   const result = await governedAction(clients, recorder, {
     ...rotation, resource_id: subject.resource_id, resource_action,
   } as GovernedActionParams, async (decision: BoundaryDecision) => {
@@ -851,6 +859,9 @@ export async function urgentAction<T>(
   action: BreakGlassAction<T>,
 ): Promise<UrgentActionResult<T>> {
   const { emergency, breakGlass: _ignored, ...ordinary } = params;
+  // 1.9.0: refused before anything is evaluated.
+  if (typeof emergency?.capability !== 'string' || !emergency.capability) throw new Error('the emergency capability is required');
+  if (!Array.isArray(emergency.expectedPolicies)) throw new Error('the emergency policies are required');
   const parameter = emergency.justificationParameter ?? 'justification';
   const urgent: GovernedActionParams & { breakGlass: BreakGlassOptions } = {
     ...ordinary,

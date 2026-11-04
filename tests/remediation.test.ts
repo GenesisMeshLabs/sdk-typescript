@@ -561,7 +561,13 @@ describe('cancelByRotatingForward', () => {
     await expect(run({ ...due, change_id: null })).rejects.toMatchObject({ code: 'remediation_subject_not_found' });
     await expect(run(due, { deniedVersionId: '-----BEGIN PRIVATE KEY-----' }))
       .rejects.toMatchObject({ code: 'remediation_secret_material' });
+    // 1.9.0: a rotation of another action, or of another resource, is refused before it runs.
+    await expect(run(due, { rotation: { ...x.options.rotation, resource_action: 'delete' } })).rejects.toThrow('rotate or update');
+    await expect(run(due, { rotation: { ...x.options.rotation, resource_id: 'kv:v/other' } }))
+      .rejects.toThrow("the rotation's resource is the remediation's");
     expect(x.steps).toEqual([]);
+    expect((await run(due, { rotation: { ...x.options.rotation, resource_id: 'kv:v/s', resource_action: 'update' } })).remediation)
+      .toMatchObject({ steps: 'rotate_forward_then_disable' });
   });
 
   it('never disables after a rotation it cannot record', async () => {
@@ -667,6 +673,17 @@ describe('urgentAction', () => {
     };
     return { ...x, outbox, evaluated, submitBreakGlass, action, params };
   }
+
+  it('refuses an empty emergency capability, or no emergency policies, before anything is evaluated (1.9.0)', async () => {
+    const x = setup(async () => evaluation(false));
+    await expect(urgentAction(x.gm, x.recorder, { ...x.params, emergency: { ...x.params.emergency, capability: '' } }, x.action))
+      .rejects.toThrow('the emergency capability is required');
+    await expect(urgentAction(x.gm, x.recorder,
+      { ...x.params, emergency: { ...x.params.emergency, expectedPolicies: undefined as never } }, x.action))
+      .rejects.toThrow('the emergency policies are required');
+    expect(x.evaluated).not.toHaveBeenCalled();
+    expect(x.action).not.toHaveBeenCalled();
+  });
 
   it('runs under the ordinary capability when it is allowed', async () => {
     const allowed = await evaluation(false);
