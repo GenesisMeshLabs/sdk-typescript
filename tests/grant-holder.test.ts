@@ -1,6 +1,6 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import {
-  GenesisMeshClient, GrantHolder, GrantRefusedError, GrantUnusableError, MemoryOutbox, grantRecordCanonical,
+  GenesisMeshClient, GrantHolder, GrantRefusedError, GrantStateNotKeptError, GrantUnusableError, MemoryOutbox, grantRecordCanonical,
   grantUseDigest, pythonTimestamp, revocationFeedCanonical, seedSigner, signCanonical, verifyGrantUse,
   verifyTimeTokenRequest,
 } from '../src/index.js';
@@ -33,6 +33,8 @@ class FakeNA {
   uses: unknown[] = [];
   breakGlass: unknown[] = [];
   tokenRefusal: string | null = null;
+  /** The status of the refusal: 409 for the grant's end, 422 for a request the NA cannot take now. */
+  tokenRefusalStatus = 409;
   /** Refuse the next use for good: the NA quarantines it. */
   quarantineNext: string | null = null;
   revokedGrants: string[] = [];
@@ -49,7 +51,7 @@ class FakeNA {
       case '/grants/time-tokens': {
         const request = body.request as TimeTokenRequest;
         if (!verifyTimeTokenRequest(request, BEARER.pubBase64)) return reply(422, { error: { code: 'time_token_request_invalid_signature', message: 'no' } });
-        if (this.tokenRefusal) return reply(409, { error: { code: this.tokenRefusal, message: 'refused' } });
+        if (this.tokenRefusal) return reply(this.tokenRefusalStatus, { error: { code: this.tokenRefusal, message: 'refused' } });
         const token = await naSigned<TimeToken>({
           time_token_id: `token-${request.use_sequence}-${this.clock}`, grant_id: request.grant_id,
           use_sequence: request.use_sequence,
@@ -288,7 +290,7 @@ describe('GrantHolder: acting within a grant offline (v1.6.0)', () => {
   it('reports an unreachable NA from sync without throwing', async () => {
     const x = await setup();
     x.na.offline = true;
-    expect(await x.holder.sync()).toEqual({ reachable: false, timeToken: null, unusable: null, flushed: null });
+    expect(await x.holder.sync()).toEqual({ reachable: false, timeToken: null, unusable: null, timeTokenRefusal: null, flushed: null });
   });
 
   it('persists its state after every change and resumes from it', async () => {
@@ -384,10 +386,113 @@ describe('GrantHolder: acting within a grant offline (v1.6.0)', () => {
     expect((await x.holder.act(x.rotate(), action)).path).toBe('grant');
   });
 
+  it('refuses a use without a resource under an empty prefix (1.9.0), as the NA does', async () => {
+    const x = await setup({}, { resourcePrefix: '' });
+    const action = jest.fn(async () => ({}));
+    await expect(x.holder.act({ capability: 'secret.rotate', request_parameters: { lifetime_days: 30 } }, action))
+      .rejects.toMatchObject({ code: 'grant_use_out_of_scope' });
+    expect(action).not.toHaveBeenCalled();
+    expect((await x.holder.act(x.rotate(), action)).path).toBe('grant');
+  });
+
   it('runs two uses one after the other, never at one place in the chain', async () => {
     const x = await setup();
     x.na.offline = true;
     const [a, b] = await Promise.all([x.holder.act(x.rotate(), async () => ({})), x.holder.act(x.rotate(), async () => ({}))]) as GrantUseResult<unknown>[];
     expect([a!.use.use_sequence, b!.use.use_sequence]).toEqual([1, 2]);
+  });
+});
+
+describe('GrantHolder: its state, the time token and kept uses (1.9.0)', () => {
+  it('persists its state after a failed action, whose failure use moved the chain', async () => {
+    const saved: GrantHolderState[] = [];
+    const x = await setup({}, { persist: s => { saved.push(s); } });
+    x.na.offline = true;
+    await expect(x.holder.act(x.rotate(), async () => { throw new Error('vault down'); })).rejects.toThrow('vault down');
+    expect(saved.at(-1)).toMatchObject({ uses: 1 });
+  });
+
+  it('names a failed action when its state cannot be persisted', async () => {
+    const x = await setup({}, { persist: () => { throw new Error('disk full'); } });
+    x.na.offline = true;
+    const err = await x.holder.act(x.rotate(), async () => { throw new Error('vault down'); }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GrantStateNotKeptError);
+    const notKept = err as GrantStateNotKeptError;
+    expect(notKept.actionError).toMatchObject({ message: 'vault down' });
+    expect(notKept.cause).toMatchObject({ message: 'disk full' });
+    expect(notKept.result).toMatchObject({ path: 'grant', use: { outcome: 'failure', use_sequence: 1 }, queued: { state: 'pending' } });
+  });
+
+  it('reports a time token the NA refuses for another reason from sync, and still uploads', async () => {
+    const x = await setup();
+    x.na.offline = true;
+    await x.holder.act(x.rotate(), async () => ({}));
+    x.na.offline = false;
+    x.na.tokenRefusal = 'time_token_request_stale';
+    x.na.tokenRefusalStatus = 422;
+    const synced = await x.holder.sync();
+    expect(synced).toMatchObject({ reachable: true, timeToken: null, unusable: null, timeTokenRefusal: { code: 'time_token_request_stale' } });
+    expect(synced.flushed?.admitted).toHaveLength(1);
+    expect(x.na.uses).toHaveLength(1);
+  });
+
+  it('falls back to the NA when its time token is spent and the NA will not issue another', async () => {
+    const x = await setup({ max_uses_per_time_token: 1 });
+    await x.holder.act(x.rotate(), async () => ({}));
+    x.na.tokenRefusal = 'time_token_request_stale';
+    x.na.tokenRefusalStatus = 422;
+    const action = jest.fn(async () => ({}));
+    // The NA answers the evaluation (here with no route this holder takes): it decides, and nothing runs.
+    const err = await x.holder.act(x.rotate(), action).catch((e: unknown) => e);
+    expect(err).not.toMatchObject({ code: 'time_token_request_stale' });
+    expect(x.na.requests).toContain('POST /admin/boundary/evaluate');
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it('refuses, from the first act on, a grant whose bearer key the NA retired', async () => {
+    const x = await setup({ max_uses_per_time_token: 1 });
+    await x.holder.act(x.rotate(), async () => ({}));
+    x.na.tokenRefusal = 'grant_bearer_key_retired';
+    const action = jest.fn(async () => ({}));
+    for (let i = 0; i < 2; i += 1) {
+      const err = await x.holder.act(x.rotate(), action).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(GrantRefusedError);
+      expect(err).toMatchObject({ code: 'grant_bearer_key_retired' });
+    }
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it('takes up a use the record outbox kept beyond its state, so no place is signed twice', async () => {
+    const x = await setup();
+    x.na.offline = true;
+    const before = x.holder.state;
+    const first = await x.holder.act(x.rotate(), async () => ({})) as GrantUseResult<unknown>;
+    // The process stopped before the state was persisted: it resumes from the state before the use.
+    const resumed = new GrantHolder({
+      clients: x.clients, signer: bearer, naPublicKeys: [NA.pubBase64], state: before, now: () => new Date(START + 700_000),
+    });
+    const second = await resumed.act(x.rotate(), async () => ({})) as GrantUseResult<unknown>;
+    expect(second.use).toMatchObject({ use_sequence: 2, prev_use_digest: grantUseDigest(first.use) });
+    // So does a time token request: it names the latest use kept.
+    x.na.offline = false;
+    const again = new GrantHolder({
+      clients: x.clients, signer: bearer, naPublicKeys: [NA.pubBase64], state: before, now: () => new Date(START + 700_000),
+    });
+    expect(await again.refreshTimeToken()).toMatchObject({ use_sequence: 2, use_head_digest: grantUseDigest(second.use) });
+    expect(again.state).toMatchObject({ uses: 2, head_digest: grantUseDigest(second.use), head_executed_at: second.use.executed_at });
+  });
+
+  it('takes up no use of another grant', async () => {
+    const x = await setup();
+    x.na.offline = true;
+    const before = x.holder.state;
+    const first = await x.holder.act(x.rotate(), async () => ({})) as GrantUseResult<unknown>;
+    const [entry] = await x.recordOutbox.list();
+    await x.recordOutbox.update({ ...entry!, record: { ...first.use, grant_id: 'grant-2' } });
+    const resumed = new GrantHolder({
+      clients: x.clients, signer: bearer, naPublicKeys: [NA.pubBase64], state: before, now: () => new Date(START + 700_000),
+    });
+    const next = await resumed.act(x.rotate(), async () => ({})) as GrantUseResult<unknown>;
+    expect(next.use.use_sequence).toBe(1);
   });
 });

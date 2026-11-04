@@ -2489,7 +2489,9 @@ export class GrantsClient {
 
 // @public
 export class GrantStateNotKeptError<T = unknown> extends GenesisMeshError {
-    constructor(cause: unknown, result: GrantUseResult<T>);
+    constructor(cause: unknown, result: GrantUseResult<T>, actionError?: unknown | undefined);
+    // (undocumented)
+    readonly actionError?: unknown | undefined;
     // (undocumented)
     readonly result: GrantUseResult<T>;
 }
@@ -2537,6 +2539,7 @@ export interface GrantSyncResult {
     flushed: RecordFlushResult | null;
     reachable: boolean;
     timeToken: TimeToken | null;
+    timeTokenRefusal: GenesisMeshError | null;
     unusable: string | null;
 }
 
