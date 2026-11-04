@@ -255,6 +255,18 @@ describe('exports, packs and reports holding grants (v1.6.0)', () => {
     expect(cited.grants).toBeUndefined();
   });
 
+  it('names a use without a resource outside an empty prefix (1.9.0), as the reference does', () => {
+    const payload = { ...events[1]!.payload } as Record<string, unknown>;
+    delete payload['resource_id'];
+    delete payload['resource_action'];
+    const changed = [events[0]!, { ...events[1]!, payload } as EvidenceEvent, ...events.slice(2)];
+    const keys = options.executorKeys.map(k => ({ ...k, resource_prefix: '' }));
+    const outside = verifyEvidenceEvents(changed, { ...options, executorKeys: keys });
+    expect(outside.failures).toContainEqual(expect.objectContaining({ store_sequence: 2, reason: 'grant_use_out_of_scope' }));
+    // With its resource, the empty prefix covers it.
+    expect(verifyEvidenceEvents(events, { ...options, executorKeys: keys }).failures).toEqual([]);
+  });
+
   it('checks a use cited outside the run for its time token only', () => {
     const other = parseExportLines(vectors.find(v => v.id === 'export-time-token-not-the-nas')!.input['lines'] as string);
     const result = verifyEvidenceEvents([], { ...options, prior: other });

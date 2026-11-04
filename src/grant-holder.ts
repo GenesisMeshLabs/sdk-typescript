@@ -32,8 +32,16 @@
  * naming the capability: an NA that answers decides (a DENY is never broken
  * through), and one that cannot be reached (network error, timeout, `5xx`,
  * `429`) leaves the change to run under break-glass, recorded and judged
- * after the fact. Any other refusal throws `GrantRefusedError` and runs
- * nothing.
+ * after the fact. Any other error of the governed action (a refused
+ * evaluation, a decision that fails verification) is thrown as it is, and
+ * nothing runs. So it is when the uses of the time token are spent and the NA
+ * will not issue another for a reason other than the grant's end, such as a
+ * clock more than 300 seconds off its own (`time_token_request_stale`): the
+ * NA then decides.
+ *
+ * On its first change the holder takes up the latest use of its grant the
+ * record outbox holds beyond its state (kept before the process stopped, the
+ * state unpersisted), so no place in the chain is signed twice.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -181,9 +189,13 @@ export class GrantUnusableError extends GenesisMeshError {
   }
 }
 
-/** The action ran and its use is kept, but the holder's state could not be persisted. `result` is the outcome. */
+/**
+ * The action ran and its use is kept, but the holder's state could not be
+ * persisted. `result` is the outcome; when the action itself failed (1.9.0),
+ * `actionError` is its error and `result.use` its failure use.
+ */
 export class GrantStateNotKeptError<T = unknown> extends GenesisMeshError {
-  constructor(cause: unknown, readonly result: GrantUseResult<T>) {
+  constructor(cause: unknown, readonly result: GrantUseResult<T>, readonly actionError?: unknown) {
     super(`the use is kept in the record outbox; the holder state was not persisted: ${String(cause)}`,
       'grant_state_not_kept', 0);
     this.name = 'GrantStateNotKeptError';
@@ -199,6 +211,12 @@ export interface GrantSyncResult {
   timeToken: TimeToken | null;
   /** The NA's refusal of a time token, when it refused (`grant_expired`, `grant_revoked`, ...). */
   unusable: string | null;
+  /**
+   * 1.9.0: the NA's refusal of a time token for another reason, such as
+   * `time_token_request_stale` (this clock is more than 300 seconds off the
+   * NA's); the upload still ran. Null otherwise.
+   */
+  timeTokenRefusal: GenesisMeshError | null;
   /** The record outbox flush, when it ran. */
   flushed: RecordFlushResult | null;
 }
@@ -229,6 +247,7 @@ export class GrantHolder {
   private readonly recorder: ExecutionRecorder;
   private queue: Promise<unknown> = Promise.resolve();
   private bearerChecked = false;
+  private adopted = false;
 
   constructor(options: GrantHolderOptions) {
     const state = options.state ? cloneJson(options.state) : options.grant && options.timeToken ? {
@@ -278,6 +297,29 @@ export class GrantHolder {
 
   private async persist(): Promise<void> {
     if (this.persistState) await this.persistState(this.state);
+  }
+
+  /**
+   * Once: take up the latest use of this grant the record outbox holds beyond
+   * the state, kept before the process stopped with the state unpersisted, so
+   * the next use takes the place after it.
+   */
+  private async adoptKeptUses(): Promise<void> {
+    if (this.adopted) return;
+    const grantId = this.current.grant.grant_id;
+    let latest: GrantExecutionEvidence | null = null;
+    for (const entry of await this.clients.evidenceStore.recordOutbox!.list()) {
+      const use = entry.record as GrantExecutionEvidence;
+      if (entry.kind === 'grant_execution' && use.grant_id === grantId && Number.isSafeInteger(use.use_sequence)
+        && use.use_sequence > (latest?.use_sequence ?? this.current.uses)) latest = use;
+    }
+    if (latest !== null) {
+      Object.assign(this.current, {
+        uses: latest.use_sequence, head_digest: grantUseDigest(latest), head_executed_at: latest.executed_at,
+      });
+      await this.persist();
+    }
+    this.adopted = true;
   }
 
   /** A time token is the NA's, for this grant, and no newer than the holder's chain. */
@@ -359,6 +401,7 @@ export class GrantHolder {
   }
 
   private async refresh(): Promise<TimeToken> {
+    await this.adoptKeptUses();
     const { grant, uses, head_digest: head } = this.current;
     let token: TimeToken;
     try {
@@ -385,12 +428,15 @@ export class GrantHolder {
 
   /**
    * On reconnect: read the revocation feed, ask for a fresh time token, and
-   * upload the record outbox (the grant's uses in order, with the other
-   * records). Steps the NA does not answer are skipped, not thrown
-   * (`reachable: false`); other errors are thrown.
+   * upload the record outbox (the grant's uses in their chain's order, with
+   * the other records). Steps the NA does not answer are skipped, not thrown
+   * (`reachable: false`). A time token the NA refuses is reported (`unusable`
+   * when the grant has ended, 1.9.0: `timeTokenRefusal` otherwise, such as a
+   * clock more than 300 seconds off the NA's) and the upload still runs;
+   * other errors are thrown.
    */
   async sync(options: { ignoreBackoff?: boolean } = {}): Promise<GrantSyncResult> {
-    const result: GrantSyncResult = { reachable: true, timeToken: null, unusable: null, flushed: null };
+    const result: GrantSyncResult = { reachable: true, timeToken: null, unusable: null, timeTokenRefusal: null, flushed: null };
     const unreachable = (err: unknown) => {
       if (evaluationFailure(err) === null) throw err;
       result.reachable = false;
@@ -405,7 +451,9 @@ export class GrantHolder {
         result.timeToken = await this.refreshTimeToken();
       } catch (err) {
         if (err instanceof GenesisMeshError && err.status === 409 && ENDED.has(err.code)) result.unusable = err.code;
-        else unreachable(err);
+        else if (err instanceof GenesisMeshError && evaluationFailure(err) === null && err.status >= 400 && err.status < 500) {
+          result.timeTokenRefusal = err;
+        } else unreachable(err);
       }
     }
     if (result.reachable) {
@@ -426,6 +474,7 @@ export class GrantHolder {
   }
 
   private async actNow<T>(params: GrantActParams, action: GrantAction<T>): Promise<GrantActResult<T>> {
+    await this.adoptKeptUses();
     const state = this.current;
     const grant = state.grant;
     if ((params.resource_id === undefined) !== (params.resource_action === undefined)) {
@@ -435,7 +484,8 @@ export class GrantHolder {
     // Refused before anything runs: the NA would refuse such a use and never store it.
     const secret = metadataProblem({ request_parameters: parameters });
     if (secret !== null) throw new GrantRefusedError(secret, 'grant_use_secret_material');
-    if (this.resourcePrefix !== null && !(params.resource_id ?? '').startsWith(this.resourcePrefix)) {
+    // A use without a resource is outside any prefix, the empty one included (unlike execution evidence).
+    if (this.resourcePrefix !== null && (params.resource_id === undefined || !params.resource_id.startsWith(this.resourcePrefix))) {
       throw new GrantRefusedError(`the bearer key covers only resources starting with ${this.resourcePrefix}`,
         'grant_use_out_of_scope');
     }
@@ -486,10 +536,19 @@ export class GrantHolder {
     try {
       report = (await action({ path: 'grant', grant, use_sequence: sequence })) ?? {};
     } catch (err) {
+      let failure: GrantExecutionEvidence;
+      let kept: { submission?: RecordSubmission; queued?: RecordOutboxEntry };
       try {
-        await this.keep(await sign({ outcome_detail: 'action failed' }, 'failure'));
+        failure = await sign({ outcome_detail: 'action failed' }, 'failure');
+        kept = await this.keep(failure);
       } catch (recordError) {
         throw new GovernedActionError(err, recordError);
+      }
+      // 1.9.0: the failure use moved the chain; the state is persisted as after any use.
+      try {
+        await this.persist();
+      } catch (persistError) {
+        throw new GrantStateNotKeptError<T>(persistError, { path: 'grant', use: failure, ...kept }, err);
       }
       throw err;
     }
@@ -561,7 +620,13 @@ export class GrantHolder {
       return null;
     } catch (err) {
       if (evaluationFailure(err) !== null) return 'grant_time_token_exhausted';
-      if (err instanceof GenesisMeshError && GRANT_FALLBACK_CODES.has(err.code)) return err.code as GrantUnusableCode;
+      if (!(err instanceof GenesisMeshError) || err instanceof GrantRefusedError) throw err;
+      if (GRANT_FALLBACK_CODES.has(err.code)) return err.code as GrantUnusableCode;
+      // 1.9.0: the grant ended for a reason no fallback covers (a retired bearer key), as on later calls.
+      if (ENDED.has(err.code)) throw new GrantRefusedError(`the NA answered ${err.code} for this grant`, err.code);
+      // The NA answered but will not issue a token now (such as a clock more than 300 seconds off its own,
+      // time_token_request_stale): the change goes to it, which decides.
+      if (err.status >= 400 && err.status < 500) return 'grant_time_token_exhausted';
       throw err;
     }
   }

@@ -1282,7 +1282,8 @@ function checkGrantUseEntry(
     fail(seq, 'grant_bearer_mismatch', use.use_id);
   }
   const prefix = signer?.resource_prefix ?? null;
-  if (prefix !== null && !(use.resource_id ?? '').startsWith(prefix)) {
+  // 1.9.0: a use without a resource is outside any prefix, the empty one included, as the reference judges it.
+  if (prefix !== null && (typeof use.resource_id !== 'string' || !use.resource_id.startsWith(prefix))) {
     fail(seq, 'grant_use_out_of_scope', `signing key covers only resources starting with ${prefix}`);
   }
   if (held !== undefined && use.grant_digest !== held.digest) fail(seq, 'grant_mismatch', use.grant_id);
