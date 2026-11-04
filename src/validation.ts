@@ -363,3 +363,11 @@ export function checkRange(name: string, value: number | undefined, min: number,
     throw new RangeError(`${name} must be an integer from ${min}${max === undefined ? '' : ` to ${max}`}`);
   }
 }
+
+/**
+ * A time with the digits past the sixth of its fraction dropped, as Python
+ * reads one (1.9.0): .NET's round-trip format writes seven.
+ */
+export function sixDigits(value: string): string {
+  return value.replace(/(\.\d{6})\d+/, '$1');
+}

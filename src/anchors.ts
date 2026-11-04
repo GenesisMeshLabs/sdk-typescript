@@ -155,7 +155,9 @@ export function startingCheckpoint(events: readonly EvidenceEvent[], first: Evid
  * first entry continues from; otherwise `export_not_linked_to_anchors`) and at
  * its end (`export_ends_before_anchor` for an anchor after its last entry);
  * inside it, each anchor names its entry's digest (`anchor_mismatch`,
- * `anchor_entry_missing`).
+ * `anchor_entry_missing`). 1.9.0: an anchor that is not well formed (as
+ * `parseAnchors` reads one) throws, so a hand-built one never counts as
+ * matched.
  */
 export function checkEventsAgainstAnchors(
   events: readonly EvidenceEvent[],
@@ -163,6 +165,7 @@ export function checkEventsAgainstAnchors(
   result: EvidenceStoreVerification,
   options: CheckAnchorsOptions = {},
 ): void {
+  parseAnchors(anchors);
   const fail = (seq: number | null, reason: string, detail = '') => {
     result.verified = false;
     result.failures.push({ store_sequence: seq, reason, detail });

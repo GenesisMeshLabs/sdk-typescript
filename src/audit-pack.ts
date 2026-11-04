@@ -1210,8 +1210,11 @@ export function parseRfc3339(value: string): string {
   const date = new Date(0);
   date.setUTCFullYear(year, month - 1, day);
   date.setUTCHours(Number(h), Number(mi), Number(s), 0);
+  const utc = new Date(date.getTime() - offsetMinutes * 60_000);
+  // 1.9.0: a time outside the years 1 to 9999 once in UTC is refused (the reference cannot convert it).
+  if (utc.getUTCFullYear() < 1 || utc.getUTCFullYear() > 9999) throw new Error('not an RFC 3339 date-time');
   const micro = Number((fraction ?? '.0').slice(1, 7).padEnd(6, '0'));
-  return isoMicros((date.getTime() - offsetMinutes * 60_000) * 1000 + micro);
+  return isoMicros(utc.getTime() * 1000 + micro);
 }
 
 /** Python's `csv.field_size_limit()`: the longest field it reads, in code points. */

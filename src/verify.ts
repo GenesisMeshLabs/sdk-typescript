@@ -1,4 +1,5 @@
 import {
+  sixDigits,
   timestamp,
   validArchive,
   validBreakGlass,
@@ -417,13 +418,14 @@ export function keyPlacementProblem(key: ExecutorKeyInfo, storeSequence: number,
   const registeredAt = key.registered_at_time ?? null;
   if (registeredSequence === null && registeredAt === null) return null;
   const at = micros(recordedAt);
+  // 1.9.0: a placement time is read as the references read it, a fraction past six digits cut to microseconds.
   const registered = (registeredSequence !== null && registeredSequence < storeSequence)
-    || (registeredAt !== null && micros(registeredAt) <= at);
+    || (registeredAt !== null && micros(sixDigits(registeredAt)) <= at);
   if (!registered) return 'evidence_unknown_executor';
   const retiredSequence = key.retired_sequence ?? null;
   const retiredAt = key.retired_at_time ?? null;
   const retired = (retiredSequence !== null && retiredSequence < storeSequence)
-    || (retiredAt !== null && micros(retiredAt) <= at);
+    || (retiredAt !== null && micros(sixDigits(retiredAt)) <= at);
   return retired ? 'evidence_executor_key_retired' : null;
 }
 

@@ -198,6 +198,22 @@ describe('the signed records (v1.6.0)', () => {
     expect(useProblem({ ...use, time_token: early }, { ...check, grant: null })).toBeNull();
   });
 
+  it('throws for a time the caller gives that it cannot read, which would skip its rule (1.9.0)', async () => {
+    const { grant, use } = await world();
+    const check = {
+      grant, previous: null, admitted: 0, tokenHead: null, tokenKeys: [NA.pubBase64], revokedAt: null, recordedAt: at(300),
+    };
+    expect(() => useProblem(use, { ...check, revokedAt: 'yesterday' })).toThrow('check.revokedAt is not a timestamp');
+    expect(() => useProblem(use, { ...check, recordedAt: 'soon' })).toThrow('check.recordedAt is not a timestamp');
+    expect(() => useProblem(use, { ...check, tokenHead: { digest: 'd', executed_at: 'x' } })).toThrow('check.tokenHead.executed_at');
+    const previous = { executed_at: at(10), time_token_issued_at: at(0) };
+    expect(() => useProblem(use, { ...check, previous: { ...previous, executed_at: 'x' } })).toThrow('check.previous.executed_at');
+    expect(() => useProblem(use, { ...check, previous: { ...previous, time_token_issued_at: 'x' } }))
+      .toThrow('check.previous.time_token_issued_at');
+    // Seven fraction digits, as .NET's round-trip format writes them, are read to the microsecond.
+    expect(useProblem(use, { ...check, revokedAt: at(300).replace('Z', '.0000009Z') })).toMatchObject({ code: 'grant_revoked' });
+  });
+
   it('continues a chain from its head, admitted or quarantined, and refuses a use_id that is not a UUID', async () => {
     const { use } = await world();
     expect(continuesChain(use, { use_sequence: 0, digest: null })).toBe(true);
