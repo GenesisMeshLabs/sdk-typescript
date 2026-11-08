@@ -52,3 +52,40 @@ describe('expected attestation and subject IDs (1.9.2)', () => {
     }
   });
 });
+
+/**
+ * 1.10.0: the binding names the operator key that asked (`requester_key_id`).
+ * bd-008 names `b-ops`; bd-003 is a 1.9.x decision without the field.
+ */
+describe('expected requester key ID (1.10.0)', () => {
+  const { decision, options } = vector('bd-008');
+
+  it('reads the requester under the signature', () => {
+    expect(decision.attestation_binding?.requester_key_id).toBe('b-ops');
+    expect(verifyBoundaryDecision(decision, options).reason).toBe('authorized');
+    const edited = parseJson(JSON.stringify(decision)) as BoundaryDecision;
+    edited.attestation_binding!.requester_key_id = 'c-ops';
+    expect(verifyBoundaryDecision(edited, options).reason).toBe('invalid_signature');
+  });
+
+  it.each([
+    ['the key that asked', { expectedRequesterKeyId: 'b-ops' }, true, 'authorized'],
+    ['another key', { expectedRequesterKeyId: 'c-ops' }, false, 'attestation_binding_mismatch'],
+    ['subject matches, requester does not', { expectedSubjectId: SUBJECT, expectedRequesterKeyId: 'c-ops' }, false,
+      'attestation_binding_mismatch'],
+  ] as const)('%s', (_name, expected, accepted, reason) => {
+    const r = verifyBoundaryDecision(decision, { ...options, ...expected });
+    expect({ accepted: r.accepted, reason: r.reason }).toEqual({ accepted, reason });
+  });
+
+  it('a decision without the field fails only when a requester is expected', () => {
+    const old = vector('bd-003');
+    expect(old.decision.attestation_binding?.requester_key_id).toBeUndefined();
+    expect(verifyBoundaryDecision(old.decision, old.options).reason).toBe('authorized');
+    const r = verifyBoundaryDecision(old.decision, { ...old.options, expectedRequesterKeyId: 'b-ops' });
+    expect({ accepted: r.accepted, reason: r.reason }).toEqual({ accepted: false, reason: 'attestation_binding_missing' });
+    const unbound = vector('bd-001');
+    expect(verifyBoundaryDecision(unbound.decision, { ...unbound.options, expectedRequesterKeyId: 'b-ops' }).reason)
+      .toBe('attestation_binding_missing');
+  });
+});

@@ -130,6 +130,11 @@ export interface AttestationBinding {
   issuer_sovereign_id: string | null;
   attestation_digest: string | null;
   revocation_seq_checked: number;
+  /**
+   * 1.10.0: the operator key that asked for the decision, under its signature.
+   * Absent on decisions of a 1.9.x NA and on bases no operator key asked for.
+   */
+  requester_key_id?: string;
 }
 
 /** Signed BoundaryEngine output. `policy_binding` / `attestation_binding` are absent on older decisions. */
