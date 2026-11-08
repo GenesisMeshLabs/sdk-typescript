@@ -11,7 +11,7 @@ import {
   MemoryOutbox, MetadataRefusedError, executionDigest, ObservationRecorder,
   cancelByRotatingForward, urgentAction, reviewApprovalProblem, verifyReviewRecord, verifyRemediationRecord,
   auditPackFiles, verifyAuditPack, packReasons, verifyStoreAnchors, checkEventsAgainstAnchors, verifyArchiveRecord,
-  FileRecordOutbox, GrantHolder, verifyCapabilityGrant, verifyTimeToken, verifyGrantUse,
+  FileRecordOutbox, GrantHolder, verifyCapabilityGrant, verifyTimeToken, verifyGrantUse, publicKeyFromSeed,
 } from '../src/index.js';
 import type {
   BoundaryPolicy, BoundaryPolicyIntent, BreakGlassResult, EvidenceEvent, GovernedActionParams, RecordOutboxEntry,
@@ -52,6 +52,8 @@ suite('SDK against a live Python Network Authority', () => {
     grants?: boolean; control?: boolean;
   };
   let naPublicKey: string;
+  // 1.9.2: the NA decides under an attestation only for the key it binds, so each binds the operator key.
+  const operatorKey = () => publicKeyFromSeed(config.signingKeyBase64);
   let diagnostics = '';
   beforeAll(async () => {
     if (process.env.GM_E2E_BASE_URL) {
@@ -94,7 +96,7 @@ suite('SDK against a live Python Network Authority', () => {
     const executor = generateTestKeyPair();
     const executorId = `executor-${id}`;
     const recorder = new ExecutionRecorder({ executorSovereignId: executorId, signer: seedSigner(executor.seedBase64, executorId) });
-    const attestation = await gm.attestation.issue({ subject_id: vendor, roles: ['role:client'],
+    const attestation = await gm.attestation.issue({ subject_id: vendor, subject_public_key: operatorKey(), roles: ['role:client'],
       claims: { capabilities: ['sp-secret.create', 'sp-secret.rotate', 'sp-secret.revoke'], apps: [`app-${id}`], note: 'Zoë 😀', '\uE000': 1, '😀': 2 } });
     expect(verifyAttestationSignature(attestation, [naPublicKey])).toBe(true);
     expect((await gm.attestation.get(attestation.attestation_id)).status).toBe('active');
@@ -189,7 +191,7 @@ suite('SDK against a live Python Network Authority', () => {
 
   it('keeps evidence in the outbox while the NA is unreachable and admits it in order afterwards (1.2.0)', async () => {
     const id = randomUUID();
-    const attestation = await gm.attestation.issue({ subject_id: id, roles: ['role:client'], claims: { capabilities: ['sdk.outbox'] } });
+    const attestation = await gm.attestation.issue({ subject_id: id, subject_public_key: operatorKey(), roles: ['role:client'], claims: { capabilities: ['sdk.outbox'] } });
     const executor = generateTestKeyPair();
     const recorder = new ExecutionRecorder({ executorSovereignId: id, signer: seedSigner(executor.seedBase64, id) });
     await gm.evidenceStore.registerExecutorKey({ key_id: id, public_key: executor.pubBase64, executor_sovereign_id: id });
@@ -231,7 +233,7 @@ suite('SDK against a live Python Network Authority', () => {
     const id = randomUUID();
     const capability = `sdk.oob.${id}`;
     const resource = `kv:oob-${id}/secret`;
-    const attestation = await gm.attestation.issue({ subject_id: id, roles: ['role:client'], claims: { capabilities: [capability] } });
+    const attestation = await gm.attestation.issue({ subject_id: id, subject_public_key: operatorKey(), roles: ['role:client'], claims: { capabilities: [capability] } });
     const policy = await gm.policy.publish({
       policy_id: `oob-${id}`, valid_from: new Date(Date.now() - 60_000).toISOString(),
       valid_until: new Date(Date.now() + 3600_000).toISOString(), selector: { capabilities: [capability] },
@@ -316,7 +318,7 @@ suite('SDK against a live Python Network Authority', () => {
     const id = randomUUID();
     const capability = `sdk.rem.${id}`;
     const emergency = `${capability}.emergency`;
-    const attestation = await gm.attestation.issue({ subject_id: id, roles: ['role:client'], claims: { capabilities: [capability, emergency] } });
+    const attestation = await gm.attestation.issue({ subject_id: id, subject_public_key: operatorKey(), roles: ['role:client'], claims: { capabilities: [capability, emergency] } });
     const window = { valid_from: new Date(Date.now() - 60_000).toISOString(), valid_until: new Date(Date.now() + 3600_000).toISOString() };
     const ordinary = await gm.policy.publish({
       policy_id: `rem-${id}`, ...window, selector: { capabilities: [capability] },
@@ -496,7 +498,7 @@ suite('SDK against a live Python Network Authority', () => {
 
   it('supports observe/enforce, rollback, failure evidence, chain conflicts and retired keys', async () => {
     const id = randomUUID();
-    const attestation = await gm.attestation.issue({ subject_id: id, roles: ['role:client'], claims: { capabilities: ['sdk.run'] } });
+    const attestation = await gm.attestation.issue({ subject_id: id, subject_public_key: operatorKey(), roles: ['role:client'], claims: { capabilities: ['sdk.run'] } });
     const intent: BoundaryPolicyIntent = { policy_id: id, valid_from: new Date(Date.now() - 60_000).toISOString(), valid_until: new Date(Date.now() + 3600_000).toISOString(),
       selector: { requester_sovereign_ids: [id] }, gates: [{ gate_id: 'owner', gate_type: 'required_parameter.v1', mode: 'observe', order: 0, config: { path: 'attributes.owner' } }] };
     const first = await gm.policy.publish(intent); await gm.policy.activate(id, first.version);
@@ -537,7 +539,7 @@ suite('SDK against a live Python Network Authority', () => {
 
     // Records signed by the NA verify with the key valid at their time.
     const id = randomUUID();
-    const attestation = await gm.attestation.issue({ subject_id: id, roles: ['role:client'], claims: { capabilities: ['sdk.audit'] } });
+    const attestation = await gm.attestation.issue({ subject_id: id, subject_public_key: operatorKey(), roles: ['role:client'], claims: { capabilities: ['sdk.audit'] } });
     expect(verifyAttestationSignature(attestation, history)).toBe(true);
     const decision = (await gm.boundary.evaluate({ attestation_id: attestation.attestation_id, requested_capability: 'sdk.audit' })).decision;
     expect(verifyBoundaryDecision(decision, { operatorPublicKeys: history, atRecordTime: true }).accepted).toBe(true);
@@ -608,7 +610,7 @@ suite('SDK against a live Python Network Authority', () => {
     const capability = `sdk.grant.${id}`;
     const resource = `kv:grant-${id}/api-key`;
     const window = { valid_from: new Date(Date.now() - 60_000).toISOString(), valid_until: new Date(Date.now() + 3600_000).toISOString() };
-    const attestation = await gm.attestation.issue({ subject_id: `vendor-${id}`, roles: ['role:client'], claims: { capabilities: [capability] } });
+    const attestation = await gm.attestation.issue({ subject_id: `vendor-${id}`, subject_public_key: operatorKey(), roles: ['role:client'], claims: { capabilities: [capability] } });
     const intent: BoundaryPolicyIntent = {
       policy_id: `grant-${id}`, ...window, selector: { capabilities: [capability] },
       gates: [{ gate_id: 'lifetime', gate_type: 'max_value.v1', order: 0, config: { path: 'request_parameters.lifetime_days', max: 90 } }],

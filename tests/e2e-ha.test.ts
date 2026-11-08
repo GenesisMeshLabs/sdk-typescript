@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createInterface, type Interface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import {
-  GenesisMeshClient, ExecutionRecorder, seedSigner, governedAction, verifyEvidenceEvents,
+  GenesisMeshClient, ExecutionRecorder, seedSigner, governedAction, verifyEvidenceEvents, publicKeyFromSeed,
 } from '../src/index.js';
 import type { BoundaryPolicy, MembershipAttestation } from '../src/index.js';
 import { generateTestKeyPair } from './helpers.js';
@@ -81,7 +81,9 @@ suite('SDK against a two-instance HA Network Authority', () => {
     const recorder = new ExecutionRecorder({ executorSovereignId: `ctrl-${id}`, signer: seedSigner(executor.seedBase64, `ctrl-${id}`) });
     await lb.evidenceStore.registerExecutorKey({ key_id: `ctrl-${id}`, public_key: executor.pubBase64, executor_sovereign_id: `ctrl-${id}` });
     const attestation: MembershipAttestation = await lb.attestation.issue({
-      subject_id: `vendor-${id}`, roles: ['role:client'], claims: { capabilities: ['secret.rotate'], apps: ['billing'] },
+      // 1.9.2: the NA decides under an attestation only for the key it binds.
+      subject_id: `vendor-${id}`, subject_public_key: publicKeyFromSeed(info.operatorSeed),
+      roles: ['role:client'], claims: { capabilities: ['secret.rotate'], apps: ['billing'] },
     });
     const policy: BoundaryPolicy = await lb.policy.publish({
       policy_id: `ha-${id}`, valid_from: new Date(Date.now() - 60_000).toISOString(),
