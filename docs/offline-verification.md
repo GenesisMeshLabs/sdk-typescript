@@ -5,6 +5,22 @@ attestation bindings. Supply `now` only for historical audits. An accepted DENY
 has `accepted: true` and `authorized: false`; acceptance means the artifact
 verified, not that execution is allowed.
 
+From 1.9.2 a relying party that does not hold the attestation can still check
+that a decision was made for the attestation or subject it expects:
+`expectedAttestationId` and `expectedSubjectId` must equal the decision's
+signed `attestation_binding` (`attestation_binding_mismatch` otherwise, and
+`attestation_binding_missing` for a decision without one). The Network
+Authority makes attestation-basis decisions only for the attestation's subject
+from 1.9.2.
+
+```typescript
+const r = verifyBoundaryDecision(decision, {
+  operatorPublicKeys: [naPublicKey],
+  expectedAttestationId: attestationId,
+  expectedSubjectId: 'vendor-acme',
+});
+```
+
 Signature helpers are available for decisions, attestations, policies,
 justifications, revocation feeds, execution records and retention checkpoints.
 `attestationDigest`, `policyDigest`, `policySetDigest` and `executionDigest`

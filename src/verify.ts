@@ -283,6 +283,15 @@ export interface VerifyDecisionOptions {
   /** The decision must bind this attestation: id, subject, issuer and digest. */
   expectedAttestation?: MembershipAttestation;
   /**
+   * 1.9.2: the decision's attestation binding must name this attestation ID,
+   * for a relying party that knows which attestation it expects but does not
+   * hold it (`attestation_binding_mismatch`; `attestation_binding_missing`
+   * without a binding). The field is signed.
+   */
+  expectedAttestationId?: string;
+  /** 1.9.2: the decision's attestation binding must name this subject ID, as `expectedAttestationId`. */
+  expectedSubjectId?: string;
+  /**
    * v1.5.0: judge the decision as of its own time (`decision_made_at`), not
    * `now`: an archived decision, verified in an audit years later, was valid
    * when it was made and used, and its expiry since says nothing against it.
@@ -354,6 +363,16 @@ export function verifyBoundaryDecision(
       || attestationBinding.subject_id !== expectedAttestation.subject_id
       || attestationBinding.issuer_sovereign_id !== expectedAttestation.issuer_sovereign_id
       || attestationBinding.attestation_digest !== attestationDigest(expectedAttestation)
+    ) {
+      return reject('attestation_binding_mismatch');
+    }
+  }
+  const { expectedAttestationId, expectedSubjectId } = options;
+  if (expectedAttestationId !== undefined || expectedSubjectId !== undefined) {
+    if (!attestationBinding) return reject('attestation_binding_missing');
+    if (
+      (expectedAttestationId !== undefined && attestationBinding.attestation_id !== expectedAttestationId)
+      || (expectedSubjectId !== undefined && attestationBinding.subject_id !== expectedSubjectId)
     ) {
       return reject('attestation_binding_mismatch');
     }
