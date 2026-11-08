@@ -5253,7 +5253,9 @@ export interface VerifyDataUsageParams {
 export interface VerifyDecisionOptions {
     atRecordTime?: boolean;
     expectedAttestation?: MembershipAttestation;
+    expectedAttestationId?: string;
     expectedPolicies?: readonly BoundaryPolicy[];
+    expectedSubjectId?: string;
     freshnessProofIssuerKeys?: readonly string[];
     // (undocumented)
     now?: Date;
