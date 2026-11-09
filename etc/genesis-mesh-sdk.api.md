@@ -360,6 +360,7 @@ export class AttestationClient {
     constructor(http: HttpTransport);
     get(attestationId: string): Promise<AttestationRecord>;
     getPolicy(): Promise<RecognitionPolicy>;
+    getStatus(attestationId: string): Promise<AttestationStatusRecord>;
     issue(params: IssueAttestationParams): Promise<MembershipAttestation>;
     list(params?: ListAttestationsParams): Promise<AttestationList>;
     revocationFeed(issuerSovereignId?: string): Promise<SovereignRevocationFeed>;
@@ -383,8 +384,7 @@ export interface AttestationList {
 
 // @public
 export interface AttestationRecord {
-    attestation?: MembershipAttestation;
-    attestation_id?: string;
+    attestation: MembershipAttestation;
     reissued_from?: string | null;
     // (undocumented)
     revocation_reason: string | null;
@@ -409,6 +409,20 @@ export const ATTESTATIONS_FILE = "trust/attestations.jsonl";
 
 // @public (undocumented)
 export type AttestationStatus = 'active' | 'suspended' | 'revoked';
+
+// @public
+export interface AttestationStatusRecord {
+    // (undocumented)
+    attestation_id: string;
+    reissued_from: string | null;
+    // (undocumented)
+    revocation_reason: string | null;
+    // (undocumented)
+    revoked_at: string | null;
+    // (undocumented)
+    status: AttestationStatus;
+    superseded_by: string | null;
+}
 
 // @public (undocumented)
 export interface AttestationVerification {

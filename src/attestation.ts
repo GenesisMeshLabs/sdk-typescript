@@ -2,6 +2,7 @@ import type { HttpTransport } from './client.js';
 import type {
   AttestationList,
   AttestationRecord,
+  AttestationStatusRecord,
   AttestationRevocation,
   AttestationStatus,
   AttestationVerification,
@@ -67,18 +68,25 @@ export class AttestationClient {
 
   /**
    * A stored attestation with its current status.
-   * A client with a signing key signs the request and gets the record with the
-   * signed `attestation` (an NA 1.10.0 answers a standard-tier key only for an
-   * attestation whose subject it is, and 404 otherwise). Without one, an NA
-   * 1.10.0 answers with the status and lineage only: `attestation_id`,
-   * `status`, `revoked_at`, `revocation_reason`, `reissued_from` and
-   * `superseded_by`, without `attestation`.
+   * A client with a signing key signs the request (1.10.0), as `list` does; an
+   * NA 1.10.0 answers a standard-tier key only for an attestation whose subject
+   * it is, and 404 otherwise. An NA 1.10.0 gives the attestation to a signed
+   * read only: without a signing key, use `getStatus`.
    */
   get(attestationId: string): Promise<AttestationRecord> {
     const path = `/attestations/${encodeURIComponent(attestationId)}`;
     return this.http.canSign
       ? this.http.adminGet<AttestationRecord>(path)
       : this.http.publicGet<AttestationRecord>(path);
+  }
+
+  /**
+   * An attestation's status and lineage, unsigned (1.10.0): `attestation_id`,
+   * `status`, `revoked_at`, `revocation_reason`, `reissued_from` and
+   * `superseded_by`. An NA before 1.10.0 also returns the attestation.
+   */
+  getStatus(attestationId: string): Promise<AttestationStatusRecord> {
+    return this.http.publicGet<AttestationStatusRecord>(`/attestations/${encodeURIComponent(attestationId)}`);
   }
 
   /**
