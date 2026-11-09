@@ -18,7 +18,7 @@ interface Route {
 }
 const intent = { policy_id: 'p', valid_from: v.policy.valid_from, valid_until: v.policy.valid_until };
 const routes: Route[] = [
-  { name: 'attestation get', method: 'GET', path: '/attestations/a%2Fb', admin: false, idempotent: true, call: gm => gm.attestation.get('a/b') },
+  { name: 'attestation get', method: 'GET', path: '/attestations/a%2Fb', admin: true, idempotent: true, call: gm => gm.attestation.get('a/b') },
   { name: 'attestation list', method: 'GET', path: '/attestations?subject_id=Zo%C3%AB&status=active', admin: true, idempotent: true, call: gm => gm.attestation.list({ subject_id: 'Zoë', status: 'active' }) },
   { name: 'attestation verify', method: 'POST', path: '/attestations/verify', admin: false, idempotent: true, body: { attestation: v.attestation }, call: gm => gm.attestation.verify({ attestation: v.attestation }) },
   { name: 'recognition policy', method: 'GET', path: '/recognition-policy', admin: false, idempotent: true, call: gm => gm.attestation.getPolicy() },
@@ -131,6 +131,21 @@ describe('attestation list without a signing key', () => {
     expect(await gm.attestation.list({ status: 'active' })).toEqual({ count: 3 });
     const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('http://localhost/attestations?status=active');
+    expect((init.headers as Record<string, string>)['X-Admin-Signature']).toBeUndefined();
+  });
+});
+
+describe('attestation get without a signing key', () => {
+  it('asks unsigned and gets the status (1.10.0)', async () => {
+    const body = { attestation_id: 'a', status: 'revoked', revoked_at: '2026-11-09T00:00:00Z', revocation_reason: 'ended',
+      reissued_from: null, superseded_by: null };
+    const fetch = mockFetch({ status: 200, body });
+    const gm = new GenesisMeshClient({ baseUrl: 'http://localhost/', fetch: fetch as unknown as typeof globalThis.fetch });
+    const record = await gm.attestation.get('a');
+    expect(record).toEqual(body);
+    expect(record.attestation).toBeUndefined();
+    const [url, init] = fetch.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('http://localhost/attestations/a');
     expect((init.headers as Record<string, string>)['X-Admin-Signature']).toBeUndefined();
   });
 });

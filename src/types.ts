@@ -477,7 +477,13 @@ export interface MembershipAttestation {
 
 /** A stored attestation with its current status (the signed body keeps the issue-time status). */
 export interface AttestationRecord {
-  attestation: MembershipAttestation;
+  /**
+   * The attestation as the NA signed it. An NA 1.10.0 leaves it out of an
+   * unsigned read, which gives the status and lineage only.
+   */
+  attestation?: MembershipAttestation;
+  /** 1.10.0: the attestation's ID in an unsigned read, which has no `attestation`. */
+  attestation_id?: string;
   status: AttestationStatus;
   revoked_at: string | null;
   revocation_reason: string | null;

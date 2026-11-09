@@ -65,9 +65,20 @@ export class AttestationClient {
     return this.http.adminPost<RecognitionPolicyRecord>('/admin/recognition-policy', params);
   }
 
-  /** A stored attestation with its current status (unauthenticated). */
+  /**
+   * A stored attestation with its current status.
+   * A client with a signing key signs the request and gets the record with the
+   * signed `attestation` (an NA 1.10.0 answers a standard-tier key only for an
+   * attestation whose subject it is, and 404 otherwise). Without one, an NA
+   * 1.10.0 answers with the status and lineage only: `attestation_id`,
+   * `status`, `revoked_at`, `revocation_reason`, `reissued_from` and
+   * `superseded_by`, without `attestation`.
+   */
   get(attestationId: string): Promise<AttestationRecord> {
-    return this.http.publicGet<AttestationRecord>(`/attestations/${encodeURIComponent(attestationId)}`);
+    const path = `/attestations/${encodeURIComponent(attestationId)}`;
+    return this.http.canSign
+      ? this.http.adminGet<AttestationRecord>(path)
+      : this.http.publicGet<AttestationRecord>(path);
   }
 
   /**

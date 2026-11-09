@@ -383,8 +383,8 @@ export interface AttestationList {
 
 // @public
 export interface AttestationRecord {
-    // (undocumented)
-    attestation: MembershipAttestation;
+    attestation?: MembershipAttestation;
+    attestation_id?: string;
     reissued_from?: string | null;
     // (undocumented)
     revocation_reason: string | null;
