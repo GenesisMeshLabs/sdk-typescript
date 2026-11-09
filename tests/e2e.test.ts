@@ -99,7 +99,12 @@ suite('SDK against a live Python Network Authority', () => {
     const attestation = await gm.attestation.issue({ subject_id: vendor, subject_public_key: operatorKey(), roles: ['role:client'],
       claims: { capabilities: ['sp-secret.create', 'sp-secret.rotate', 'sp-secret.revoke'], apps: [`app-${id}`], note: 'Zoë 😀', '\uE000': 1, '😀': 2 } });
     expect(verifyAttestationSignature(attestation, [naPublicKey])).toBe(true);
-    expect((await gm.attestation.get(attestation.attestation_id)).status).toBe('active');
+    const signedRead = await gm.attestation.get(attestation.attestation_id);
+    expect([signedRead.status, signedRead.attestation.attestation_id]).toEqual(['active', attestation.attestation_id]);
+    // 1.10.0: an unsigned read gives the status and lineage, not the attestation (a 1.9.x NA gives both).
+    const unsignedRead = await new GenesisMeshClient({ baseUrl: config.baseUrl }).attestation.getStatus(attestation.attestation_id);
+    expect(unsignedRead.status).toBe('active');
+    if (unsignedRead.attestation_id !== undefined) expect('attestation' in unsignedRead).toBe(false);
     expect((await gm.attestation.list({ subject_id: vendor })).count).toBe(1);
     await gm.attestation.savePolicy({ recognition_policy: {
       local_sovereign_id: attestation.issuer_sovereign_id,

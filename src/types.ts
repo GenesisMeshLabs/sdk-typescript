@@ -477,6 +477,10 @@ export interface MembershipAttestation {
 
 /** A stored attestation with its current status (the signed body keeps the issue-time status). */
 export interface AttestationRecord {
+  /**
+   * The attestation as the NA signed it. An NA 1.10.0 gives it to a signed
+   * read only: read the status without a signing key with `getStatus`.
+   */
   attestation: MembershipAttestation;
   status: AttestationStatus;
   revoked_at: string | null;
@@ -485,6 +489,21 @@ export interface AttestationRecord {
   reissued_from?: string | null;
   /** 1.8.0: the copy that re-issued this one, or null. */
   superseded_by?: string | null;
+}
+
+/**
+ * An attestation's status and lineage, without the attestation (1.10.0): what
+ * an NA 1.10.0 answers to an unsigned `GET /attestations/<id>`.
+ */
+export interface AttestationStatusRecord {
+  attestation_id: string;
+  status: AttestationStatus;
+  revoked_at: string | null;
+  revocation_reason: string | null;
+  /** The copy this one re-issues under the NA's current key, or null. */
+  reissued_from: string | null;
+  /** The copy that re-issued this one, or null. */
+  superseded_by: string | null;
 }
 
 export interface AttestationList {
