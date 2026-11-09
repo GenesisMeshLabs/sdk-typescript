@@ -345,6 +345,7 @@ export interface AttestationBinding {
     attestation_id: string;
     // (undocumented)
     issuer_sovereign_id: string | null;
+    requester_key_id?: string;
     // (undocumented)
     revocation_seq_checked: number;
     // (undocumented)
@@ -5255,6 +5256,7 @@ export interface VerifyDecisionOptions {
     expectedAttestation?: MembershipAttestation;
     expectedAttestationId?: string;
     expectedPolicies?: readonly BoundaryPolicy[];
+    expectedRequesterKeyId?: string;
     expectedSubjectId?: string;
     freshnessProofIssuerKeys?: readonly string[];
     // (undocumented)

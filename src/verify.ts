@@ -292,6 +292,13 @@ export interface VerifyDecisionOptions {
   /** 1.9.2: the decision's attestation binding must name this subject ID, as `expectedAttestationId`. */
   expectedSubjectId?: string;
   /**
+   * 1.10.0: the decision must name this operator key as the one that asked
+   * (`attestation_binding.requester_key_id`; `attestation_binding_mismatch`).
+   * A decision without the field, such as one of a 1.9.x NA, verifies as
+   * before and fails (`attestation_binding_missing`) only when this is given.
+   */
+  expectedRequesterKeyId?: string;
+  /**
    * v1.5.0: judge the decision as of its own time (`decision_made_at`), not
    * `now`: an archived decision, verified in an audit years later, was valid
    * when it was made and used, and its expiry since says nothing against it.
@@ -376,6 +383,13 @@ export function verifyBoundaryDecision(
     ) {
       return reject('attestation_binding_mismatch');
     }
+  }
+  const { expectedRequesterKeyId } = options;
+  if (expectedRequesterKeyId !== undefined) {
+    if (!attestationBinding || attestationBinding.requester_key_id === undefined || attestationBinding.requester_key_id === null) {
+      return reject('attestation_binding_missing');
+    }
+    if (attestationBinding.requester_key_id !== expectedRequesterKeyId) return reject('attestation_binding_mismatch');
   }
 
   if (!decision.authorized) {

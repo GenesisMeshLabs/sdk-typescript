@@ -21,6 +21,21 @@ const r = verifyBoundaryDecision(decision, {
 });
 ```
 
+From 1.10.0 the binding also names the operator key that asked for the
+decision, `requester_key_id`, under its signature. `expectedRequesterKeyId`
+accepts only a decision that this key asked for (`attestation_binding_mismatch`
+otherwise); a decision without the field, such as one made by a 1.9.x Network
+Authority, fails (`attestation_binding_missing`) only when you pass it. A 1.9.x
+SDK refuses a 1.10.0 decision carrying the field as `unknown_field`: verify
+1.10.0 decisions with this SDK.
+
+```typescript
+const r = verifyBoundaryDecision(decision, {
+  operatorPublicKeys: [naPublicKey],
+  expectedRequesterKeyId: 'vendor-acme-ops',
+});
+```
+
 Signature helpers are available for decisions, attestations, policies,
 justifications, revocation feeds, execution records and retention checkpoints.
 `attestationDigest`, `policyDigest`, `policySetDigest` and `executionDigest`

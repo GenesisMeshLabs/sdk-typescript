@@ -125,9 +125,13 @@ export const CANONICAL_REGISTRY: CanonicalRegistry = freeze({
         "attestation_digest": null,
         "attestation_id": null,
         "issuer_sovereign_id": null,
+        "requester_key_id": null,
         "revocation_seq_checked": null,
         "subject_id": null
-      }
+      },
+      "omit_when_none": [
+        "requester_key_id"
+      ]
     },
     "AuditPackManifest": {
       "fields": {
