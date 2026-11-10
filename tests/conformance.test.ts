@@ -39,6 +39,7 @@ function outcome(v: Vector): Record<string, unknown> {
         ...(i['expected_policies'] ? { expectedPolicies: i['expected_policies'] as BoundaryPolicy[] } : {}),
         ...(i['expected_attestation'] ? { expectedAttestation: i['expected_attestation'] as MembershipAttestation } : {}),
         ...(i['expected_requester_key_id'] ? { expectedRequesterKeyId: i['expected_requester_key_id'] as string } : {}),
+        ...(i['expected_policy_ids'] ? { expectedPolicyIds: i['expected_policy_ids'] as string[] } : {}),
       });
       return { accepted: r.accepted, reason: r.reason, authorized: r.authorized };
     }

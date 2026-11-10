@@ -90,6 +90,14 @@ export interface ActionReport<T = unknown> {
   outcome_detail?: string | null;
 }
 
+/**
+ * The policies a governed action's decision must rest on (1.10.0): the signed
+ * versions, the policy IDs, or both. See `VerifyDecisionOptions`.
+ */
+export type PolicyExpectations =
+  | { expectedPolicies: readonly BoundaryPolicy[]; expectedPolicyIds?: readonly string[] }
+  | { expectedPolicies?: readonly BoundaryPolicy[]; expectedPolicyIds: readonly string[] };
+
 export type GovernedActionParams = EvaluateParams & {
   /** Resource acted on, e.g. `kv:<vault>/<secret>`. */
   resource_id?: string;
@@ -99,8 +107,13 @@ export type GovernedActionParams = EvaluateParams & {
    * null to assert the resource has no history.
    */
   prior_resource?: PriorResource | null;
-  /** Verify the decision offline before acting (signature, expiry, bindings). */
-  verify: Omit<VerifyDecisionOptions, 'now' | 'expectedPolicies'> & { expectedPolicies: readonly BoundaryPolicy[] };
+  /**
+   * Verify the decision offline before acting (signature, expiry, bindings).
+   * The policies it must rest on are required: the signed versions
+   * (`expectedPolicies`), or since 1.10.0 their IDs at any version the NA
+   * signed (`expectedPolicyIds`), or both.
+   */
+  verify: Omit<VerifyDecisionOptions, 'now' | 'expectedPolicies' | 'expectedPolicyIds'> & PolicyExpectations;
   /**
    * v1.3.0: run the action even when the NA cannot be reached (network error,
    * timeout, `5xx`, `429`), and record it as a break-glass record signed by
@@ -388,7 +401,12 @@ export async function governedAction<T>(
   }
   const decision = evaluation.decision;
   const checkDecision = () => {
-    if (!Array.isArray(verify.expectedPolicies)) throw new DecisionVerificationError('policy_expectations_required');
+    const ids: unknown = verify.expectedPolicyIds;
+    const idsGiven = Array.isArray(ids) && ids.length > 0 && ids.every(id => typeof id === 'string' && id.length > 0);
+    if (ids !== undefined && !idsGiven) throw new DecisionVerificationError('policy_expectations_required');
+    if (!Array.isArray(verify.expectedPolicies) && !idsGiven) {
+      throw new DecisionVerificationError('policy_expectations_required');
+    }
     if (decision.authorized && params.attestation_id !== undefined && !verify.expectedAttestation) {
       throw new DecisionVerificationError('attestation_expectation_required');
     }
@@ -862,6 +880,7 @@ export async function urgentAction<T>(
   // 1.9.0: refused before anything is evaluated.
   if (typeof emergency?.capability !== 'string' || !emergency.capability) throw new Error('the emergency capability is required');
   if (!Array.isArray(emergency.expectedPolicies)) throw new Error('the emergency policies are required');
+  const { expectedPolicyIds: _ordinaryIds, ...ordinaryVerify } = ordinary.verify;
   const parameter = emergency.justificationParameter ?? 'justification';
   const urgent: GovernedActionParams & { breakGlass: BreakGlassOptions } = {
     ...ordinary,
@@ -870,7 +889,8 @@ export async function urgentAction<T>(
       ...ordinary.context,
       request_parameters: { ...ordinary.context?.request_parameters, [parameter]: emergency.justification },
     },
-    verify: { ...ordinary.verify, expectedPolicies: emergency.expectedPolicies },
+    // 1.10.0: the ordinary capability's policy IDs do not govern the emergency capability.
+    verify: { ...ordinaryVerify, expectedPolicies: emergency.expectedPolicies },
     breakGlass: { justification: emergency.justification },
   };
   await checkBreakGlass(clients.evidenceStore, recorder, urgent, urgent.breakGlass);

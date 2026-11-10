@@ -280,6 +280,15 @@ export interface VerifyDecisionOptions {
   now?: Date;
   /** The decision must bind exactly these policy versions, in resolution order. */
   expectedPolicies?: readonly BoundaryPolicy[];
+  /**
+   * 1.10.0: the policies an ALLOW must rest on, by ID, at whatever version the
+   * NA signed. Each must be in the decision's policy binding with at least one
+   * enforce-mode gate of that version evaluated (`policy_binding_mismatch`;
+   * `policy_binding_missing` without a binding), so an ALLOW left by a
+   * deactivated policy or a selector that stopped matching is refused. A DENY
+   * is reported as it is.
+   */
+  expectedPolicyIds?: readonly string[];
   /** The decision must bind this attestation: id, subject, issuer and digest. */
   expectedAttestation?: MembershipAttestation;
   /**
@@ -358,6 +367,17 @@ export function verifyBoundaryDecision(
     const bound = binding.policies.map(a => `${a.policy_id}\u0000${a.version}\u0000${a.policy_digest}`);
     if (expected.join('\n') !== bound.join('\n') || policySetDigest(binding.policies) !== binding.policy_set_digest) {
       return reject('policy_binding_mismatch');
+    }
+  }
+  if (options.expectedPolicyIds && options.expectedPolicyIds.length > 0 && decision.authorized) {
+    if (!binding) return reject('policy_binding_missing');
+    if (policySetDigest(binding.policies) !== binding.policy_set_digest) return reject('policy_binding_mismatch');
+    for (const policyId of options.expectedPolicyIds) {
+      const applied = binding.policies.find(a => a.policy_id === policyId);
+      if (!applied || !binding.gate_evaluations.some(e =>
+        e.policy_id === policyId && e.policy_version === applied.version && e.mode === 'enforce')) {
+        return reject('policy_binding_mismatch');
+      }
     }
   }
 

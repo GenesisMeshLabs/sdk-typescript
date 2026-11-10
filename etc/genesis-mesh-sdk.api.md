@@ -40,6 +40,7 @@ export interface ActivePolicyStatus {
         selector: Required<PolicySelector>;
         policy: BoundaryPolicy;
     }[];
+    coverage?: 'optional' | 'required' | string;
     // (undocumented)
     enforcement: string;
     // (undocumented)
@@ -2180,9 +2181,7 @@ export type GovernedActionParams = EvaluateParams & {
     resource_id?: string;
     resource_action?: ResourceAction;
     prior_resource?: PriorResource | null;
-    verify: Omit<VerifyDecisionOptions, 'now' | 'expectedPolicies'> & {
-        expectedPolicies: readonly BoundaryPolicy[];
-    };
+    verify: Omit<VerifyDecisionOptions, 'now' | 'expectedPolicies' | 'expectedPolicyIds'> & PolicyExpectations;
     breakGlass?: BreakGlassOptions;
 };
 
@@ -2689,6 +2688,7 @@ export class HealthClient {
 export interface HealthStatus {
     // (undocumented)
     boundary_policies: 'healthy' | 'unhealthy' | string;
+    boundary_policy_coverage?: 'optional' | 'required' | string;
     // (undocumented)
     boundary_policy_enforcement: string;
     // (undocumented)
@@ -3539,6 +3539,15 @@ export class PolicyClient {
 
 // @public
 export function policyDigest(policy: BoundaryPolicy): string;
+
+// @public
+export type PolicyExpectations = {
+    expectedPolicies: readonly BoundaryPolicy[];
+    expectedPolicyIds?: readonly string[];
+} | {
+    expectedPolicies?: readonly BoundaryPolicy[];
+    expectedPolicyIds: readonly string[];
+};
 
 // @public (undocumented)
 export interface PolicyGateEvaluation {
@@ -5270,6 +5279,7 @@ export interface VerifyDecisionOptions {
     expectedAttestation?: MembershipAttestation;
     expectedAttestationId?: string;
     expectedPolicies?: readonly BoundaryPolicy[];
+    expectedPolicyIds?: readonly string[];
     expectedRequesterKeyId?: string;
     expectedSubjectId?: string;
     freshnessProofIssuerKeys?: readonly string[];

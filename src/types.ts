@@ -364,6 +364,8 @@ export interface PolicyHistory {
 
 export interface ActivePolicyStatus {
   enforcement: string;
+  /** 1.10.0: `required` when the NA denies a request no policy covers (`BOUNDARY_POLICY_COVERAGE`); absent from an older NA. */
+  coverage?: 'optional' | 'required' | string;
   policy_set_healthy: boolean;
   problems: { policy: string; reason: string }[];
   registry_gate_types: string[];
@@ -1137,6 +1139,8 @@ export interface HealthStatus {
   version: string;
   boundary_policies: 'healthy' | 'unhealthy' | string;
   boundary_policy_enforcement: string;
+  /** 1.10.0: `required` when the NA denies a request no policy covers (`BOUNDARY_POLICY_COVERAGE`); absent from an older NA. */
+  boundary_policy_coverage?: 'optional' | 'required' | string;
   evidence_store: string;
 }
 
