@@ -40,6 +40,7 @@ export interface ActivePolicyStatus {
         selector: Required<PolicySelector>;
         policy: BoundaryPolicy;
     }[];
+    coverage?: 'optional' | 'required' | string;
     // (undocumented)
     enforcement: string;
     // (undocumented)
