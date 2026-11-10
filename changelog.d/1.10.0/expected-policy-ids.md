@@ -12,7 +12,8 @@
   (`policy_expectations_required`). The conformance vectors `bd-011` to
   `bd-017` cover it. A 1.10.0 Network Authority can also deny such requests
   itself (`BOUNDARY_POLICY_COVERAGE=required`); the denial arrives as
-  `unauthorized_policy_resolution_failed`.
+  `unauthorized_policy_resolution_failed`, and `HealthStatus` carries the
+  mode as `boundary_policy_coverage` (absent from an older NA).
 
 ### Upgrading
 

@@ -1137,6 +1137,8 @@ export interface HealthStatus {
   version: string;
   boundary_policies: 'healthy' | 'unhealthy' | string;
   boundary_policy_enforcement: string;
+  /** 1.10.0: `required` when the NA denies a request no policy covers (`BOUNDARY_POLICY_COVERAGE`); absent from an older NA. */
+  boundary_policy_coverage?: 'optional' | 'required' | string;
   evidence_store: string;
 }
 

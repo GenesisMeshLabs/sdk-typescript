@@ -2687,6 +2687,7 @@ export class HealthClient {
 export interface HealthStatus {
     // (undocumented)
     boundary_policies: 'healthy' | 'unhealthy' | string;
+    boundary_policy_coverage?: 'optional' | 'required' | string;
     // (undocumented)
     boundary_policy_enforcement: string;
     // (undocumented)
