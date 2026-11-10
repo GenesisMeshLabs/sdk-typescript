@@ -7,6 +7,61 @@ Versions align with the [Genesis Mesh release sequence](https://github.com/Genes
 
 ---
 
+## [1.10.0] - 2026-11-10
+
+### Added
+
+- **`attestation.getStatus` (1.10.0).** An unsigned read of an attestation's
+  status and lineage: `attestation_id`, `status`, `revoked_at`,
+  `revocation_reason`, `reissued_from` and `superseded_by`, typed as the new
+  `AttestationStatusRecord`. A Network Authority 1.10.0 answers an unsigned
+  `GET /attestations/<id>` with these only, and gives the attestation to a
+  signed read.
+- **Expected policy IDs (1.10.0).** `verifyBoundaryDecision` takes
+  `expectedPolicyIds`: the policies an ALLOW must rest on, at whatever
+  version the NA signed. Each must be in the decision's policy binding with
+  at least one enforce-mode gate of that version evaluated, so an ALLOW left
+  when a policy was deactivated or its selector stopped matching is refused
+  (`policy_binding_mismatch`; `policy_binding_missing` without a binding). A
+  DENY is reported as it is. `governedAction` and `urgentAction` accept the
+  IDs in place of, or with, the signed policies (`PolicyExpectations`); an
+  empty or malformed list is refused before anything is evaluated
+  (`policy_expectations_required`). The conformance vectors `bd-011` to
+  `bd-017` cover it. A 1.10.0 Network Authority can also deny such requests
+  itself (`BOUNDARY_POLICY_COVERAGE=required`); the denial arrives as
+  `unauthorized_policy_resolution_failed`. `HealthStatus` and
+  `ActivePolicyStatus` carry the mode as `boundary_policy_coverage` and
+  `coverage` (absent from an older NA).
+- **The operator key that asked is checked offline (1.10.0).** A Network
+  Authority 1.10.0 names the key that asked for an attestation-basis decision
+  in `attestation_binding.requester_key_id`, under the decision's signature.
+  `AttestationBinding` reads it, and `verifyBoundaryDecision` takes
+  `expectedRequesterKeyId`: a different key fails with
+  `attestation_binding_mismatch`, and a decision without the field (a 1.9.x
+  NA) fails with `attestation_binding_missing` only when it is given. The
+  canonical registry lists the field, omitted when absent, and the conformance
+  vectors `bd-008` to `bd-010` cover it.
+
+### Changed
+
+- **`attestation.get` signs when the client can (1.10.0).** As `list` does,
+  a client with a signing key signs the read and gets the record with the
+  signed `attestation`. An NA 1.10.0 answers a standard-tier key only for an
+  attestation whose subject it is, and with 404 otherwise.
+
+### Upgrading
+
+- **`attestation.get` without a signing key** gets no `attestation` from an
+  NA 1.10.0, though the type still names it. Read the status with
+  `getStatus`, sign the read with an operator key, or keep the attestation
+  from when it was issued.
+- **`GovernedActionParams['verify']` is `PolicyExpectations` now.** Every
+  value that type-checked before still does. Code that reads
+  `params.verify.expectedPolicies` back gets `readonly BoundaryPolicy[] |
+  undefined`, since the IDs may stand in for it.
+- **Upgrade this SDK before, or with, a 1.10.0 Network Authority.** Earlier
+  releases refuse a decision that names its requester as `unknown_field`.
+
 ## [1.9.2] - 2026-11-08
 
 ### Added
