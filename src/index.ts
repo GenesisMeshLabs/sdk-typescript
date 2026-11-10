@@ -334,6 +334,7 @@ export type {
   GateFailure,
   GovernanceClients,
   GovernedActionParams,
+  PolicyExpectations,
   GovernedActionResult,
   BreakGlassOptions,
   BreakGlassResult,

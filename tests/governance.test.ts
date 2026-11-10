@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import {
   GenesisMeshClient, ExecutionRecorder, seedSigner, signCanonical, decisionCanonical, executionDigest, pythonTimestamp,
   governedAction, DecisionVerificationError, GovernedActionError, MetadataRefusedError, EvidenceNotKeptError,
-  summarizeDecision, reconcileResources, parseExportLines, withoutRefusedMetadata,
+  summarizeDecision, reconcileResources, parseExportLines, withoutRefusedMetadata, policySetDigest,
   MemoryOutbox, NetworkError, ConflictError, RateLimitError, ServiceUnavailableError, SecretMaterialError,
   NotFoundError, ValidationError, ForbiddenError, PREDECESSOR_DEAD_LETTERED,
 } from '../src/index.js';
@@ -383,6 +383,63 @@ describe('reconcileResources', () => {
     expect(reconcileResources([{ resource_id: 'deleted', exists: false }], new Map([['deleted', deleted]]))[0].status).toBe('in_sync');
     const custom = { ...state('custom'), last_success_parameters: { revision: 2 } };
     expect(reconcileResources([{ resource_id: 'custom', exists: true, version: '3' }], new Map([['custom', custom]]), { versionKey: 'revision' })[0].status).toBe('drifted');
+  });
+});
+
+describe('governedAction with expected policy IDs (1.10.0)', () => {
+  const byIds = (x: Awaited<ReturnType<typeof setup>>, ids: unknown) => {
+    const { expectedPolicies: _pinned, ...verify } = x.params.verify;
+    return { ...x.params, verify: { ...verify, expectedPolicyIds: ids } } as unknown as GovernedActionParams;
+  };
+  /** The ALLOW an NA signs once the policy is deactivated: no policy, no gate evaluations. */
+  async function uncovered(x: Awaited<ReturnType<typeof setup>>) {
+    const binding = x.evaluation.decision.policy_binding!;
+    binding.policies = [];
+    binding.gate_evaluations = [];
+    binding.registry_gate_types = [];
+    binding.policy_set_digest = policySetDigest([]);
+    x.evaluation.decision.gate_results = x.evaluation.decision.gate_results.filter(g => !g.gate_name.includes('/'));
+    x.evaluation.decision.signature = await signCanonical(decisionCanonical(x.evaluation.decision), signer);
+  }
+
+  it('acts on an ALLOW under the named policy without pinning its version', async () => {
+    const x = await setup();
+    const result = await governedAction(x.gm, x.recorder, byIds(x, ['vendor-sp-secret']), x.action);
+    expect(result).toMatchObject({ authorized: true });
+    expect(x.action).toHaveBeenCalledTimes(1);
+  });
+  it('refuses an ALLOW once the policy no longer applies', async () => {
+    const x = await setup();
+    await uncovered(x);
+    await expect(governedAction(x.gm, x.recorder, byIds(x, ['vendor-sp-secret']), x.action))
+      .rejects.toMatchObject({ code: 'policy_binding_mismatch' });
+    expect(x.action).not.toHaveBeenCalled();
+    expect(x.submit).not.toHaveBeenCalled();
+  });
+  it('refuses an ALLOW under another policy', async () => {
+    const x = await setup();
+    await expect(governedAction(x.gm, x.recorder, byIds(x, ['internal-credentials']), x.action))
+      .rejects.toMatchObject({ code: 'policy_binding_mismatch' });
+    expect(x.action).not.toHaveBeenCalled();
+  });
+  it('returns a DENY as a verified DENY', async () => {
+    const x = await setup(true);
+    expect(await governedAction(x.gm, x.recorder, byIds(x, ['internal-credentials']), x.action))
+      .toMatchObject({ authorized: false });
+    expect(x.action).not.toHaveBeenCalled();
+  });
+  it.each([[[]], [['']], [[7]], ['vendor-sp-secret']])('refuses %j as the only expectation before evaluating', async ids => {
+    const x = await setup();
+    await expect(governedAction(x.gm, x.recorder, byIds(x, ids), x.action))
+      .rejects.toMatchObject({ code: 'policy_expectations_required' });
+    expect(x.action).not.toHaveBeenCalled();
+  });
+  it('checks both the signed versions and the IDs when both are given', async () => {
+    const x = await setup();
+    x.params.verify = { ...x.params.verify, expectedPolicyIds: ['internal-credentials'] };
+    await expect(governedAction(x.gm, x.recorder, x.params, x.action))
+      .rejects.toMatchObject({ code: 'policy_binding_mismatch' });
+    expect(x.action).not.toHaveBeenCalled();
   });
 });
 
